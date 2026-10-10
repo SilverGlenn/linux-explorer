@@ -14,7 +14,7 @@ constexpr int kDialogWidth = 340;
 constexpr int kIconSize = 64;
 
 // The version this box reports, which is not the one the command line prints
-const char *const kVersion = "Version: 1.1";
+const char *const kVersion = "Version: 1.2";
 
 } // namespace
 

@@ -131,7 +131,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setOrganizationName("explorer");
     app.setApplicationName("explorer");
-    app.setApplicationVersion(QStringLiteral("1.1"));
+    app.setApplicationVersion(QStringLiteral("1.2"));
 
     // A decoration theme's exception list matches on the window class, which on
     // Wayland is the app id and is read from this as each window is created.
