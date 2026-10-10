@@ -196,6 +196,9 @@ private:
     void showMountDialog();
     void showMapDriveDialog();
 
+    // For the Computer view's command bar, saying so when nothing is installed
+    void openSystemApplication(const QStringList &desktopNames);
+
     void showOptionsDialog();
 
     void showAboutDialog();
@@ -360,6 +363,8 @@ private:
     QAction *m_actOpenAsAdmin = nullptr;
     QAction *m_actUseCheckBoxes = nullptr;
 
+    // Hidden rather than disabled in Computer, where Win7 has no such buttons
+    QWidget *m_newButton = nullptr;
     QWidget *m_newFolderButton = nullptr;
 
     QActionGroup *m_viewModeGroup = nullptr;

@@ -20,6 +20,7 @@
 #include <KJobTrackerInterface>
 #include <KMessageBox>
 #include <KPropertiesDialog>
+#include <KService>
 #include <KTerminalLauncherJob>
 #include <KUrlMimeData>
 
@@ -605,6 +606,21 @@ void openTerminalAt(const QUrl &directory, QWidget *window)
     job->setWorkingDirectory(directory.toLocalFile());
     job->setUiDelegate(delegateFor(window));
     job->start();
+}
+
+bool openApplication(const QStringList &desktopNames, QWidget *window)
+{
+    for (const QString &name : desktopNames) {
+        const KService::Ptr service = KService::serviceByDesktopName(name);
+        if (!service)
+            continue;
+
+        auto *job = new KIO::ApplicationLauncherJob(service);
+        job->setUiDelegate(delegateFor(window));
+        job->start();
+        return true;
+    }
+    return false;
 }
 
 void showProperties(const QList<KFileItem> &items, QWidget *window)

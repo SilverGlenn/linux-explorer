@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 #include <KFileItem>
@@ -82,6 +83,10 @@ void openItem(const KFileItem &item, QWidget *window);
 void openWith(const QList<KFileItem> &items, QWidget *window);
 
 void openTerminalAt(const QUrl &directory, QWidget *window);
+
+// Starts the first of the desktop files given that is installed, by name and
+// without the .desktop ending, and false when none of them are
+bool openApplication(const QStringList &desktopNames, QWidget *window);
 
 void showProperties(const QList<KFileItem> &items, QWidget *window);
 

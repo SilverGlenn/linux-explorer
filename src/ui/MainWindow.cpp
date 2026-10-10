@@ -1487,6 +1487,7 @@ QWidget *MainWindow::buildCommandBar()
     });
     newButton->setMenu(newMenu);
     m_commandLayout->addWidget(newButton);
+    m_newButton = newButton;
 
     // Win7 puts this on the bar itself rather than only inside the New menu
     auto *newFolder = new Aero::MenuButton(tr("New folder"));
@@ -1555,8 +1556,30 @@ void MainWindow::rebuildContextualCommands()
         m_contextualCommands.append(button);
     };
 
-    if (isComputerView())
+    if (isComputerView()) {
+        // Win7's own row, each opening the KDE app that does the same job
+        addButton(tr("System properties"), nullptr, [this] {
+            openSystemApplication({QStringLiteral("org.kde.kinfocenter")});
+        });
+
+        // Whichever software manager is installed, Discover first as the one
+        // that ships with Plasma
+        addButton(tr("Uninstall or change a program"), nullptr, [this] {
+            openSystemApplication({QStringLiteral("org.kde.discover"),
+                                   QStringLiteral("org.manjaro.pamac.manager"),
+                                   QStringLiteral("octopi")});
+        });
+
+        addButton(tr("Map network drive"), nullptr,
+                  [this] { m_actMapDrive->trigger(); });
+        addButton(tr("Mount drives"), nullptr,
+                  [this] { m_actConnectDrives->trigger(); });
+
+        addButton(tr("Open Control Panel"), nullptr, [this] {
+            openSystemApplication({QStringLiteral("systemsettings")});
+        });
         return;
+    }
 
     const QList<KFileItem> selection = selectedItems();
     if (isTrashView()) {
@@ -2159,6 +2182,12 @@ void MainWindow::showMountDialog()
     dialog.exec();
 }
 
+void MainWindow::openSystemApplication(const QStringList &desktopNames)
+{
+    if (!FileOps::openApplication(desktopNames, this))
+        m_details->showMessage(tr("The program for this is not installed."));
+}
+
 void MainWindow::showAboutDialog()
 {
     AboutDialog dialog(this);
@@ -2403,8 +2432,12 @@ void MainWindow::updateActionStates()
     // Win7 renames a whole selection at once, so this is not a single item
     m_actRename->setEnabled(any && !trash && !readOnly);
     m_newFileMenu->setEnabled(!computer && !trash && !readOnly);
-    if (m_newFolderButton)
-        m_newFolderButton->setEnabled(!computer && !trash && !readOnly);
+    if (m_newButton)
+        m_newButton->setVisible(!computer);
+    if (m_newFolderButton) {
+        m_newFolderButton->setVisible(!computer);
+        m_newFolderButton->setEnabled(!trash && !readOnly);
+    }
     m_actProperties->setEnabled(!computer);
     m_actRestore->setEnabled(any && trash);
     m_actRestore->setVisible(trash);
