@@ -949,6 +949,12 @@ void FileView::applyMode()
         break;
     }
 
+    // QListView treats a Static movement as "nothing may be dragged", so both
+    // setMovement() and setViewMode() switch dragging off along with the
+    // viewport's drops, undoing the DragDrop mode set when the view was built
+    m_icons->setDragEnabled(true);
+    m_icons->viewport()->setAcceptDrops(true);
+
     repositionMessage();
 }
 
