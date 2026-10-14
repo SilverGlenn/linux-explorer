@@ -24,6 +24,7 @@ public:
     {
         m_full = text;
         setToolTip(text);
+        setAccessibleName(text);
         elide();
     }
 protected:
@@ -45,6 +46,7 @@ QLabel *detailLabel(const char *name, const char *color, QWidget *parent)
     label->setStyleSheet(QStringLiteral("color: %1; background: transparent;").arg(QLatin1String(color)));
     label->setMinimumWidth(0);
     label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    label->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
     return label;
 }
 
@@ -88,8 +90,9 @@ DetailsPane::DetailsPane(QWidget *parent) : QWidget(parent)
     text->addWidget(m_topDetail, 0, 1);
     text->addWidget(m_bottomDetail, 1, 1, 1, 2);
     text->addWidget(m_createdDetail, 0, 2);
-    text->setColumnMinimumWidth(0, 100);
-    text->setColumnStretch(0, 0);
+    // Keep the name/type column flexible: a fixed 100 px first column made
+    // selected folder names disappear even when the pane had ample room.
+    text->setColumnStretch(0, 2);
     text->setColumnStretch(1, 1);
     text->setColumnStretch(2, 1);
     row->addLayout(text, 1);
@@ -100,6 +103,7 @@ void DetailsPane::setContent(const QIcon &icon, const QString &primary,
                              const QString &bottomDetail, const QString &createdDetail)
 {
     m_icon->setPixmap(icon.pixmap(48, 48));
+    m_icon->setAccessibleName(primary);
     static_cast<ElidingLabel *>(m_primary)->setFullText(primary);
     static_cast<ElidingLabel *>(m_secondary)->setFullText(secondary);
     static_cast<ElidingLabel *>(m_topDetail)->setFullText(topDetail);
