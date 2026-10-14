@@ -6,6 +6,8 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <KFileItem>
+#include <KIO/UDSEntry>
+#include <sys/stat.h>
 
 class DetailsPaneTest : public QObject {
     Q_OBJECT
@@ -38,6 +40,41 @@ private slots:
         QCoreApplication::processEvents();
         QCOMPARE(name->toolTip(), QStringLiteral("A directory name long enough to need room"));
         QCOMPARE(type->toolTip(), QStringLiteral("File folder"));
+    }
+
+    void creationTimeIsShownForFilesButNeverDirectories()
+    {
+        const QDateTime modified = QDateTime::fromSecsSinceEpoch(1700000000);
+        const QDateTime created = QDateTime::fromSecsSinceEpoch(1600000000);
+        const QUrl parentUrl(QStringLiteral("test:/parent"));
+        auto makeItem = [&](const QString &name, mode_t type, const QString &mime) {
+            KIO::UDSEntry entry;
+            entry.fastInsert(KIO::UDSEntry::UDS_NAME, name);
+            entry.fastInsert(KIO::UDSEntry::UDS_FILE_TYPE, type);
+            entry.fastInsert(KIO::UDSEntry::UDS_ACCESS, 0755);
+            entry.fastInsert(KIO::UDSEntry::UDS_MODIFICATION_TIME, modified.toSecsSinceEpoch());
+            entry.fastInsert(KIO::UDSEntry::UDS_CREATION_TIME, created.toSecsSinceEpoch());
+            if (!mime.isEmpty())
+                entry.fastInsert(KIO::UDSEntry::UDS_MIME_TYPE, mime);
+            return KFileItem(entry, parentUrl, false, true);
+        };
+        const KFileItem directory = makeItem(QStringLiteral("folder"), S_IFDIR, QString());
+        const KFileItem file = makeItem(QStringLiteral("note.txt"), S_IFREG, QStringLiteral("text/plain"));
+        QVERIFY(directory.isDir());
+        QVERIFY(file.isFile());
+        QCOMPARE(directory.time(KFileItem::ModificationTime), modified);
+        QCOMPARE(directory.time(KFileItem::CreationTime), created);
+        QCOMPARE(file.time(KFileItem::CreationTime), created);
+
+        DetailsPane pane;
+        auto *createdField = pane.findChild<QLabel *>(QStringLiteral("detailsCreatedMetadata"));
+        QVERIFY(createdField);
+        pane.showSelection({directory});
+        QCOMPARE(createdField->toolTip(), QString());
+        QVERIFY(createdField->isHidden());
+        pane.showSelection({file});
+        QVERIFY(createdField->toolTip().startsWith(QStringLiteral("Date created:")));
+        QVERIFY(!createdField->isHidden());
     }
 
     void multipleSelectionAndComputerContextsRemainInformative()

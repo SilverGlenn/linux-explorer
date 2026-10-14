@@ -167,7 +167,7 @@ void DetailsPane::showSelection(const QList<KFileItem> &items)
             ? tr("Date modified: %1").arg(QLocale().toString(modified, QLocale::ShortFormat)) : QString();
         // Use KIO's supplied birth time; statting a mounted path here could
         // block selection changes on a slow device.
-        const QDateTime created = item.time(KFileItem::CreationTime);
+        const QDateTime created = item.isDir() ? QDateTime() : item.time(KFileItem::CreationTime);
         const QString createdText = created.isValid()
             ? tr("Date created: %1").arg(QLocale().toString(created, QLocale::ShortFormat)) : QString();
         setContent(QIcon::fromTheme(item.iconName(), Aero::themeIcon({"folder"})),
