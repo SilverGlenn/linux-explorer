@@ -90,11 +90,11 @@ DetailsPane::DetailsPane(QWidget *parent) : QWidget(parent)
     text->addWidget(m_topDetail, 0, 1);
     text->addWidget(m_bottomDetail, 1, 1, 1, 2);
     text->addWidget(m_createdDetail, 0, 2);
-    // Keep the name/type column flexible: a fixed 100 px first column made
-    // selected folder names disappear even when the pane had ample room.
-    text->setColumnStretch(0, 2);
-    text->setColumnStretch(1, 1);
-    text->setColumnStretch(2, 1);
+    // Give both date columns room for their full values at typical window
+    // widths, while keeping the name/type column expandable for long names.
+    text->setColumnStretch(0, 1);
+    text->setColumnStretch(1, 2);
+    text->setColumnStretch(2, 2);
     row->addLayout(text, 1);
 }
 

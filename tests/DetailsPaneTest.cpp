@@ -35,6 +35,7 @@ private slots:
         QVERIFY(date->toolTip().startsWith(QStringLiteral("Date modified:")));
         QVERIFY(name->width() > 100);
         QCOMPARE(name->geometry().center().y(), date->geometry().center().y());
+        QVERIFY(name->text() != name->toolTip());
 
         pane.resize(260, 54);
         QCoreApplication::processEvents();
@@ -67,14 +68,20 @@ private slots:
         QCOMPARE(file.time(KFileItem::CreationTime), created);
 
         DetailsPane pane;
+        pane.resize(820, 54);
+        pane.show();
         auto *createdField = pane.findChild<QLabel *>(QStringLiteral("detailsCreatedMetadata"));
-        QVERIFY(createdField);
+        auto *modifiedField = pane.findChild<QLabel *>(QStringLiteral("detailsTopMetadata"));
+        QVERIFY(createdField && modifiedField);
         pane.showSelection({directory});
         QCOMPARE(createdField->toolTip(), QString());
         QVERIFY(createdField->isHidden());
         pane.showSelection({file});
+        QCoreApplication::processEvents();
         QVERIFY(createdField->toolTip().startsWith(QStringLiteral("Date created:")));
         QVERIFY(!createdField->isHidden());
+        QCOMPARE(modifiedField->text(), modifiedField->toolTip());
+        QCOMPARE(createdField->text(), createdField->toolTip());
     }
 
     void multipleSelectionAndComputerContextsRemainInformative()
