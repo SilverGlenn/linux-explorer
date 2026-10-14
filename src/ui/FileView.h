@@ -11,6 +11,7 @@
 
 class DirectoryModel;
 class GroupingProxy;
+class KAbstractViewAdapter;
 class KFilePreviewGenerator;
 class QAbstractItemView;
 class QDropEvent;
@@ -19,6 +20,7 @@ class QLabel;
 class QListView;
 class QModelIndex;
 class QStackedWidget;
+class QTimer;
 class QTreeView;
 
 // The file list, in all eight of Win7's view modes
@@ -106,6 +108,7 @@ Q_SIGNALS:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
     // Catches clicks on a selection tick box before they become an ordinary
     // selection, the box being drawn by the delegate rather than a model role
@@ -123,6 +126,7 @@ private:
     // Shared, so the two views cannot answer different gestures
     void bindActivation(QAbstractItemView *view);
     void applyMode();
+    void rebuildPreviews();
     void configureColumns();
     void showHeaderMenu(const QPoint &pos);
     void repositionMessage();
@@ -146,9 +150,10 @@ private:
     QListView *m_icons = nullptr;
     QLabel *m_message = nullptr;
 
-    // One per view, a generator attaching to a single view
-    KFilePreviewGenerator *m_detailsPreviews = nullptr;
-    KFilePreviewGenerator *m_iconPreviews = nullptr;
+    // Only one generator may observe decoration writes on the shared model.
+    KAbstractViewAdapter *m_previewAdapter = nullptr;
+    KFilePreviewGenerator *m_previews = nullptr;
+    QTimer *m_previewUpdateTimer = nullptr;
 
     Settings::ViewMode m_mode = Settings::ViewMode::Details;
     bool m_checkBoxes = false;

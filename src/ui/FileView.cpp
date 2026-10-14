@@ -5,6 +5,7 @@
 #include "aero/listview.h"
 #include "aero/palette.h"
 
+#include <KAbstractViewAdapter>
 #include <KFilePreviewGenerator>
 #include <KIO/Global>
 
@@ -31,6 +32,8 @@
 #include <QMimeData>
 #include <QPainter>
 #include <QRubberBand>
+#include <QScrollBar>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QTreeView>
@@ -120,6 +123,41 @@ QModelIndex mapToFlat(const QModelIndex &index, const QAbstractItemModel *flat)
     }
     return walk;
 }
+
+// KIO accepts only one proxy above KDirModel. Keep its indices on the flat
+// listing, mapping them through the grouping proxy only for Details geometry.
+class GroupedPreviewAdapter : public KAbstractViewAdapter {
+public:
+    GroupedPreviewAdapter(QTreeView *view, GroupingProxy *grouping, QObject *parent)
+        : KAbstractViewAdapter(parent), m_view(view), m_grouping(grouping)
+    {
+    }
+
+    QAbstractItemModel *model() const override { return m_grouping->sourceModel(); }
+    QSize iconSize() const override { return m_view->iconSize(); }
+    QPalette palette() const override { return m_view->palette(); }
+    QRect visibleArea() const override { return m_view->viewport()->rect(); }
+
+    QRect visualRect(const QModelIndex &index) const override
+    {
+        const QModelIndex mapped = m_grouping->mapFromSource(index);
+        return mapped.isValid() ? m_view->visualRect(mapped) : QRect();
+    }
+
+    void connect(Signal signal, QObject *receiver, const char *slot) override
+    {
+        if (signal == ScrollBarValueChanged) {
+            QObject::connect(m_view->horizontalScrollBar(), SIGNAL(valueChanged(int)), receiver, slot);
+            QObject::connect(m_view->verticalScrollBar(), SIGNAL(valueChanged(int)), receiver, slot);
+        }
+        // Qt has no iconSizeChanged signal; FileView queues explicit updates
+        // after configuring the complete mode, rather than halfway through it.
+    }
+
+private:
+    QTreeView *m_view;
+    GroupingProxy *m_grouping;
+};
 
 // What a tile or content row draws beside an item's icon
 struct ItemText {
@@ -620,6 +658,21 @@ FileView::FileView(DirectoryModel *model, QWidget *parent)
     m_details->viewport()->installEventFilter(this);
     m_icons->viewport()->installEventFilter(this);
 
+    m_previewUpdateTimer = new QTimer(this);
+    m_previewUpdateTimer->setSingleShot(true);
+    connect(m_previewUpdateTimer, &QTimer::timeout, this, [this] {
+        // Visibility and mode changes can precede Qt's queued item layout.
+        // KIO needs real geometry to prioritize/poll visible previews.
+        currentView()->doItemsLayout();
+        m_previews->updateIcons();
+    });
+    connect(m_model, &DirectoryModel::loadingStarted, this, [this] {
+        m_previewUpdateTimer->stop();
+        // Destroying the old generator kills its jobs without restarting them
+        // (KIO's cancelPreviews() calls updateIcons() and starts work again).
+        rebuildPreviews();
+    });
+
     m_checkBoxes = Settings::useCheckBoxes();
     applyMode();
 }
@@ -675,11 +728,6 @@ void FileView::buildDetailsView()
                                     onItem);
     });
 
-    // On for the visible view only, both generators running against the same
-    // model, so leaving the hidden one on renders every file twice
-    m_detailsPreviews = new KFilePreviewGenerator(m_details);
-    m_detailsPreviews->setPreviewShown(false);
-
     m_stack->addWidget(m_details);
     configureColumns();
 }
@@ -732,9 +780,6 @@ void FileView::buildIconView()
         Q_EMIT contextMenuRequested(m_icons->viewport()->mapToGlobal(pos),
                                     onItem);
     });
-
-    m_iconPreviews = new KFilePreviewGenerator(m_icons);
-    m_iconPreviews->setPreviewShown(false);
 
     m_stack->addWidget(m_icons);
 }
@@ -867,6 +912,8 @@ void FileView::setGroupColumn(int sourceColumn)
         setViewMode(Settings::ViewMode::Details);
     }
 
+    rebuildPreviews();
+    m_previewUpdateTimer->start();
     Q_EMIT groupColumnChanged(m_grouping->groupColumn());
     Q_EMIT selectionChanged();
 }
@@ -896,15 +943,13 @@ void FileView::applyMode()
     const int iconSize = Settings::iconSizeFor(m_mode);
     const bool details = (m_mode == Settings::ViewMode::Details);
 
-    // Only the view on show generates previews
-    m_detailsPreviews->setPreviewShown(details);
-    m_iconPreviews->setPreviewShown(!details);
-
     if (details) {
         auto *delegate = static_cast<ItemDelegate *>(m_details->itemDelegate());
         delegate->setCheckBoxes(m_checkBoxes, true);
         m_stack->setCurrentWidget(m_details);
         m_details->setIconSize(QSize(iconSize, iconSize));
+        rebuildPreviews();
+        m_previewUpdateTimer->start();
         repositionMessage();
         return;
     }
@@ -985,7 +1030,34 @@ void FileView::applyMode()
     m_icons->setDragEnabled(true);
     m_icons->viewport()->setAcceptDrops(true);
 
+    rebuildPreviews();
+    m_previewUpdateTimer->start();
     repositionMessage();
+}
+
+void FileView::rebuildPreviews()
+{
+    // Disabled generators still observe model changes and can clear another
+    // generator's previews. Delete the previous observer, not just disable it.
+    delete m_previews;
+    delete m_previewAdapter;
+    m_previewAdapter = nullptr;
+    if (currentView() == m_details && grouped()) {
+        m_previewAdapter = new GroupedPreviewAdapter(m_details, m_grouping, this);
+        m_previews = new KFilePreviewGenerator(m_previewAdapter,
+            qobject_cast<QAbstractProxyModel *>(m_model->model()));
+    } else {
+        // The standard adapter also batches QListView layout during updates.
+        m_previews = new KFilePreviewGenerator(currentView());
+    }
+}
+
+void FileView::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // MainWindow can hide this view behind its listing page. Once revealed,
+    // reprioritize using the actual viewport, without waiting for every file.
+    m_previewUpdateTimer->start();
 }
 
 QAbstractItemView *FileView::currentView() const
