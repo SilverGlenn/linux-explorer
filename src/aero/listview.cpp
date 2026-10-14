@@ -1,6 +1,5 @@
 #include "listview.h"
 
-#include "palette.h"
 #include "text.h"
 
 #include <QAbstractItemView>
@@ -31,14 +30,8 @@ void configureListTree(QTreeView *tree)
     tree->header()->setDefaultAlignment(Qt::AlignLeft);
     tree->header()->setStretchLastSection(true);
     setPointSize(tree->header(), 9);
-    // Win7 headers have no dividers and no rule beneath
-    tree->header()->setStyleSheet(
-        QStringLiteral("QHeaderView::section {"
-                       "  background: %1;"
-                       "  border: none;"
-                       "  padding: 4px;"
-                       "  font-size: 9pt;"
-                       "}").arg(QLatin1String(Palette::Surface)));
+    // Keep the platform header's stateful paint (hover, press, sort arrow,
+    // and resize handle) instead of flattening every section to one color.
     // Pinned rather than left to the size hint, which is cached before the app
     // wide stylesheet polishes the widget and comes out twice as tall
     const QFontMetrics metrics(tree->header()->font());

@@ -1,4 +1,5 @@
 #include "NavigationPane.h"
+#include "NavigationItemDelegate.h"
 #include "Branding.h"
 #include "DriveLabel.h"
 #include "aero/icons.h"
@@ -196,6 +197,7 @@ NavigationPane::NavigationPane(QWidget *parent)
     m_tree->setFrameShape(QFrame::NoFrame);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tree->setItemDelegate(new NavigationItemDelegate(m_tree));
     m_tree->setExpandsOnDoubleClick(false);
     Aero::setPointSize(m_tree, 9);
 
