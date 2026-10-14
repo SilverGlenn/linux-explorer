@@ -129,16 +129,16 @@ static QList<QUrl> urlsFrom(const QStringList &arguments)
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
-    app.setOrganizationName("explorer");
-    app.setApplicationName("explorer");
-    app.setApplicationVersion(QStringLiteral("1.2"));
+    app.setOrganizationName("linux-explorer-win7");
+    app.setApplicationName("explorer-win7");
+    app.setApplicationVersion(QStringLiteral("1.2-win7.1"));
 
     // A decoration theme's exception list matches on the window class, which on
     // Wayland is the app id and is read from this as each window is created.
     // The browser windows claim the plain name for themselves, so everything
     // else lands here, dialogs raised by KIO and the desktop included, and an
     // exception written to strip a browser window's caption leaves them alone
-    app.setDesktopFileName(QStringLiteral("explorer-dialog"));
+    app.setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
     // No display name is set, Qt appending one to every title where Explorer's
     // is just the folder name
     app.setWindowIcon(Aero::themeIcon({"system-file-manager", "folder"}));
@@ -154,6 +154,10 @@ int main(int argc, char *argv[]) {
         QStringLiteral("Open each argument's parent folder with the argument "
                        "selected, instead of opening it."));
     parser.addOption(selectOption);
+    QCommandLineOption registerOption(QStringLiteral("register-file-manager"),
+        QStringLiteral("Also claim org.freedesktop.FileManager1 for this session. "
+                       "By default this preview leaves your existing file manager alone."));
+    parser.addOption(registerOption);
     parser.addPositionalArgument(
         QStringLiteral("url"),
         QStringLiteral("Folders to open, or files to reveal with --select."),
@@ -178,7 +182,7 @@ int main(int argc, char *argv[]) {
     // One Explorer per session, so a second launch hands its arguments to the
     // one holding the bus name and gets out of the way
     auto *service = new FileManagerService(&app);
-    if (!service->claim()) {
+    if (!service->claim(parser.isSet(registerOption))) {
         if (FileManagerService::forward(uris, reveal))
             return 0;
         // The running instance did not answer, so open a window here
@@ -204,7 +208,7 @@ int main(int argc, char *argv[]) {
     // A reveal naming only files that no longer exist can get here with no
     // window, which would be a process the user cannot see or quit
     if (MainWindow::openWindowCount() == 0)
-        MainWindow::openWindow(Locations::computer(), {}, startupId);
+        MainWindow::openWindow(Locations::libraries(), {}, startupId);
 
     return app.exec();
 }

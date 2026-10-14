@@ -22,6 +22,16 @@ inline bool isComputer(const QUrl &url)
     return url.scheme() == QLatin1String("computer");
 }
 
+inline QUrl libraries()
+{
+    return QUrl(QStringLiteral("libraries:///"));
+}
+
+inline bool isLibraries(const QUrl &url)
+{
+    return url.scheme() == QLatin1String("libraries");
+}
+
 // A recursive search of a folder, and unlike Computer this is a real KIO
 // location, a worker walking the tree and reporting hits as an ordinary listing
 //

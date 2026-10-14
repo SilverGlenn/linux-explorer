@@ -1,39 +1,37 @@
 #pragma once
 
 #include <QList>
+#include <QPixmap>
 #include <QPointer>
 #include <QWidget>
-
 #include <KFileItem>
 
 class QLabel;
+class QPlainTextEdit;
+class QStackedWidget;
 namespace KIO { class PreviewJob; }
 
-// Win7's preview pane, whose rendering is the desktop's own, so anything it can
-// preview appears here, falling back to the item's icon where it cannot
+// A preview is content, not another metadata card. Plain text is rendered
+// read-only; other formats use KIO's installed thumbnail providers.
 class PreviewPane : public QWidget {
     Q_OBJECT
-
 public:
     explicit PreviewPane(QWidget *parent = nullptr);
     ~PreviewPane() override;
-
-    // Anything but a single item gets a placeholder, as in Windows
     void setItems(const QList<KFileItem> &items);
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void showPlaceholder(const QString &text);
-
-    // Or arrowing through a folder of photos leaves a thumbnailer running per
-    // item passed over
     void cancelPreview();
-
+    void updateImage();
+    QStackedWidget *m_stack = nullptr;
+    QLabel *m_placeholder = nullptr;
     QLabel *m_image = nullptr;
-    QLabel *m_name = nullptr;
-    QLabel *m_detail = nullptr;
-
-    // So a job landing after the selection moved on can be discarded
-    QUrl m_pending;
-
+    QPlainTextEdit *m_text = nullptr;
+    QPixmap m_pixmap;
+    quint64 m_generation = 0;
     QPointer<KIO::PreviewJob> m_job;
 };

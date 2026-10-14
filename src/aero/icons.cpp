@@ -1,5 +1,11 @@
 #include "icons.h"
 
+#include <QFont>
+#include <QLinearGradient>
+#include <QPainter>
+#include <QPixmap>
+#include <functional>
+
 namespace Aero {
 
 namespace {
@@ -10,7 +16,59 @@ QStringList &fallbacks()
     return names;
 }
 
+QIcon toolbarGlyph(const std::function<void(QPainter &)> &paint)
+{
+    QIcon icon;
+    for (int side : {16, 20, 24, 32, 48}) {
+        QPixmap pixmap(side, side);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.scale(side / 16.0, side / 16.0);
+        paint(painter);
+        painter.end();
+        icon.addPixmap(pixmap);
+    }
+    return icon;
+}
 } // namespace
+
+QIcon helpIcon()
+{
+    static const QIcon icon = toolbarGlyph([](QPainter &painter) {
+        QLinearGradient fill(0, 1, 0, 15);
+        fill.setColorAt(0, QColor(QStringLiteral("#B5DEFA")));
+        fill.setColorAt(0.45, QColor(QStringLiteral("#4799D9")));
+        fill.setColorAt(1, QColor(QStringLiteral("#24529A")));
+        painter.setBrush(fill);
+        painter.setPen(QPen(QColor(QStringLiteral("#517AA7")), 1));
+        painter.drawEllipse(QRectF(1, 1, 14, 14));
+        QFont font(QStringLiteral("Sans Serif"));
+        font.setPixelSize(12);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.setPen(Qt::white);
+        painter.drawText(QRectF(1, 0, 14, 16), Qt::AlignCenter, QStringLiteral("?"));
+    });
+    return icon;
+}
+
+QIcon previewPaneIcon()
+{
+    static const QIcon icon = toolbarGlyph([](QPainter &painter) {
+        painter.setBrush(Qt::white);
+        painter.setPen(QPen(QColor(QStringLiteral("#77818D")), 1));
+        painter.drawRect(QRectF(1.5, 2.5, 13, 11));
+        QLinearGradient pane(0, 5, 0, 13);
+        pane.setColorAt(0, QColor(QStringLiteral("#D4EBFF")));
+        pane.setColorAt(1, QColor(QStringLiteral("#75B6E4")));
+        painter.fillRect(QRectF(9, 5, 5, 8), pane);
+        painter.fillRect(QRectF(2, 3, 12, 2), QColor(QStringLiteral("#E2EAF3")));
+        painter.drawLine(QPointF(2, 5.5), QPointF(14, 5.5));
+        painter.drawLine(QPointF(8.5, 5), QPointF(8.5, 13));
+    });
+    return icon;
+}
 
 QIcon tryIconName(const QString &name)
 {

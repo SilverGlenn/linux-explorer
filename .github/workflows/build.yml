@@ -1,27 +1,62 @@
-name: Build
+name: Build and test
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, windows7-fidelity]
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
-  pkgbuild:
-    name: Check PKGBUILD
+  build:
+    name: Qt/KIO regression suite (Arch, x86_64)
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
-      # The PKGBUILD is only exercised at release time otherwise, so a typo
-      # would sit undetected until it broke a publish.
-      - name: Parse PKGBUILD
+      - name: Build dependencies, Explorer, and tests inside Arch
         run: |
-          docker run --rm -v "$PWD/aur:/pkg" -w /pkg archlinux:base-devel bash -c '
-            useradd -m builder
-            chown -R builder /pkg
-            su builder -c "makepkg --printsrcinfo"
+          docker run --rm -v "$PWD:/repo" -w /repo archlinux:base-devel bash -c '
+            set -euo pipefail
+            pacman -Syu --noconfirm --needed \
+              git cmake ninja extra-cmake-modules qt6-base qt6-multimedia \
+              qt6-tools kio kcoreaddons kconfig kwidgetsaddons kwindowsystem \
+              kcompletion solid frameworkintegration dbus
+
+            git clone https://gitgud.io/atmk/libaero-qt.git /tmp/libaero-qt
+            cd /tmp/libaero-qt
+            git submodule init deps/slidingstackedwidget
+            git config submodule.deps/slidingstackedwidget.url \
+              https://github.com/Qt-Widgets/SlidingStackedWidget-1.git
+            git -c protocol.file.allow=always submodule update deps/slidingstackedwidget
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+            cmake --build build -j2
+            cmake --install build
+
+            cd /repo
+            cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+            cmake --build build -j2
+            EXPLORER_SNAPSHOTS=/repo/build/screenshots \
+              dbus-run-session -- ctest --test-dir build --output-on-failure
+            cp build/explorer-win7 build/explorer-win7-x86_64
           '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: explorer-win7-linux-x86_64
+          path: |
+            build/explorer-win7-x86_64
+            LICENSE
+            README.md
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: explorer-win7-test-results
+          path: |
+            build/Testing/Temporary/
+            build/screenshots/

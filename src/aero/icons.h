@@ -20,4 +20,9 @@ QIcon themeIcon(std::initializer_list<const char *> names);
 // Set once at startup, and empty by default, so an unresolvable name yields null
 void setIconFallbacks(const QStringList &names);
 
+// Original, scalable toolbar glyphs. System themes often map these commands
+// to a gear or an add-window icon, which changes the Explorer affordance.
+QIcon helpIcon();
+QIcon previewPaneIcon();
+
 } // namespace Aero

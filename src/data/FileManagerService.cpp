@@ -14,7 +14,7 @@
 namespace {
 
 // Explorer's own name, and whoever holds it is the primary instance
-const QLatin1String kAppService("io.github.actuallyaridan.LinuxExplorer");
+const QLatin1String kAppService("io.github.LinuxExplorer.Win7");
 
 // The shared name and its specified object path, the object being exported
 // once so both names route to it
@@ -51,7 +51,7 @@ QString FileManagerService::startupId()
     return QString::fromLocal8Bit(qgetenv("DESKTOP_STARTUP_ID"));
 }
 
-bool FileManagerService::claim()
+bool FileManagerService::claim(bool registerSharedService)
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
     if (!bus.isConnected())
@@ -71,6 +71,9 @@ bool FileManagerService::claim()
         return false;
 
     bus.registerObject(kObjectPath, this, QDBusConnection::ExportAllSlots);
+
+    if (!registerSharedService)
+        return true;
 
     // Replacement allowed, so another file manager can take it over without a
     // restart, and failure here is ordinary

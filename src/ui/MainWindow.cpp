@@ -8,7 +8,12 @@
 #include "DirectoryModel.h"
 #include "DriveLabel.h"
 #include "AboutDialog.h"
+#include "HelpDialog.h"
 #include "Archives.h"
+#include "BreadcrumbBar.h"
+#include "Libraries.h"
+#include "LibrariesView.h"
+#include "ViewModeMenu.h"
 #include "FileOps.h"
 #include "FileView.h"
 #include "aero/icons.h"
@@ -29,7 +34,6 @@
 #include <KFileItemActions>
 #include <KFileItemListProperties>
 #include <KFilePlacesModel>
-#include <KIO/FileSystemFreeSpaceJob>
 #include <KIO/FileUndoManager>
 #include <KIO/Global>
 #include <KNewFileMenu>
@@ -65,6 +69,7 @@
 #include <QProgressBar>
 #include <QPropertyAnimation>
 #include <QPushButton>
+#include <QScreen>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStandardPaths>
@@ -74,6 +79,8 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QWindow>
+
+#include <algorithm>
 
 namespace {
 
@@ -121,7 +128,7 @@ MainWindow *MainWindow::openWindow(const QUrl &folder, const QList<QUrl> &select
 {
     QUrl target = folder;
     if (!target.isValid())
-        target = Locations::computer();
+        target = Locations::libraries();
 
     // Two reveal requests for the same folder should end up as one window with
     // both files showing
@@ -201,6 +208,8 @@ MainWindow::Crumb MainWindow::driveFor(const QString &path) const
 QList<MainWindow::Crumb> MainWindow::crumbsFor(const QUrl &url) const
 {
     QList<Crumb> crumbs;
+    if (Locations::isLibraries(url))
+        return {{tr("Libraries"), Locations::libraries()}};
     crumbs.append({tr("Computer"), Locations::computer()});
 
     if (Locations::isComputer(url))
@@ -264,6 +273,27 @@ QList<MainWindow::Crumb> MainWindow::crumbsFor(const QUrl &url) const
 
     const QString path = QDir::cleanPath(url.toLocalFile());
 
+    Libraries::Entry library;
+    int longest = -1;
+    for (const auto &entry : Libraries::entries()) {
+        const QString root = QDir::cleanPath(entry.url.toLocalFile());
+        if ((path == root || path.startsWith(root + QLatin1Char('/')))
+            && root.size() > longest) {
+            library = entry;
+            longest = root.size();
+        }
+    }
+    if (library.url.isValid()) {
+        crumbs = {{tr("Libraries"), Locations::libraries()}, {library.name, library.url}};
+        QString walk = QDir::cleanPath(library.url.toLocalFile());
+        for (const QString &segment : path.mid(walk.size()).split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
+            walk += QLatin1Char('/') + segment;
+            crumbs.append({Branding::displayName(QUrl::fromLocalFile(walk), segment),
+                           QUrl::fromLocalFile(walk)});
+        }
+        return crumbs;
+    }
+
     // Computer, then a drive, then folders, and home is walked through like
     // any other path rather than collapsed to a root of its own
     const Crumb drive = driveFor(path);
@@ -303,8 +333,11 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
     g_windows.append(this);
 
     setAttribute(Qt::WA_DeleteOnClose);
-    setMinimumSize(700, 460);
-    resize(940, 620);
+    setMinimumSize(480, 360);
+    QSize initialSize(940, 620);
+    if (QScreen *screen = this->screen())
+        initialSize = initialSize.boundedTo(screen->availableGeometry().size() - QSize(24, 48));
+    resize(initialSize.expandedTo(minimumSize()));
 
     m_navSound.setSource(QUrl::fromLocalFile(
         "/usr/share/sounds/Windows 7/og/Windows Navigation Start.wav"));
@@ -387,7 +420,7 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
         // list up means watching the batches trickle in and only then being
         // replaced by a placeholder
         m_loadingLabel->hide();
-        if (!isComputerView())
+        if (!isComputerView() && !isLibrariesView())
             m_stack->setCurrentWidget(m_loadingPage);
         m_loadingTimer->start();
 
@@ -423,6 +456,24 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
         applyPendingSelection(false);
     });
 
+    // A rename can update an existing selected row without a selectionChanged
+    // signal. Cached KFileItems must not leave Copy/Properties on the old URL.
+    connect(m_model->model(), &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex &first, const QModelIndex &last) {
+        invalidateSelection();
+        if (isComputerView() || isLibrariesView()) return;
+        const QModelIndexList selected = m_fileView->selectedIndexes();
+        const bool selectionChanged = std::any_of(selected.cbegin(), selected.cend(),
+            [&first, &last](const QModelIndex &index) {
+                return index.parent() == first.parent()
+                    && index.row() >= first.row() && index.row() <= last.row();
+            });
+        if (!selectionChanged) return; // avoid rebuilding chrome for unrelated thumbnails
+        updateDetailsPane();
+        updateActionStates();
+        rebuildContextualCommands();
+    });
+
     // The places model populates asynchronously, so on a cold start the drives
     // land after Computer was summarised and the pane would report none
     connect(m_computerModel, &QAbstractItemModel::modelReset, this, [this] {
@@ -444,6 +495,8 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
     connect(m_places->placesModel(), &QAbstractItemModel::rowsRemoved, this, refreshTrail);
     connect(m_model, &DirectoryModel::errorOccurred, this,
             [this](int error, const QString &message, const QUrl &url) {
+        if (!url.matches(currentUrl(), QUrl::StripTrailingSlash))
+            return;
         // An unreadable directory never completes, so the placeholder has to
         // be torn down here too
         m_loading = false;
@@ -498,7 +551,7 @@ void MainWindow::setVisible(bool visible)
     }
 
     const QString dialogs = QGuiApplication::desktopFileName();
-    QGuiApplication::setDesktopFileName(QStringLiteral("explorer"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7"));
     QMainWindow::setVisible(true);
     QGuiApplication::setDesktopFileName(dialogs);
 }
@@ -547,9 +600,21 @@ void MainWindow::buildActions()
         return action;
     };
 
-    m_actOpen = fileAction(tr("Open"), [this] { openItems(selectedItems()); });
+    m_actOpen = fileAction(tr("Open"), [this] {
+        if (isLibrariesView()) {
+            const QUrl url = m_librariesView->selectedUrl();
+            if (url.isValid()) navigateTo(url);
+        } else {
+            openItems(selectedItems());
+        }
+    });
     m_actOpenNewWindow = fileAction(tr("Open in new window"), [this] {
-        openInNewWindow(selectedItems());
+        if (isLibrariesView()) {
+            const QUrl url = m_librariesView->selectedUrl();
+            if (url.isValid()) openNewWindow(url);
+        } else {
+            openInNewWindow(selectedItems());
+        }
     });
     m_actOpenWith = fileAction(tr("Open with..."), [this] {
         FileOps::openWith(selectedItems(), this);
@@ -561,7 +626,7 @@ void MainWindow::buildActions()
         FileOps::copyToClipboard(selectedItems());
     }, QKeySequence::Copy);
     m_actPaste = fileAction(tr("Paste"), [this] {
-        if (!isComputerView())
+        if (!isComputerView() && !isLibrariesView())
             FileOps::pasteFromClipboard(operationFolder(), this);
     }, QKeySequence::Paste);
     m_actCopyPath = fileAction(tr("Copy as path"), [this] {
@@ -582,7 +647,7 @@ void MainWindow::buildActions()
         const QList<KFileItem> selection = selectedItems();
         // With nothing selected Win7 reports on the current folder
         if (selection.isEmpty()) {
-            if (!isComputerView())
+            if (!isComputerView() && !isLibrariesView())
                 FileOps::showProperties({KFileItem(operationFolder())}, this);
         } else {
             FileOps::showProperties(selection, this);
@@ -636,12 +701,21 @@ void MainWindow::buildActions()
     m_actOpenAsAdmin = windowAction(tr("Run as Administrator"),
                                     &MainWindow::openAsAdministrator);
 
+    m_actHelp = windowAction(tr("View help"), &MainWindow::showHelp,
+                              QKeySequence(Qt::Key_F1));
+    m_actHelp->setIcon(Aero::helpIcon());
+    m_actHelp->setToolTip(tr("Get help (F1)"));
+
     m_actPreviewPane = windowAction(tr("Preview pane"), [this](bool on) {
+        m_actPreviewPane->setToolTip(on ? tr("Hide the preview pane (Alt+P)")
+                                      : tr("Show the preview pane (Alt+P)"));
         m_previewPane->setVisible(on);
         if (on)
             m_previewPane->setItems(selectedItems());
     }, QKeySequence(Qt::ALT | Qt::Key_P));
     m_actPreviewPane->setCheckable(true);
+    m_actPreviewPane->setIcon(Aero::previewPaneIcon());
+    m_actPreviewPane->setToolTip(tr("Show the preview pane (Alt+P)"));
 
     m_actShowHidden = windowAction(tr("Show hidden files"), [this](bool on) {
         m_model->setShowHiddenFiles(on);
@@ -822,7 +896,9 @@ void MainWindow::buildMenuBar()
     tools->addSeparator();
     tools->addAction(m_actEmptyTrash);
 
-    QMenu *go = bar->addMenu(tr("&Go"));
+    // Keep the five native top-level menus; Linux destinations do not need
+    // an extra top-level Go menu.
+    QMenu *go = view->addMenu(tr("Go to"));
     go->addAction(m_actUp);
     go->addSeparator();
     go->addAction(tr("Computer"), this,
@@ -835,7 +911,9 @@ void MainWindow::buildMenuBar()
     });
 
     QMenu *help = bar->addMenu(tr("&Help"));
-    help->addAction(tr("About Explorer"), this,
+    help->addAction(m_actHelp);
+    help->addSeparator();
+    help->addAction(tr("About File Explorer"), this,
                     &MainWindow::showAboutDialog);
 }
 
@@ -953,6 +1031,7 @@ void MainWindow::cyclePanes(bool forward)
         const int next = (current + offset) % StopCount;
         switch (next) {
         case NavigationPaneStop:
+            if (!m_places->isVisible()) continue;
             m_places->setFocus(Qt::TabFocusReason);
             return;
         case AddressStop:
@@ -963,11 +1042,13 @@ void MainWindow::cyclePanes(bool forward)
                 endPathEdit();
             if (isComputerView())
                 m_computerView->focusView();
+            else if (isLibrariesView())
+                m_librariesView->setFocus(Qt::TabFocusReason);
             else
                 m_fileView->focusView();
             return;
         case SearchStop:
-            if (!m_searchBox->isEnabled())
+            if (!m_searchBox->isVisible() || !m_searchBox->isEnabled())
                 continue;
             if (m_pathEdit)
                 endPathEdit();
@@ -990,6 +1071,10 @@ void MainWindow::buildNavigationBar()
     auto *navBtns = new Aero::NavButtons(m_navBar);
     m_backBtn = navBtns->back();
     m_forwardBtn = navBtns->forward();
+    m_backBtn->setObjectName(QStringLiteral("backButton"));
+    m_forwardBtn->setObjectName(QStringLiteral("forwardButton"));
+    m_backBtn->setAccessibleName(tr("Back"));
+    m_forwardBtn->setAccessibleName(tr("Forward"));
     m_backBtn->setEnabled(false);
     m_forwardBtn->setEnabled(false);
     connect(m_backBtn, &QPushButton::clicked, this, &MainWindow::goBack);
@@ -1029,6 +1114,7 @@ void MainWindow::buildNavigationBar()
     // Taken by reference, so the menu has to be a named variable
     navBtns->setMenu(recentMenu);
     navBtns->menuButton()->setToolTip(tr("Recent locations"));
+    navBtns->menuButton()->setAccessibleName(tr("Recent locations"));
     layout->addSpacing(4);
 
     // On the theme's glass texture so the box matches the search field, and
@@ -1049,7 +1135,7 @@ void MainWindow::buildNavigationBar()
     auto *crumbArea = new QWidget;
     m_pathLayout = new QHBoxLayout(crumbArea);
     m_pathLayout->setContentsMargins(4, 0, 4, 0);
-    m_pathLayout->setSpacing(4);
+    m_pathLayout->setSpacing(0);
     pathBoxLayout->addWidget(crumbArea, 1);
 
     // Inside the box rather than in the layout, positioned by hand and lowered
@@ -1093,6 +1179,7 @@ void MainWindow::buildNavigationBar()
                        " border-left: 1px solid rgba(121, 121, 121, 173);"
                        " background: transparent; border-image: none; }"));
     refreshButton->setToolTip(tr("Refresh (F5)"));
+    refreshButton->setAccessibleName(tr("Refresh"));
     refreshButton->setFixedWidth(24);
     refreshButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
     refreshButton->setCursor(Qt::ArrowCursor);
@@ -1104,8 +1191,11 @@ void MainWindow::buildNavigationBar()
     // a plain text field a glass background that a border of our own would
     // override, and focus swaps to solid white since there is no glass for it
     m_searchBox = new QLineEdit;
+    m_searchBox->setObjectName(QStringLiteral("searchBox"));
     m_searchBox->setPlaceholderText(tr("Search"));
-    m_searchBox->setFixedWidth(190);
+    m_searchBox->setMinimumWidth(140);
+    m_searchBox->setMaximumWidth(240);
+    m_searchBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     m_searchBox->setFixedHeight(24);
     m_searchBox->setClearButtonEnabled(false);
     // The Win7 glyph comes first, with the standard name as the fallback
@@ -1186,6 +1276,8 @@ QIcon MainWindow::locationIcon(const QUrl &url) const
         return Aero::themeIcon({"computer", "computer-laptop"});
     if (Locations::isSearch(url))
         return Aero::themeIcon({"system-search", "folder-saved-search"});
+    if (Locations::isLibraries(url))
+        return Aero::themeIcon({"folder-library", "folder-documents", "folder"});
 
     // Prefer the places entry so the glyphs match the pane's, and the lookup
     // matches ancestors too, hence checking the location itself
@@ -1201,7 +1293,6 @@ void MainWindow::clearPathLayout()
 {
     while (QLayoutItem *item = m_pathLayout->takeAt(0)) {
         if (QWidget *widget = item->widget()) {
-            m_crumbArrows.remove(widget);
             widget->deleteLater();
         }
         delete item;
@@ -1226,6 +1317,8 @@ void MainWindow::beginPathEdit()
     if (url.isLocalFile() || elevated)
         editText = displayPath(url);
     m_pathEdit = new QLineEdit(editText);
+    m_pathEdit->setObjectName(QStringLiteral("pathEditor"));
+    m_pathEdit->setAccessibleName(tr("Address bar"));
     m_pathEdit->setFrame(false);
     Aero::setPointSize(m_pathEdit, 9);
     // Transparent, so the editor looks like the bar rather than sits inside it
@@ -1293,6 +1386,9 @@ void MainWindow::beginPathEdit()
             endPathEdit();
     });
 
+    // Layout insertion queues show() for later. Show now so F6/Alt+D
+    // actually transfer the keyboard instead of leaving it on the file list.
+    m_pathEdit->show();
     m_pathEdit->setFocus();
     m_pathEdit->selectAll();
 }
@@ -1308,56 +1404,29 @@ void MainWindow::setCrumbTrail(const QUrl &url)
 {
     clearPathLayout();
 
-    // Each arrow drops the children of the crumb to its left, so it is
-    // registered against that crumb, and the first one lists the places instead
-    const auto addArrow = [this](const QUrl &parent) {
-        const QColor arrowColor = Aero::Palette::rgb(Aero::Palette::CrumbArrow);
-        auto *arrow = new Aero::LinkLabel;
-        arrow->setPixmap(Aero::arrowPixmap(Qt::RightArrow, arrowColor, 6));
-        m_crumbArrows.insert(arrow, parent);
-        connect(arrow, &Aero::LinkLabel::clicked, this,
-                [this, arrow] { showCrumbMenu(arrow); });
-        m_pathLayout->addWidget(arrow);
-    };
-
-    auto *icon = new QLabel;
-    icon->setPixmap(locationIcon(url).pixmap(16, 16));
-    m_pathLayout->addWidget(icon);
-    addArrow(QUrl());
-
-    // Intermediate segments are links and the last is plain text
-    const QList<Crumb> crumbs = crumbsFor(url);
-    for (int i = 0; i < crumbs.size(); ++i) {
-        const Crumb &crumb = crumbs.at(i);
-
-        if (i > 0)
-            addArrow(crumbs.at(i - 1).target);
-
-        const bool isLast = (i == crumbs.size() - 1);
-        if (isLast) {
-            m_pathLayout->addWidget(Aero::label(crumb.label));
-            continue;
-        }
-
-        auto *link = new Aero::LinkLabel(crumb.label);
-        link->setColors(Aero::Palette::Text, Aero::Palette::CrumbHover);
-        link->setUnderlineOnHover(true);
-        const QUrl target = crumb.target;
-        connect(link, &Aero::LinkLabel::clicked, this,
-                [this, target] { navigateTo(target); });
-        m_pathLayout->addWidget(link);
-    }
-
-    m_pathLayout->addStretch();
+    auto *bar = new BreadcrumbBar;
+    QList<BreadcrumbBar::Segment> segments;
+    for (const Crumb &crumb : crumbsFor(url))
+        segments.append({crumb.label, crumb.target});
+    bar->setTrail(locationIcon(url), segments);
+    connect(bar, &BreadcrumbBar::urlActivated, this, &MainWindow::navigateTo);
+    connect(bar, &BreadcrumbBar::menuRequested, this, &MainWindow::showCrumbMenu);
+    m_pathLayout->addWidget(bar, 1);
 }
 
-void MainWindow::showCrumbMenu(QLabel *arrow)
+void MainWindow::showCrumbMenu(const QUrl &parent, const QPoint &globalPos)
 {
-    const QUrl parent = m_crumbArrows.value(arrow);
     QMenu menu(this);
 
     if (!parent.isValid()) {
-        // The leading arrow lists the places
+        // Hidden ancestors remain reachable in the leading dropdown.
+        for (const Crumb &crumb : crumbsFor(currentUrl())) {
+            menu.addAction(locationIcon(crumb.target), crumb.label, this,
+                           [this, target = crumb.target] { navigateTo(target); });
+        }
+        menu.addSeparator();
+        menu.addAction(locationIcon(Locations::libraries()), tr("Libraries"),
+                       this, [this] { navigateTo(Locations::libraries()); });
         menu.addAction(Aero::themeIcon({"computer", "computer-laptop"}), tr("Computer"),
                        this, [this] { navigateTo(Locations::computer()); });
         menu.addSeparator();
@@ -1369,6 +1438,11 @@ void MainWindow::showCrumbMenu(QLabel *arrow)
             const QUrl url = places->url(index);
             menu.addAction(places->icon(index), DriveLabel::forPlace(places, index),
                            this, [this, url] { navigateTo(url); });
+        }
+    } else if (Locations::isLibraries(parent)) {
+        for (const auto &entry : Libraries::entries()) {
+            menu.addAction(QIcon::fromTheme(entry.iconName), entry.name, this,
+                           [this, url = entry.url] { navigateTo(url); });
         }
     } else if (Locations::isComputer(parent)) {
         for (int row = 0; row < m_computerModel->rowCount(); ++row) {
@@ -1421,13 +1495,19 @@ void MainWindow::showCrumbMenu(QLabel *arrow)
 
     if (menu.isEmpty())
         return;
-    menu.exec(arrow->mapToGlobal(QPoint(0, arrow->height())));
+    menu.exec(globalPos);
 }
 
 QWidget *MainWindow::buildCommandBar()
 {
     Aero::Strip *bar = Aero::commandBar(Explorer::Art::CommandBar);
+    m_commandBar = bar;
+    bar->setObjectName(QStringLiteral("commandBar"));
+    bar->setArt(Explorer::Art::CommandBar);
     m_commandLayout = bar->row();
+    m_commandLayout->setSpacing(4);
+    m_commandLayout->setSizeConstraint(QLayout::SetNoConstraint);
+    bar->setMinimumWidth(0);
 
     auto *organize = new Aero::MenuButton(tr("Organize"));
     auto *menu = new QMenu(organize);
@@ -1437,12 +1517,7 @@ QWidget *MainWindow::buildCommandBar()
     menu->addSeparator();
     menu->addAction(m_actUndo);
     menu->addSeparator();
-    menu->addAction(m_actRename);
-    menu->addAction(m_actDelete);
-    menu->addAction(m_actEmptyTrash);
-    menu->addSeparator();
     menu->addAction(m_actSelectAll);
-    menu->addAction(m_actInvertSelection);
     menu->addSeparator();
 
     QMenu *layout = menu->addMenu(tr("Layout"));
@@ -1473,21 +1548,13 @@ QWidget *MainWindow::buildCommandBar()
     menu->addAction(m_actOptions);
 
     menu->addSeparator();
+    menu->addAction(m_actDelete);
+    menu->addAction(m_actRename);
     menu->addAction(m_actProperties);
+    menu->addSeparator();
     menu->addAction(m_actClose);
     organize->setMenu(menu);
     m_commandLayout->addWidget(organize);
-
-    auto *newButton = new Aero::MenuButton(tr("New"));
-    auto *newMenu = new QMenu(newButton);
-    newMenu->addAction(m_newFileMenu);
-    connect(newMenu, &QMenu::aboutToShow, this, [this] {
-        m_newFileMenu->setWorkingDirectory(operationFolder());
-        m_newFileMenu->checkUpToDate();
-    });
-    newButton->setMenu(newMenu);
-    m_commandLayout->addWidget(newButton);
-    m_newButton = newButton;
 
     // Win7 puts this on the bar itself rather than only inside the New menu
     auto *newFolder = new Aero::MenuButton(tr("New folder"));
@@ -1496,29 +1563,53 @@ QWidget *MainWindow::buildCommandBar()
     m_commandLayout->addWidget(newFolder);
     m_newFolderButton = newFolder;
 
+    m_commandOverflow = new QToolButton(bar);
+    m_commandOverflow->setObjectName(QStringLiteral("commandOverflow"));
+    m_commandOverflow->setText(QStringLiteral("\u00bb"));
+    m_commandOverflow->setToolTip(tr("More commands"));
+    m_commandOverflow->setAccessibleName(tr("More commands"));
+    m_commandOverflow->setAutoRaise(true);
+    m_commandOverflow->setFixedSize(24, 24);
+    m_commandOverflow->setPopupMode(QToolButton::InstantPopup);
+    m_commandOverflow->setMenu(new QMenu(m_commandOverflow));
+    m_commandOverflow->setStyleSheet("QToolButton::menu-indicator { image: none; }");
+    m_commandOverflow->hide();
+    m_commandLayout->addWidget(m_commandOverflow);
     m_commandLayout->addStretch(1);
 
-    // Shares the view menu's actions, so the two cannot drift apart
-    auto *viewButton = new QToolButton;
-    viewButton->setPopupMode(QToolButton::InstantPopup);
-    viewButton->setCursor(Qt::PointingHandCursor);
-    viewButton->setStyleSheet("QToolButton { border: none; background: transparent; }"
-                              "QToolButton::menu-indicator { image: none; }");
-    viewButton->setIcon(Aero::themeIcon({"view-list-details", "view-list-text", "view-choose"}));
-    viewButton->setToolTip(tr("Change your view"));
-    auto *viewMenu = new QMenu(viewButton);
-    for (QAction *action : m_viewModeGroup->actions())
-        viewMenu->addAction(action);
-    viewButton->setMenu(viewMenu);
-    m_commandLayout->addWidget(viewButton);
+    m_viewButton = new QToolButton(bar);
+    m_viewButton->setObjectName(QStringLiteral("changeViewButton"));
+    m_viewButton->setPopupMode(QToolButton::MenuButtonPopup);
+    m_viewButton->setAutoRaise(true);
+    m_viewButton->setFixedSize(44, 24);
+    m_viewButton->setIcon(ViewModeMenu::iconForMode(Settings::ViewMode::Details));
+    m_viewButton->setToolTip(tr("Change your view"));
+    m_viewButton->setAccessibleName(tr("Change your view"));
+    m_viewButton->setMenu(new ViewModeMenu(m_viewModeGroup, m_viewButton));
+    connect(m_viewButton, &QToolButton::clicked, this, [this] {
+        setViewMode(ViewModeMenu::nextMode(currentViewMode()));
+    });
+    m_commandLayout->addWidget(m_viewButton);
+
+    auto *previewButton = new QToolButton(bar);
+    previewButton->setObjectName(QStringLiteral("previewPaneButton"));
+    previewButton->setDefaultAction(m_actPreviewPane);
+    previewButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    previewButton->setAutoRaise(true);
+    previewButton->setFixedSize(24, 24);
+    previewButton->setToolTip(tr("Show the preview pane (Alt+P)"));
+    previewButton->setAccessibleName(tr("Preview pane"));
+    m_commandLayout->addWidget(previewButton);
 
     auto *helpButton = new QToolButton;
-    helpButton->setCursor(Qt::PointingHandCursor);
+    helpButton->setObjectName(QStringLiteral("helpButton"));
+    helpButton->setFixedSize(24, 24);
+    helpButton->setCursor(Qt::ArrowCursor);
     helpButton->setStyleSheet("QToolButton { border: none; background: transparent; }");
-    helpButton->setIcon(Aero::themeIcon({"help-contents", "help-browser", "system-help"}));
-    helpButton->setToolTip(tr("Help"));
-    helpButton->setShortcut(QKeySequence(Qt::Key_F1));
-    connect(helpButton, &QToolButton::clicked, this, &MainWindow::showAboutDialog);
+    helpButton->setObjectName(QStringLiteral("helpButton"));
+    helpButton->setDefaultAction(m_actHelp);
+    helpButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    helpButton->setAccessibleName(tr("Help"));
     m_commandLayout->addWidget(helpButton);
 
     return bar;
@@ -1540,13 +1631,17 @@ void MainWindow::rebuildContextualCommands()
     if (!m_commandLayout)
         return;
 
-    // Before the stretch, always third from last
-    const int insertAt = m_commandLayout->count() - 3;
+    // After Organize, before New folder, as in the native command strip.
+    const int insertAt = 1;
+    QTimer::singleShot(0, this, &MainWindow::layoutCommandBar);
     const auto addButton = [this, insertAt](const QString &text, QMenu *menu,
                                             auto slot) {
         auto *button = new Aero::MenuButton(text);
         button->setShowArrow(menu != nullptr);
         if (menu) {
+            // These menus are rebuilt with the contextual buttons. Give the
+            // button ownership so selection changes do not accumulate menus.
+            menu->setParent(button);
             button->setMenu(menu);
         } else {
             button->setPopupMode(QToolButton::DelayedPopup);
@@ -1578,6 +1673,12 @@ void MainWindow::rebuildContextualCommands()
         addButton(tr("Open Control Panel"), nullptr, [this] {
             openSystemApplication({QStringLiteral("systemsettings")});
         });
+        return;
+    }
+
+    if (isLibrariesView()) {
+        if (m_librariesView->selectedUrl().isValid())
+            addButton(tr("Open"), nullptr, [this] { m_actOpen->trigger(); });
         return;
     }
 
@@ -1639,6 +1740,54 @@ void MainWindow::rebuildContextualCommands()
         else
             menu.exec(QCursor::pos());
     });
+}
+
+void MainWindow::layoutCommandBar()
+{
+    if (!m_commandLayout || !m_commandOverflow) return;
+    const bool wantNewFolder = !isComputerView() && !isLibrariesView();
+    m_newFolderButton->setVisible(wantNewFolder);
+    for (QWidget *widget : std::as_const(m_contextualCommands)) widget->show();
+    m_commandOverflow->hide();
+    QMenu *overflow = m_commandOverflow->menu();
+    overflow->clear();
+
+    const auto requiredWidth = [this] {
+        int width = m_commandLayout->contentsMargins().left()
+                  + m_commandLayout->contentsMargins().right();
+        int count = 0;
+        for (int i = 0; i < m_commandLayout->count(); ++i) {
+            QWidget *widget = m_commandLayout->itemAt(i)->widget();
+            if (widget && !widget->isHidden()) {
+                width += qMax(widget->minimumWidth(), widget->sizeHint().width());
+                ++count;
+            }
+        }
+        return width + count * m_commandLayout->spacing();
+    };
+    int hiddenFrom = m_contextualCommands.size();
+    while (requiredWidth() > m_commandBar->width() && hiddenFrom > 0) {
+        m_contextualCommands.at(--hiddenFrom)->hide();
+        m_commandOverflow->show();
+    }
+    if (requiredWidth() > m_commandBar->width() && wantNewFolder) {
+        m_newFolderButton->hide();
+        m_commandOverflow->show();
+    }
+    const auto addHidden = [overflow](QWidget *widget) {
+        auto *button = qobject_cast<QToolButton *>(widget);
+        if (!button) return;
+        if (button->menu()) {
+            overflow->addMenu(button->menu())->setText(button->text());
+        } else {
+            QAction *action = overflow->addAction(button->icon(), button->text());
+            action->setEnabled(button->isEnabled());
+            QObject::connect(action, &QAction::triggered, button, &QToolButton::click);
+        }
+    };
+    for (int i = hiddenFrom; i < m_contextualCommands.size(); ++i)
+        addHidden(m_contextualCommands.at(i));
+    if (wantNewFolder && m_newFolderButton->isHidden()) addHidden(m_newFolderButton);
 }
 
 QWidget *MainWindow::buildSearchAgainBar()
@@ -1839,10 +1988,20 @@ QWidget *MainWindow::buildBody()
     m_listPage = new QWidget;
     m_listPage->setObjectName(QStringLiteral("fileListPage"));
     m_listPage->setStyleSheet(Aero::panelSheet(m_listPage->objectName(), Aero::Palette::Surface));
-    auto *listLayout = new QHBoxLayout(m_listPage);
+    auto *listLayout = new QVBoxLayout(m_listPage);
     listLayout->setContentsMargins(kListLeftMargin, 0, 0, 0);
     listLayout->setSpacing(0);
-    listLayout->addWidget(m_fileView);
+    m_libraryHeader = new QWidget;
+    m_libraryHeader->setObjectName(QStringLiteral("libraryFolderHeader"));
+    auto *libraryLayout = new QVBoxLayout(m_libraryHeader);
+    libraryLayout->setContentsMargins(10, 8, 8, 8);
+    libraryLayout->setSpacing(0);
+    m_libraryHeading = Aero::label(QString(), 12, "#006600");
+    libraryLayout->addWidget(m_libraryHeading);
+    libraryLayout->addWidget(Aero::label(tr("Includes: 1 location"), 9, Aero::Palette::LinkText));
+    m_libraryHeader->hide();
+    listLayout->addWidget(m_libraryHeader);
+    listLayout->addWidget(m_fileView, 1);
 
     m_loadingPage = new QWidget;
     m_loadingPage->setObjectName(QStringLiteral("loadingPage"));
@@ -1858,6 +2017,18 @@ QWidget *MainWindow::buildBody()
     m_stack->addWidget(m_listPage);
     m_stack->addWidget(m_computerView);
     m_stack->addWidget(m_loadingPage);
+    m_librariesView = new LibrariesView;
+    m_stack->addWidget(m_librariesView);
+    connect(m_librariesView, &LibrariesView::urlActivated, this, &MainWindow::navigateTo);
+    connect(m_librariesView, &LibrariesView::newWindowRequested, this, &MainWindow::openNewWindow);
+    connect(m_librariesView, &LibrariesView::selectionChanged, this, [this] {
+        invalidateSelection();
+        updateDetailsPane();
+        updateActionStates();
+        rebuildContextualCommands();
+    });
+    connect(m_librariesView, &LibrariesView::viewModeChanged, this,
+            [this] { updateActionStates(); });
     m_splitter->addWidget(m_stack);
 
     // In the splitter rather than floating over the list, so its edge resizes
@@ -1869,7 +2040,7 @@ QWidget *MainWindow::buildBody()
     m_splitter->setStretchFactor(0, 0);
     m_splitter->setStretchFactor(1, 1);
     m_splitter->setStretchFactor(2, 0);
-    m_splitter->setSizes({190, 750, 250});
+    m_splitter->setSizes({158, 750, 250});
 
     return m_splitter;
 }
@@ -1900,6 +2071,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         QWidget *zoomable = m_fileView;
         if (isComputerView())
             zoomable = m_computerView;
+        else if (isLibrariesView())
+            zoomable = m_librariesView;
 
         const bool ctrlHeld = wheel->modifiers().testFlag(Qt::ControlModifier);
         const bool overView = widget && zoomable
@@ -1931,6 +2104,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         beginPathEdit();
         return true;
     }
+
+    if (watched == m_commandBar && event->type() == QEvent::Resize)
+        QTimer::singleShot(0, this, &MainWindow::layoutCommandBar);
 
     // Not in the box's layout, so it has to be resized with it by hand
     if (watched == m_pathBox && event->type() == QEvent::Resize)
@@ -1966,6 +2142,11 @@ bool MainWindow::isComputerView() const
     return m_stack && m_stack->currentWidget() == m_computerView;
 }
 
+bool MainWindow::isLibrariesView() const
+{
+    return Locations::isLibraries(currentUrl());
+}
+
 bool MainWindow::isTrashView() const
 {
     return currentUrl().scheme() == QLatin1String("trash");
@@ -1974,6 +2155,8 @@ bool MainWindow::isTrashView() const
 QUrl MainWindow::operationFolder() const
 {
     const QUrl current = currentUrl();
+    if (Locations::isLibraries(current) || Locations::isComputer(current))
+        return {};
     // Nothing can be created in a search result, so those commands act on the
     // folder that was searched
     if (Locations::isSearch(current))
@@ -1985,7 +2168,14 @@ void MainWindow::showLocation(const QUrl &url)
 {
     invalidateSelection();
 
-    if (Locations::isComputer(url)) {
+    if (Locations::isLibraries(url)) {
+        m_loading = false;
+        m_loadingTimer->stop();
+        stopPathProgress();
+        m_stack->setCurrentWidget(m_librariesView);
+        m_librariesView->setViewMode(Settings::hasViewModeFor(url)
+            ? Settings::viewModeFor(url) : Settings::ViewMode::Tiles);
+    } else if (Locations::isComputer(url)) {
         // Never handed to KIO, there being no worker, and this page is built
         // in process and always ready so a pending placeholder is cancelled
         m_loading = false;
@@ -2002,6 +2192,9 @@ void MainWindow::showLocation(const QUrl &url)
     } else {
         m_stack->setCurrentWidget(m_listPage);
         m_model->setUrl(url);
+        const auto library = Libraries::forUrl(url);
+        m_libraryHeader->setVisible(library.url.isValid());
+        m_libraryHeading->setText(tr("%1 library").arg(library.name));
 
         // Not through the path a user takes, which would write this folder's
         // mode back out as the default for every folder
@@ -2022,7 +2215,7 @@ void MainWindow::showLocation(const QUrl &url)
     } else {
         m_searchBox->clear();
     }
-    m_searchBox->setEnabled(!Locations::isComputer(url));
+    m_searchBox->setEnabled(!Locations::isComputer(url) && !Locations::isLibraries(url));
 
     updateWindowTitle();
     updateDetailsPane();
@@ -2066,8 +2259,12 @@ void MainWindow::goForward()
 void MainWindow::goUp()
 {
     const QUrl current = currentUrl();
-    if (Locations::isComputer(current))
-        return;   // Computer is the top of the tree, with nowhere above it
+    if (Locations::isComputer(current) || Locations::isLibraries(current))
+        return;
+    if (Libraries::forUrl(current).url.isValid()) {
+        navigateTo(Locations::libraries());
+        return;
+    }
 
     // The folder that was searched is the only sensible parent for results
     if (Locations::isSearch(current)) {
@@ -2104,6 +2301,8 @@ void MainWindow::refresh()
 {
     if (isComputerView())
         m_computerModel->refresh();
+    else if (isLibrariesView())
+        m_librariesView->refresh();
     else
         m_model->refresh();
     m_places->refresh();
@@ -2140,6 +2339,7 @@ void MainWindow::updateWindowTitle()
     setWindowTitle(label);
     // Win7's search box names the folder it will search
     m_searchBox->setPlaceholderText(tr("Search %1").arg(label));
+    m_searchBox->setAccessibleName(tr("Search %1").arg(label));
 }
 
 void MainWindow::startSearch()
@@ -2186,6 +2386,14 @@ void MainWindow::openSystemApplication(const QStringList &desktopNames)
 {
     if (!FileOps::openApplication(desktopNames, this))
         m_details->showMessage(tr("The program for this is not installed."));
+}
+
+void MainWindow::showHelp()
+{
+    if (!m_helpWindow) m_helpWindow = new HelpDialog(this);
+    m_helpWindow->show();
+    m_helpWindow->raise();
+    m_helpWindow->activateWindow();
 }
 
 void MainWindow::showAboutDialog()
@@ -2263,6 +2471,13 @@ void MainWindow::setViewMode(Settings::ViewMode mode)
         // into folders
         m_computerView->setViewMode(mode);
         Settings::setViewModeFor(currentUrl(), mode);
+        updateActionStates();
+        return;
+    }
+    if (isLibrariesView()) {
+        m_librariesView->setViewMode(mode);
+        Settings::setViewModeFor(currentUrl(), mode);
+        updateActionStates();
         return;
     }
 
@@ -2270,6 +2485,7 @@ void MainWindow::setViewMode(Settings::ViewMode mode)
     // Also the default for folders with no preference of their own
     Settings::setViewModeFor(currentUrl(), mode);
     Settings::setDefaultViewMode(mode);
+    updateActionStates();
 }
 
 void MainWindow::zoomViewMode(int angleDelta)
@@ -2310,7 +2526,7 @@ void MainWindow::updateListMessage()
 {
     // Nothing to say while the loading page is up, while the drives are
     // showing, or when the folder failed to open
-    if (isComputerView() || m_loading || m_lastLoadFailed || m_model->rowCount() > 0) {
+    if (isComputerView() || isLibrariesView() || m_loading || m_lastLoadFailed || m_model->rowCount() > 0) {
         m_fileView->setStatusMessage(QString());
         return;
     }
@@ -2331,7 +2547,15 @@ void MainWindow::updateDetailsPane()
         if (selected.isValid())
             m_details->showDrive(selected);
         else
-            m_details->showFolderSummary(m_computerView->deviceCount());
+            m_details->showComputerSummary();
+        return;
+    }
+    if (isLibrariesView()) {
+        const QUrl selected = m_librariesView->selectedUrl();
+        if (selected.isValid())
+            m_details->showLibrary(locationIcon(selected), m_librariesView->selectedName());
+        else
+            m_details->showFolderSummary(m_librariesView->libraryCount(), locationIcon(currentUrl()));
         return;
     }
 
@@ -2341,49 +2565,7 @@ void MainWindow::updateDetailsPane()
         return;
     }
 
-    // Before the pane is filled in, or a folder on another volume briefly
-    // shows the previous figure
-    updateFreeSpace();
-    m_details->showFolderSummary(m_model->rowCount(), m_freeSpace);
-}
-
-void MainWindow::updateFreeSpace()
-{
-    const QUrl folder = currentUrl();
-
-    // Only a real directory sits on a volume, anything else answering about
-    // the wrong filesystem at best
-    if (!folder.isLocalFile() || Locations::isSearch(folder)
-        || Archives::isInsideArchive(folder)) {
-        m_freeSpace.clear();
-        return;
-    }
-
-    // Once per folder, the figure barely moving and the query not being free
-    // on a network mount
-    if (folder == m_freeSpaceUrl)
-        return;
-    m_freeSpaceUrl = folder;
-    m_freeSpace.clear();
-
-    if (m_freeSpaceJob)
-        m_freeSpaceJob->kill();
-
-    // Through a job rather than a direct query, which blocks on an unresponsive
-    // mount and would freeze the window on every cleared selection
-    KIO::FileSystemFreeSpaceJob *job = KIO::fileSystemFreeSpace(folder);
-    m_freeSpaceJob = job;
-    connect(job, &KJob::result, this, [this, job, folder] {
-        if (job->error() || folder != m_freeSpaceUrl)
-            return;   // navigated away while the job was running
-
-        const QString available = KIO::convertSize(job->availableSize());
-        const QString total = KIO::convertSize(job->size());
-        m_freeSpace = tr("%1 free of %2").arg(available, total);
-        // A selection made in the meantime owns the pane now
-        if (selectedItems().isEmpty() && !isComputerView())
-            m_details->showFolderSummary(m_model->rowCount(), m_freeSpace);
-    });
+    m_details->showFolderSummary(m_model->rowCount(), locationIcon(currentUrl()));
 }
 
 bool MainWindow::isFolderWritable(const QUrl &folder) const
@@ -2406,6 +2588,9 @@ void MainWindow::updateActionStates()
     const bool any = !selection.isEmpty();
     const bool one = selection.size() == 1;
     const bool computer = isComputerView();
+    const bool libraries = isLibrariesView();
+    const bool shellRoot = computer || libraries;
+    const bool librarySelected = libraries && m_librariesView->selectedUrl().isValid();
     const bool trash = isTrashView();
     const QUrl folder = operationFolder();
 
@@ -2419,35 +2604,33 @@ void MainWindow::updateActionStates()
         return item.isDir() || Archives::urlFor(item).isValid();
     });
 
-    m_actOpen->setEnabled(any);
-    m_actOpenNewWindow->setEnabled(anyBrowsable && !trash);
+    m_actOpen->setEnabled(any || librarySelected);
+    m_actOpenNewWindow->setEnabled((anyBrowsable && !trash) || librarySelected);
     m_actOpenWith->setEnabled(any && !trash);
     m_actCut->setEnabled(any && !trash);
     m_actCopy->setEnabled(any && !trash);
     m_actCopyPath->setEnabled(any);
     m_actCreateLink->setEnabled(any && !trash && folder.isLocalFile());
-    m_actPaste->setEnabled(!computer && !trash && !readOnly && FileOps::canPaste());
+    m_actPaste->setEnabled(!shellRoot && !trash && !readOnly && FileOps::canPaste());
     m_actDelete->setEnabled(any && !trash && !readOnly);
     m_actDeleteForever->setEnabled(any && !readOnly);
     // Win7 renames a whole selection at once, so this is not a single item
     m_actRename->setEnabled(any && !trash && !readOnly);
-    m_newFileMenu->setEnabled(!computer && !trash && !readOnly);
-    if (m_newButton)
-        m_newButton->setVisible(!computer);
+    m_newFileMenu->setEnabled(!shellRoot && !trash && !readOnly);
     if (m_newFolderButton) {
-        m_newFolderButton->setVisible(!computer);
+        m_newFolderButton->setVisible(!shellRoot);
         m_newFolderButton->setEnabled(!trash && !readOnly);
     }
-    m_actProperties->setEnabled(!computer);
+    m_actProperties->setEnabled(!shellRoot);
     m_actRestore->setEnabled(any && trash);
     m_actRestore->setVisible(trash);
     m_actRestoreAll->setEnabled(trash && m_model->rowCount() > 0);
     m_actRestoreAll->setVisible(trash);
-    m_actEmptyTrash->setEnabled(trash || !computer);
-    m_actSelectAll->setEnabled(!computer);
-    m_actInvertSelection->setEnabled(!computer);
+    m_actEmptyTrash->setEnabled(trash || !shellRoot);
+    m_actSelectAll->setEnabled(!shellRoot);
+    m_actInvertSelection->setEnabled(!shellRoot);
     m_actOpenTerminal->setEnabled(folder.isLocalFile());
-    m_actUp->setEnabled(!computer);
+    m_actUp->setEnabled(!shellRoot);
     m_actUndo->setEnabled(FileOps::isUndoAvailable());
 
     const bool archiveSelected = one && Archives::isBrowsable(selection.first());
@@ -2466,8 +2649,10 @@ void MainWindow::updateActionStates()
         action->setEnabled(true);
         action->setChecked(action->data().toInt() == int(mode));
     }
+    if (m_viewButton)
+        m_viewButton->setIcon(ViewModeMenu::iconForMode(mode));
     for (QAction *action : m_sortGroup->actions()) {
-        action->setEnabled(!computer);
+        action->setEnabled(!shellRoot);
         action->setChecked(action->data().toInt() == m_model->sortColumn());
     }
     m_sortAscending->setChecked(m_model->sortOrder() == Qt::AscendingOrder);
@@ -2913,7 +3098,7 @@ void MainWindow::selectOnArrival(const QList<QUrl> &urls)
 
 void MainWindow::applyPendingSelection(bool listingFinished)
 {
-    if (m_pendingSelection.isEmpty() || isComputerView())
+    if (m_pendingSelection.isEmpty() || isComputerView() || isLibrariesView())
         return;
 
     if (m_pendingRename) {
@@ -2979,8 +3164,8 @@ void MainWindow::applyRename(const QUrl &url, const QString &newName)
 
 void MainWindow::createNewFolder()
 {
-    if (isComputerView())
-        return;   // Computer is not a directory, so nothing can be created in it
+    if (isComputerView() || isLibrariesView())
+        return;   // shell roots must never reach a writable KIO operation
 
     m_newFileMenu->setWorkingDirectory(operationFolder());
     m_newFileMenu->createDirectory();
@@ -2994,7 +3179,7 @@ QList<KFileItem> MainWindow::selectedItems() const
     // The drives page has devices for rows, and its indices bear no relation to
     // the directory model's
     m_selection.clear();
-    if (m_fileView && !isComputerView())
+    if (m_fileView && !isComputerView() && !isLibrariesView())
         m_selection = m_model->itemsForIndexes(m_fileView->selectedIndexes());
     m_selectionValid = true;
     return m_selection;
@@ -3027,5 +3212,7 @@ Settings::ViewMode MainWindow::currentViewMode() const
 {
     if (isComputerView())
         return m_computerView->viewMode();
+    if (isLibrariesView())
+        return m_librariesView->viewMode();
     return m_fileView->viewMode();
 }

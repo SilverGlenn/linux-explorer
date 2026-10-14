@@ -10,6 +10,8 @@
 
 #include <QAbstractProxyModel>
 #include <QApplication>
+#include <QDateTime>
+#include <QLocale>
 #include <QBasicTimer>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -17,6 +19,7 @@
 #include <QDropEvent>
 #include <QMouseEvent>
 #include <QPersistentModelIndex>
+#include <QTimer>
 #include <QStyleOptionButton>
 #include <QTimerEvent>
 #include <QHeaderView>
@@ -47,8 +50,8 @@ constexpr int kCheckMargin = 2;
 constexpr int kSpringLoadDelay = 700;
 
 // A 48px icon with three lines, and a 32px icon with two
-constexpr int kTileWidth = 280;
-constexpr int kTileHeight = 60;
+constexpr int kTileWidth = 256;
+constexpr int kTileHeight = 56;
 constexpr int kContentHeight = 50;
 
 int defaultColumnWidth(int sourceColumn)
@@ -124,6 +127,7 @@ struct ItemText {
     QString type;
     // Empty for folders
     QString size;
+    QString modified;
     QColor primary;
     QColor secondary;
 };
@@ -152,33 +156,32 @@ void paintTileText(QPainter *painter, const QRect &area, const QFontMetrics &met
     }
 }
 
-// The name over the type on the left, and the size at the far edge
+// Native Content: a larger name at left, date and size at right, and a
+// hairline between rows. Type belongs to Tiles, not this layout.
 void paintContentText(QPainter *painter, const QRect &area, const QFontMetrics &metrics,
                       const ItemText &item)
 {
     const int lineHeight = metrics.height();
     const int top = area.top() + (area.height() - lineHeight * 2) / 2;
-
-    int sizeWidth = 0;
-    if (!item.size.isEmpty())
-        sizeWidth = metrics.horizontalAdvance(item.size) + 12;
-    const int leftWidth = qMax(20, area.width() - sizeWidth);
-
-    const QRect nameRect(area.left(), top, leftWidth, lineHeight);
-    const QRect typeRect(area.left(), top + lineHeight, leftWidth, lineHeight);
-
+    const int rightWidth = qMax(0, area.width() / 2);
+    const int leftWidth = qMax(0, area.width() - rightWidth - 12);
+    const QRect nameRect(area.left(), top, leftWidth, lineHeight * 2);
+    QFont nameFont = painter->font();
+    nameFont.setPointSize(10);
+    painter->setFont(nameFont);
     painter->setPen(item.primary);
     painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
-                      metrics.elidedText(item.name, Qt::ElideRight, leftWidth));
-
+                      QFontMetrics(nameFont).elidedText(item.name, Qt::ElideRight, leftWidth));
+    nameFont.setPointSize(9);
+    painter->setFont(nameFont);
     painter->setPen(item.secondary);
-    painter->drawText(typeRect, Qt::AlignLeft | Qt::AlignVCenter,
-                      metrics.elidedText(item.type, Qt::ElideRight, leftWidth));
-
-    if (!item.size.isEmpty()) {
-        const QRect sizeRect(area.left() + leftWidth, top, sizeWidth, lineHeight);
-        painter->drawText(sizeRect, Qt::AlignRight | Qt::AlignVCenter, item.size);
-    }
+    const int right = area.right() - rightWidth + 1;
+    painter->drawText(QRect(right, top, rightWidth, lineHeight), Qt::AlignLeft | Qt::AlignVCenter,
+                      metrics.elidedText(item.modified, Qt::ElideRight, rightWidth));
+    if (!item.size.isEmpty())
+        painter->drawText(QRect(right, top + lineHeight, rightWidth, lineHeight),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QObject::tr("Size: %1").arg(item.size));
 }
 
 // The two layouts the base delegate has no notion of, plus the inline rename
@@ -308,8 +311,12 @@ public:
         const QFontMetrics metrics(opt.font);
         if (m_layout == Tile)
             paintTileText(painter, textArea, metrics, text);
-        else
+        else {
             paintContentText(painter, textArea, metrics, text);
+            painter->setPen(Aero::Palette::rgb(Aero::Palette::Hairline));
+            painter->drawLine(option.rect.bottomLeft() + QPoint(4, 0),
+                               option.rect.bottomRight() - QPoint(4, 0));
+        }
         painter->restore();
     }
 
@@ -336,6 +343,13 @@ public:
         const bool hasExtension = dot > 0 && !item.isNull() && !item.isDir();
         const int baseNameLength = hasExtension ? dot : name.length();
         line->setSelection(0, baseNameLength);
+        // QAbstractItemView focuses the editor after setEditorData(), and
+        // QLineEdit's focus handler selects everything again. Restore the
+        // basename once that has happened, without overriding later typing.
+        QTimer::singleShot(0, line, [line, name, baseNameLength] {
+            if (line->text() == name)
+                line->setSelection(0, baseNameLength);
+        });
     }
 
     void setModelData(QWidget *editor, QAbstractItemModel *,
@@ -361,8 +375,12 @@ private:
 
         ItemText text;
         text.name = index.data(Qt::DisplayRole).toString();
-        if (!item.isNull())
-            text.type = item.mimeComment();
+        if (!item.isNull()) {
+            text.type = item.isDir() ? QObject::tr("File folder") : item.mimeComment();
+            const QDateTime date = item.time(KFileItem::ModificationTime);
+            if (date.isValid())
+                text.modified = QObject::tr("Date modified: %1").arg(QLocale().toString(date, QLocale::ShortFormat));
+        }
         if (!item.isNull() && !item.isDir())
             text.size = KIO::convertSize(item.size());
 
@@ -898,6 +916,7 @@ void FileView::applyMode()
 
     // Full width rows put the box at the left, the grid modes in the corner
     const bool rowBased = m_mode == Settings::ViewMode::List
+                       || m_mode == Settings::ViewMode::SmallIcons
                        || m_mode == Settings::ViewMode::Content;
     delegate->setCheckBoxes(m_checkBoxes, rowBased);
 
@@ -910,6 +929,17 @@ void FileView::applyMode()
         m_icons->setWordWrap(false);
         m_icons->setUniformItemSizes(false);
         m_icons->setGridSize(QSize());
+        m_icons->setTextElideMode(Qt::ElideRight);
+        break;
+
+    case Settings::ViewMode::SmallIcons:
+        delegate->setLayout(ItemDelegate::Standard);
+        m_icons->setViewMode(QListView::ListMode);
+        m_icons->setFlow(QListView::LeftToRight);
+        m_icons->setWrapping(true);
+        m_icons->setWordWrap(false);
+        m_icons->setUniformItemSizes(false);
+        m_icons->setGridSize(QSize(160, 21));
         m_icons->setTextElideMode(Qt::ElideRight);
         break;
 
@@ -944,8 +974,8 @@ void FileView::applyMode()
         m_icons->setWordWrap(true);
         m_icons->setUniformItemSizes(true);
         m_icons->setTextElideMode(Qt::ElideRight);
-        m_icons->setGridSize(QSize(qMax(iconSize + 24, 80),
-                                   iconSize + 4 * fontMetrics().height()));
+        m_icons->setGridSize(QSize(qMax(iconSize + 32, 80),
+                                   iconSize + 2 * fontMetrics().height() + 8));
         break;
     }
 

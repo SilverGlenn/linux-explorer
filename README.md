@@ -1,98 +1,213 @@
-<div align="center">
+# linux-explorer — Windows 7 fidelity fork
 
-  # linux-explorer
-  <i>The Windows 7 Explorer, on Linux</i>
+An experimental fork of [actuallyaridan/linux-explorer](https://github.com/actuallyaridan/linux-explorer),
+based on direct inspection of Windows 7 Ultimate SP1 Explorer in an offline VM.
+The upstream Qt6/KDE/KIO architecture is retained; this is a usable Linux file
+manager, not a mock desktop or a Windows emulator.
 
-  <p>
-    A faithful recreation of Windows 7's Explorer built with Qt6, KDE Frameworks, and <a href="https://gitgud.io/atmk/libaero-qt">libAeroQt</a>, with every file operation handled by <a href="https://invent.kde.org/frameworks/kio">KIO</a>. Best enjoyed with <a href="https://github.com/aeroshell-desktop/aerothemeplasma">AeroThemePlasma</a>.
-  </p>
+**First fidelity pass, not complete parity.** Multi-location libraries, continuous
+view-slider sizing, and native Windows preview handlers are still missing.
+The reference VM used Basic graphics, so its Aero Glass frame was not a valid
+reference for transparency or shadows.
 
-</div>
-<br>
+See [the reference notes](docs/windows7-reference.md) for observed behavior,
+measurements, intentional Linux adaptations, and remaining work. The
+[UX Guide checklist](docs/uxguide-checklist.md) explains how Microsoft's
+Windows 7-era principles are used without overriding Explorer fidelity.
 
-> [!WARNING]
-> **Very much a work in progress.** <br>Most things are done, but there are still things that need work. Not really daily-driveable yet.
+## What changed
 
-## Installation
+- Libraries is the default landing page, with a green heading and four tiles
+  backed by real XDG Documents/Music/Pictures/Videos folders.
+- Libraries is a selectable sidebar destination. Canonical library entries and
+  Desktop/Downloads defaults no longer depend on KDE having bookmarked them.
+- Sidebar row/group spacing is closer to the Windows guest; Computer and Network
+  start collapsed.
+- View is a split button: its main half uses the verified five-mode cycle; its
+  arrow opens an eight-choice flyout with a vertical slider.
+- A preview-pane toolbar button shares the Alt+P action.
+- Breadcrumbs are button-like rather than underlined links, include a current-
+  folder dropdown, and collapse ancestors when the window is narrow.
+- Contextual commands precede New folder, and excess commands move into a
+  functional chevron overflow.
+- The pale-blue, full-width details pane has a 48 px icon, aligned metadata,
+  and a count-only unselected folder summary.
+- Text preview shows read-only content instead of a duplicate metadata card.
+  Reads are asynchronous, bounded to 256 KiB, BOM-aware, and protected against
+  stale results after selection changes.
+- Content view puts date/size at the right with row rules. Small icons uses
+  side-by-side icon/text. Icon views have less vertical padding.
+- Natural name sorting preserves folders-first ordering in both directions.
+  Inline rename preserves the extension when selecting the base name.
+- Libraries has a proper Details table and preserves selection/counts on refresh.
+  The classic menu bar has the five native menus; F6 skips hidden panes, and
+  the address editor really takes focus. F1 opens local help rather than About.
+- Rename invalidates cached selected-item URLs, so Copy/Properties uses the
+  new filename. Real KIO rename/copy/cut-paste/move and Undo have regression coverage.
 
-### Arch / CachyOS (AUR)
+File operations still go through KIO. Linux paths, device identities, mount
+permissions, and installed sharing services remain real; unsupported Windows
+features are not represented by pretend controls. Known extensions stay visible
+by default, as in upstream, rather than copying Windows' hidden-extension default.
 
-```bash
-yay -S linux-explorer
-```
+## Build and run
 
-### Pre-built binaries
+Requires CMake, a C++17 compiler, Qt6 Widgets/Concurrent/Multimedia/DBus/UiPlugin,
+KDE Frameworks 6 (KIO, CoreAddons, Config, WidgetsAddons, WindowSystem, Solid,
+FrameworkIntegration), and [libAeroQt](https://gitgud.io/atmk/libaero-qt).
 
-Download the latest binary from the [Releases](https://github.com/actuallyaridan/linux-explorer/releases/latest) page and place it somewhere in your `$PATH`. It still needs Qt6, KF6 and libAeroQt installed, same as building from source, but skips the compile:
-
-```bash
-chmod +x explorer-x86_64
-sudo mv explorer-x86_64 /usr/local/bin/explorer
-```
-
-## Building
-
-Built for CachyOS / Arch. Other distros should work given Qt6, KF6 and libAeroQt.
-
-```bash
-sudo pacman -S qt6-base qt6-multimedia cmake kio kcoreaddons kwidgetsaddons kwindowsystem kio-extras
-cmake -B build
-cmake --build build -j
-./build/explorer
-```
-
-You'll also need `libAeroQt.so` on your system, built from [libaero-qt](https://gitgud.io/atmk/libaero-qt).
-
-### Optional packages
-
-Everything below is checked for at runtime. Without one, the feature it backs is hidden or falls back rather than failing.
-
-| Package | What it gives you |
-|---------|-------------------|
-| `kio-extras` | Real search behind the search box, and archives that open as folders |
-| `kio-admin` | "Open as Administrator", this desktop's version of the UAC prompt |
-| `ark` | Send to → Compressed (zipped) folder |
-| `ffmpegthumbs`, `kdegraphics-thumbnailers` | Thumbnails for video, PDF and RAW |
-| `kdenetwork-filesharing` | Samba browsing behind Map network drive |
-
-### Being the system's file manager
-
-Explorer answers `org.freedesktop.FileManager1`, which is what every "Open Containing Folder" in the desktop calls. Dolphin ships a service file for the same name and usually gets there first, so hand it over for your user:
-
-```bash
-mkdir -p ~/.local/share/dbus-1/services && cp dbus/org.freedesktop.FileManager1.service ~/.local/share/dbus-1/services/
-xdg-mime default linux-explorer.desktop inode/directory
-```
-
-## Why not a fork of Dolphin?
-
-The hard part of a file manager is KIO: overwrite and conflict resolution, permissions, cross-device copies, restorable trash, cancellable progress and undo. Dolphin links against it directly, and so does this project. `src/model/FileOps.cpp` is a thin facade over KIO jobs, and nothing in this repository reads or writes file contents itself.
-
-What's left is the Windows 7 look and feel, which is the part worth building from scratch rather than skinning on top of Dolphin's own UI.
-
-### Keyboard
-
-| Key | Does |
-|-----|------|
-| <kbd>Ctrl</kbd>+<kbd>L</kbd>, <kbd>Alt</kbd>+<kbd>D</kbd>, <kbd>F4</kbd> | Edit the address bar |
-| <kbd>Ctrl</kbd>+<kbd>E</kbd>, <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>F3</kbd> | Search box |
-| <kbd>Backspace</kbd>, <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>Alt</kbd>+<kbd>↑</kbd> | Back / up one level |
-| <kbd>F2</kbd> / <kbd>F5</kbd> / <kbd>F11</kbd> | Rename / refresh / full screen |
-| <kbd>F6</kbd> / <kbd>Shift</kbd>+<kbd>F6</kbd> | Cycle panes |
-| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>1</kbd>..<kbd>8</kbd> | View modes, or <kbd>Ctrl</kbd>+wheel |
-| <kbd>Alt</kbd>+<kbd>P</kbd> / <kbd>Alt</kbd>+<kbd>Enter</kbd> | Preview pane / properties |
-
-### Command line
+With dependencies installed:
 
 ```bash
-explorer ~/Documents          # open a folder
-explorer --select ~/a.txt     # open its folder with the file selected
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$HOME/.local" -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build -j2
+./build/explorer-win7
 ```
 
-## Part of the WSL (Windows-alike Software for Linux) series
+On Arch, the Qt/KDE development dependencies are:
 
-Why don't you also check out the other ones?
+```bash
+sudo pacman -S cmake ninja qt6-base qt6-tools qt6-multimedia kio kcoreaddons \
+  kconfig kwidgetsaddons kwindowsystem solid frameworkintegration
+```
 
-- [Linux Device Manager](https://github.com/actuallyaridan/linux-devmgmt)
-- [Linux Control Panel](https://github.com/actuallyaridan/linux-control)
-- [Linux Minesweeper](https://github.com/actuallyaridan/linux-minesweeper)
+Build/install libAeroQt separately. The prefix argument above is useful when it
+is installed under `~/.local`; a system installation is discovered normally.
+
+```bash
+./build/explorer-win7 libraries:///     # the default landing page
+./build/explorer-win7 computer:///      # drives
+./build/explorer-win7 ~/Documents      # a real folder
+./build/explorer-win7 --select ~/a.txt  # reveal a file in its parent
+```
+
+For the intended chrome, use AeroThemePlasma/libAeroQt and an appropriate icon
+theme/font already installed on your desktop. The repository does not bundle
+new Microsoft resources extracted from the Windows disc.
+
+## Install alongside your existing file manager
+
+```bash
+cmake --install build
+```
+
+This installs `explorer-win7` and a separate **File Explorer (Windows 7 preview)**
+launcher. It does not replace `explorer`, Dolphin, your Meta+E shortcut, your
+directory MIME association, or your existing file-manager D-Bus service.
+Preferences and the single-instance bus name are separate from upstream.
+
+The browser app ID is `linux-explorer-win7`. If your decoration theme has an
+application-specific inset/no-caption exception for upstream Explorer, add this
+ID to the same exception manually; this fork does not alter your KWin settings.
+
+For deliberate desktop integration, close the preview's existing instance and
+launch it with:
+
+```bash
+explorer-win7 --register-file-manager
+```
+
+That opts into claiming `org.freedesktop.FileManager1` for the session, if
+available. It does not forcefully replace another manager holding the name.
+No system-wide D-Bus activation file is installed.
+
+The original `aur/`, desktop, and D-Bus files are retained as upstream references;
+they are not this fork's installation instructions or publishing targets.
+
+## Tests and visual review
+
+The regression suite uses real Qt widgets and KIO in temporary HOME/config/data
+directories, not your personal folders. The test runner also isolates the
+D-Bus daemon's environment and disables unneeded desktop-service activation,
+so the test process and its helpers do not use your normal configuration:
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+Generate review images of Libraries, Details, Content, Preview, Computer, and the
+view flyout:
+
+```bash
+EXPLORER_SNAPSHOTS="$PWD/build/screenshots" \
+  ctest --test-dir build --output-on-failure
+```
+
+CTest uses Qt's offscreen/Fusion renderer for portable checks. These images verify
+the client layout; they are not a screenshot of your compositor's Aero frame.
+Headless multimedia/window-system warnings are expected, not test failures.
+
+For a second client-layout pass using libAeroQt and your installed Kvantum theme:
+
+```bash
+QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=kvantum EXPLORER_NATIVE_THEME=1 \
+  EXPLORER_SNAPSHOTS="$PWD/build/screenshots-themed" \
+  tests/run-ui-tests.sh "$PWD/build/explorer_ui_tests" renderSnapshots
+```
+
+This copies only KDE/Kvantum theme preferences into the temporary config. It still
+excludes the compositor frame and does not require changing focus on your desktop.
+
+The Guide's display/scaling matrix is reproducible with Qt's configurable
+offscreen backend (tested on Qt 6.10):
+
+```bash
+tests/run-display-matrix.sh build
+```
+
+This verifies 800×600 at 100%, 1024×768 at 125%, and 1200×900 at 150%, including
+the actual requested screen geometry and scale. Logs/images stay under `build/`.
+
+The GitHub build workflow is configured to build and run the suite in Arch. Release
+publishing is limited to this repository's own artifacts; the upstream AUR
+publishing job has been removed.
+
+## Shortcuts
+
+| Key | Action |
+| --- | --- |
+| Alt+D, Ctrl+L, F4 | Edit the address bar; F4 also opens typed-path history |
+| Ctrl+E, Ctrl+F, F3 | Focus search |
+| Alt+Left / Alt+Right | Back / forward |
+| Backspace / Alt+Up | Back / up |
+| F2 / F5 / F11 | Rename / refresh / full screen |
+| Alt | Toggle classic menu bar |
+| Alt+P | Toggle preview pane |
+| F6 / Shift+F6 | Cycle panes |
+| Ctrl+Shift+1…8 | Select a view mode |
+| Ctrl+wheel | Step through view modes |
+| Alt+Enter | Properties |
+| F1 | File Explorer Help |
+
+Search, archives, thumbnails and sharing depend on installed KIO providers.
+Useful optional packages remain `kio-extras`, `kio-admin`, `ark`,
+`ffmpegthumbs`, `kdegraphics-thumbnailers`, and `kdenetwork-filesharing`.
+
+## Fork status and publishing
+
+The local development branch is `windows7-fidelity`. A local branch/checkout is
+not a GitHub-hosted fork; publication requires authentication to the user's
+GitHub account. Do not push these changes to the upstream remote. The prepared
+local commit uses the automation author `Pi <pi@localhost>` rather than
+inventing a user identity; amend it with your identity if desired before publishing.
+
+After authorizing GitHub CLI and creating your own fork, point `origin` at that
+fork and push the branch:
+
+```bash
+gh auth login
+gh repo fork actuallyaridan/linux-explorer --clone=false --remote=false
+git remote add origin https://github.com/YOUR_USERNAME/linux-explorer.git
+git push -u origin windows7-fidelity
+```
+
+## Credits and license
+
+Upstream design and implementation: **actuallyaridan**. Chrome support:
+**libAeroQt** and **AeroThemePlasma**. File operations: **KIO/KDE Frameworks**.
+
+This fork retains the upstream GPL-3.0 license; see [LICENSE](LICENSE).
+Windows and Windows Explorer are Microsoft product names used as visual and
+behavioral references. No affiliation or endorsement is implied.

@@ -1,9 +1,8 @@
 # Maintainer: actuallyaridan <https://github.com/actuallyaridan>
 #
-# This is the source of truth for the AUR package. On release,
-# .github/workflows/release.yml injects the real pkgver and sha256sums,
-# generates .SRCINFO, and pushes both to the AUR. The two values below are
-# placeholders; everything else is used verbatim.
+# Archived upstream packaging reference: its URL downloads upstream, not
+# this fidelity branch. The fork's release workflow never publishes to AUR.
+# Do not use this file to package the fork.
 
 pkgname=linux-explorer
 pkgver=0.0.0

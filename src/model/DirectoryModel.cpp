@@ -16,11 +16,13 @@
 #include <QBrush>
 #include <QClipboard>
 #include <QColor>
+#include <QCollator>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QIcon>
 #include <QLocale>
 #include <QMimeData>
+#include <QLocale>
 #include <QMimeDatabase>
 #include <QPainter>
 #include <QPixmap>
@@ -78,6 +80,12 @@ public:
         connect(QApplication::clipboard(), &QClipboard::dataChanged,
                 this, &Win7ColumnProxy::refreshCutItems);
         refreshCutItems();
+        // Qt's C-locale collator cannot do numeric sorting. Use a numeric-
+        // capable locale there too, including minimal CI/container sessions.
+        if (m_nameCollator.locale().language() == QLocale::C)
+            m_nameCollator.setLocale(QLocale(QLocale::English, QLocale::UnitedStates));
+        m_nameCollator.setCaseSensitivity(Qt::CaseInsensitive);
+        m_nameCollator.setNumericMode(true);
     }
 
     QList<int> columns() const { return m_columns; }
@@ -126,13 +134,28 @@ public:
         if (leftItem.isNull() || rightItem.isNull())
             return KDirSortFilterProxyModel::subSortLessThan(left, right);
 
+        // The base class applies directories/hidden-files ordering inside
+        // subSortLessThan(), not before it. Do not bypass that ordering merely
+        // because we have friendly captions to compare.
+        if ((sortFoldersFirst() && leftItem.isDir() != rightItem.isDir())
+            || (sortHiddenFilesLast() && leftItem.isHidden() != rightItem.isHidden()))
+            return KDirSortFilterProxyModel::subSortLessThan(left, right);
         const QString leftName = displayName(leftItem);
         const QString rightName = displayName(rightItem);
-        const int order = QString::compare(leftName, rightName, Qt::CaseInsensitive);
+        const int order = m_nameCollator.compare(leftName, rightName);
         if (order != 0)
             return order < 0;
 
         return KDirSortFilterProxyModel::subSortLessThan(left, right);
+    }
+
+    QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+    {
+        if (orientation == Qt::Horizontal && role == Qt::DisplayRole
+            && section >= 0 && section < m_columns.size()
+            && m_columns.at(section) == DirectoryModel::ModifiedTime)
+            return QObject::tr("Date modified");
+        return KDirSortFilterProxyModel::headerData(section, orientation, role);
     }
 
     QVariant data(const QModelIndex &index, int role) const override
@@ -330,6 +353,7 @@ private:
     }
 
     QList<int> m_columns;
+    QCollator m_nameCollator;
     QSet<QUrl> m_cutUrls;
     mutable QHash<QString, QIcon> m_fadedIcons;
 };

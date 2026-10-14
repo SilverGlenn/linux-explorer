@@ -1,5 +1,6 @@
 #include "AboutDialog.h"
 
+#include <QCoreApplication>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -12,9 +13,6 @@ namespace {
 // here since they set a size and colour of their own
 constexpr int kDialogWidth = 340;
 constexpr int kIconSize = 64;
-
-// The version this box reports, which is not the one the command line prints
-const char *const kVersion = "Version: 1.2";
 
 } // namespace
 
@@ -30,9 +28,9 @@ AboutDialog::AboutDialog(QWidget *parent)
     iconLabel->setPixmap(windowIcon().pixmap(kIconSize, kIconSize));
     iconLabel->setAlignment(Qt::AlignCenter);
 
-    auto *nameLabel = new QLabel(QStringLiteral("File Explorer"));
-    auto *companyLabel = new QLabel(QStringLiteral("@actuallyaridan"));
-    auto *versionLabel = new QLabel(QLatin1String(kVersion));
+    auto *nameLabel = new QLabel(QStringLiteral("File Explorer · Windows 7 fidelity"));
+    auto *companyLabel = new QLabel(QStringLiteral("@actuallyaridan (upstream)"));
+    auto *versionLabel = new QLabel(QStringLiteral("Version: %1").arg(QCoreApplication::applicationVersion()));
 
     auto *infoLayout = new QVBoxLayout;
     infoLayout->addWidget(nameLabel);

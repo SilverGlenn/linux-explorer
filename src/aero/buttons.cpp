@@ -31,7 +31,7 @@ MenuButton::MenuButton(const QString &text, QWidget *parent)
     setText(text);
     setPopupMode(QToolButton::InstantPopup);
     setToolButtonStyle(Qt::ToolButtonTextOnly);
-    setCursor(Qt::PointingHandCursor);
+    setCursor(Qt::ArrowCursor);
     setStyleSheet(QStringLiteral("QToolButton { border: none; background: transparent; }"));
     setPointSize(this, 9);
 }

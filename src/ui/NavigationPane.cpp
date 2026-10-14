@@ -3,11 +3,13 @@
 #include "DriveLabel.h"
 #include "aero/icons.h"
 #include "Locations.h"
+#include "Libraries.h"
 #include "aero/text.h"
 #include "aero/artwork.h"
 
 #include <KDirWatch>
 #include <KFilePlacesModel>
+#include <KBookmark>
 
 #include <QDir>
 #include <QDragEnterEvent>
@@ -17,6 +19,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -87,15 +90,15 @@ constexpr int kPlaceholderRole = Qt::UserRole + 1;
 // Absent for the headings and for subfolders found by walking the filesystem
 constexpr int kPlaceRowRole = Qt::UserRole + 2;
 
-constexpr int kGroupSpacing = 10;
+constexpr int kGroupSpacing = 20;
 
 // A spacer row rather than extra height on the headings, since padding a
 // heading moves its text but not its expander triangle
-QTreeWidgetItem *makeSpacer()
+QTreeWidgetItem *makeSpacer(int height = kGroupSpacing)
 {
     auto *spacer = new QTreeWidgetItem;
     spacer->setFlags(Qt::NoItemFlags);   // not selectable, not clickable
-    spacer->setSizeHint(0, QSize(0, kGroupSpacing));
+    spacer->setSizeHint(0, QSize(0, height));
     return spacer;
 }
 
@@ -186,6 +189,8 @@ NavigationPane::NavigationPane(QWidget *parent)
     m_tree->setHeaderHidden(true);
     m_tree->setRootIsDecorated(true);
     m_tree->setIndentation(14);
+    m_tree->setIconSize(QSize(16, 16));
+    m_tree->installEventFilter(this);
     // Uniform heights would ignore the size hints the spacer rows depend on
     m_tree->setUniformRowHeights(false);
     m_tree->setFrameShape(QFrame::NoFrame);
@@ -339,6 +344,7 @@ QTreeWidgetItem *NavigationPane::addGroup(const QString &title,
 {
     auto *item = new QTreeWidgetItem(m_tree);
     item->setText(0, title);
+    item->setSizeHint(0, QSize(0, 21));
     item->setIcon(0, Aero::themeIcon(iconNames));
     item->setData(0, kPlaceRowRole, -1);
     if (url.isValid()) {
@@ -366,6 +372,7 @@ void NavigationPane::addEntry(QTreeWidgetItem *group, const QModelIndex &placeIn
     item->setIcon(0, m_places->icon(placeIndex));
     item->setData(0, Qt::UserRole, url);
     item->setData(0, kPlaceRowRole, placeIndex.row());
+    item->setSizeHint(0, QSize(0, 21));
     addPlaceholderIfExpandable(item, url);
 }
 
@@ -426,6 +433,7 @@ void NavigationPane::applyChildren(const QUrl &url, const QList<QUrl> &children)
         child->setIcon(0, folderIcon);
         child->setData(0, Qt::UserRole, childUrl);
         child->setData(0, kPlaceRowRole, -1);
+        child->setSizeHint(0, QSize(0, 21));
         addPlaceholderIfExpandable(child, childUrl);
 
         // Expanding schedules that child's own scan, one level per round
@@ -460,7 +468,7 @@ void NavigationPane::rebuild()
     QTreeWidgetItem *favorites =
         addGroup(tr("Favorites"), {"favorites", "bookmarks", "starred"});
     QTreeWidgetItem *libraries =
-        addGroup(tr("Libraries"), {"folder-library", "folder-documents", "folder"});
+        addGroup(tr("Libraries"), {"folder-library", "folder-documents", "folder"}, Locations::libraries());
     QTreeWidgetItem *computer =
         addGroup(tr("Computer"), {"computer", "computer-laptop"}, Locations::computer());
     QTreeWidgetItem *network =
@@ -473,6 +481,14 @@ void NavigationPane::rebuild()
             continue;
 
         const QUrl placeUrl = m_places->url(index);
+        const bool systemItem = m_places->bookmarkForIndex(index)
+            .metaDataItem(QStringLiteral("isSystemItem")) == QLatin1String("true");
+        // KDE's built-in Trash and Recent Files are not Win7 Favorites. Keep
+        // explicitly added bookmarks, and never edit the shared places file.
+        if (systemItem && (placeUrl.scheme() == QLatin1String("trash")
+            || (placeUrl.scheme() == QLatin1String("recentlyused")
+                && placeUrl.path() == QLatin1String("/files"))))
+            continue;
 
         QTreeWidgetItem *group = nullptr;
         switch (m_places->groupType(index)) {
@@ -485,9 +501,8 @@ void NavigationPane::rebuild()
                 continue;
 
             if (isLibraryPlace(placeUrl))
-                group = libraries;
-            else
-                group = favorites;
+                continue; // canonical XDG library shortcuts are added below
+            group = favorites;
             break;
         }
         case KFilePlacesModel::RecentlySavedType:
@@ -510,11 +525,65 @@ void NavigationPane::rebuild()
         addEntry(group, index);
     }
 
-    // Win7 opens with the groups expanded, and an empty heading would sit there
-    // with an expander revealing nothing
+    // KDE does not always bookmark Desktop/Downloads. Supply the native
+    // defaults without modifying user-places.xbel, and honor hidden bookmarks.
+    int favoritePosition = 0;
+    const struct { QStandardPaths::StandardLocation location; const char *name; const char *icon; } defaults[] = {
+        {QStandardPaths::DesktopLocation, QT_TR_NOOP("Desktop"), "user-desktop"},
+        {QStandardPaths::DownloadLocation, QT_TR_NOOP("Downloads"), "folder-download"},
+    };
+    for (const auto &entry : defaults) {
+        const QString path = QStandardPaths::writableLocation(entry.location);
+        if (path.isEmpty() || QDir::cleanPath(path) == QDir::homePath()) continue;
+        const QUrl url = QUrl::fromLocalFile(path);
+        QTreeWidgetItem *item = nullptr;
+        for (int i = 0; i < favorites->childCount(); ++i)
+            if (urlForItem(favorites->child(i)).matches(url, QUrl::StripTrailingSlash))
+                item = favorites->child(i);
+        if (!item) {
+            bool bookmarked = false;
+            for (int row = 0; row < m_places->rowCount(); ++row)
+                if (m_places->url(m_places->index(row, 0)).matches(url, QUrl::StripTrailingSlash))
+                    bookmarked = true;
+            if (bookmarked) continue;
+            item = new QTreeWidgetItem;
+            item->setText(0, tr(entry.name));
+            item->setIcon(0, Aero::themeIcon({entry.icon, "folder"}));
+            item->setData(0, Qt::UserRole, url);
+            item->setData(0, kPlaceRowRole, -1);
+            item->setSizeHint(0, QSize(0, 21));
+            addPlaceholderIfExpandable(item, url);
+        } else {
+            favorites->takeChild(favorites->indexOfChild(item));
+        }
+        favorites->insertChild(favoritePosition++, item);
+    }
+    for (int i = favoritePosition; i < favorites->childCount(); ++i) {
+        QTreeWidgetItem *item = favorites->child(i);
+        const QUrl url = urlForItem(item);
+        if (url.scheme() == QLatin1String("recentlyused") && url.path() == QLatin1String("/locations")) {
+            item->setText(0, tr("Recent Places"));
+            favorites->takeChild(i);
+            favorites->insertChild(favoritePosition, item);
+            break;
+        }
+    }
+
+    for (const auto &entry : Libraries::entries()) {
+        auto *item = new QTreeWidgetItem(libraries);
+        item->setText(0, entry.name);
+        item->setIcon(0, QIcon::fromTheme(entry.iconName, Aero::themeIcon({"folder"})));
+        item->setData(0, Qt::UserRole, entry.url);
+        item->setData(0, kPlaceRowRole, -1);
+        item->setSizeHint(0, QSize(0, 21));
+        addPlaceholderIfExpandable(item, entry.url);
+    }
+
+    // Favorites and Libraries start open; Computer and Network start collapsed.
     for (QTreeWidgetItem *group : {favorites, libraries, computer, network}) {
         if (group->childCount() > 0)
-            group->setExpanded(true);
+            group->setExpanded(group == favorites || group == libraries
+                               || m_expanded.contains(urlForItem(group)));
         else if (!group->data(0, Qt::UserRole).toUrl().isValid())
             delete group;   // a heading with neither children nor a destination
     }
@@ -529,7 +598,7 @@ void NavigationPane::rebuild()
     // After the empty headings are gone, so a dropped group leaves no double
     // gap, and backwards so the indices ahead stay valid as rows are inserted
     for (int i = m_tree->topLevelItemCount() - 1; i >= 0; --i)
-        m_tree->insertTopLevelItem(i, makeSpacer());
+        m_tree->insertTopLevelItem(i, makeSpacer(i == 0 ? 10 : kGroupSpacing));
 
     setCurrentUrl(m_currentUrl);
 }
@@ -694,6 +763,14 @@ void NavigationPane::showContextMenu(const QPoint &pos)
 
 bool NavigationPane::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_tree && event->type() == QEvent::KeyPress) {
+        const auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+            const QUrl url = urlForItem(m_tree->currentItem());
+            if (url.isValid()) Q_EMIT urlActivated(url);
+            return true;
+        }
+    }
     if (watched != m_tree->viewport())
         return QWidget::eventFilter(watched, event);
 
@@ -701,7 +778,7 @@ bool NavigationPane::eventFilter(QObject *watched, QEvent *event)
         QTreeWidgetItem *item = m_tree->itemAt(pos);
         const QUrl url = urlForItem(item);
         // Computer is not a directory and nothing can be copied into it
-        if (Locations::isComputer(url))
+        if (Locations::isComputer(url) || Locations::isLibraries(url))
             return QUrl();
         return url;
     };

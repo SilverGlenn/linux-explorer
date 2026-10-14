@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=File Explorer (Windows 7 preview dialogs)
+Exec=explorer-win7 %U
+Icon=system-file-manager
+Type=Application
+NoDisplay=true
+Terminal=false
+StartupWMClass=linux-explorer-win7-dialog

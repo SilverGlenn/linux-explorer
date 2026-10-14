@@ -45,7 +45,7 @@ private:
     static constexpr int kPadding = 9;
 
     bool m_showArrow = true;
-    QColor m_normal = Palette::rgb(Palette::SoftText);
+    QColor m_normal = Palette::rgb(Palette::LinkText);
 };
 
 // The round Aero expander, checked when expanded, its arrow pointing up

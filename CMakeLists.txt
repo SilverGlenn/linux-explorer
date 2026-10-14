@@ -13,7 +13,8 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 # DBus tells KDED to load or unload its automounter module
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Multimedia DBus)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Multimedia DBus UiPlugin)
+find_package(KF6FrameworkIntegration REQUIRED)
 # Every file operation goes through KIO, nothing is reimplemented here
 find_package(KF6KIO REQUIRED)
 find_package(KF6CoreAddons REQUIRED)
@@ -24,9 +25,14 @@ find_package(KF6WindowSystem REQUIRED)
 # Solid knows a places entry's block device, which stands in for a drive letter
 find_package(KF6Solid REQUIRED)
 find_package(AeroQt REQUIRED)
+if(TARGET AeroQt::AeroQt)
+    set(EXPLORER_AERO_TARGET AeroQt::AeroQt)
+else()
+    set(EXPLORER_AERO_TARGET AeroQt)
+endif()
 
-add_executable(explorer
-    src/main.cpp
+# Share the real UI with the regression tests, including its resources.
+add_library(explorer_ui OBJECT
     src/ui/win7ui.qrc
     src/aero/artwork.cpp
     src/aero/arrows.cpp
@@ -39,6 +45,7 @@ add_executable(explorer
     src/aero/taskdialog.cpp
     src/aero/text.cpp
     src/ui/AboutDialog.cpp
+    src/ui/HelpDialog.cpp
     src/ui/AccessDialogs.cpp
     src/data/AutoMount.cpp
     src/data/Branding.cpp
@@ -60,16 +67,19 @@ add_executable(explorer
     src/ui/NavigationPane.cpp
     src/ui/PreviewPane.cpp
     src/ui/DetailsPane.cpp
+    src/ui/BreadcrumbBar.cpp
+    src/ui/LibrariesView.cpp
+    src/ui/ViewModeMenu.cpp
 )
 
-target_include_directories(explorer PRIVATE
+target_include_directories(explorer_ui PUBLIC
     src/data
     src/model
     src/ui
     src
 )
 
-target_link_libraries(explorer PRIVATE
+target_link_libraries(explorer_ui PUBLIC
     Qt6::Widgets
     Qt6::Concurrent
     Qt6::Multimedia
@@ -83,14 +93,35 @@ target_link_libraries(explorer PRIVATE
     KF6::WidgetsAddons
     KF6::WindowSystem
     KF6::Solid
-    AeroQt
+    ${EXPLORER_AERO_TARGET}
 )
 
+add_executable(explorer src/main.cpp)
+target_link_libraries(explorer PRIVATE explorer_ui)
+
 set_target_properties(explorer PROPERTIES
-    OUTPUT_NAME explorer
+    OUTPUT_NAME explorer-win7
     BUILD_RPATH "$ORIGIN"
-    INSTALL_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
 )
 
 install(TARGETS explorer RUNTIME DESTINATION bin)
-install(FILES linux-explorer.desktop DESTINATION share/applications)
+install(FILES linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
+        DESTINATION share/applications)
+configure_file(cmake/InstallDesktopEntries.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/InstallDesktopEntries.cmake @ONLY)
+install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/InstallDesktopEntries.cmake)
+install(FILES LICENSE DESTINATION share/licenses/linux-explorer-win7)
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    add_executable(explorer_ui_tests tests/ExplorerUiTest.cpp)
+    target_link_libraries(explorer_ui_tests PRIVATE explorer_ui Qt6::Test)
+    add_test(NAME explorer_ui_tests COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-ui-tests.sh $<TARGET_FILE:explorer_ui_tests>)
+    set_tests_properties(explorer_ui_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=Fusion"
+        TIMEOUT 120
+    )
+endif()

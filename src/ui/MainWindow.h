@@ -16,10 +16,12 @@ class ComputerView;
 class DetailsPane;
 class DirectoryModel;
 class FileView;
+class HelpDialog;
 class KFileItemActions;
 class KJob;
 class KNewFileMenu;
 class KMessageWidget;
+class LibrariesView;
 class NavigationPane;
 class PreviewPane;
 class QAction;
@@ -37,11 +39,12 @@ class QPropertyAnimation;
 class QModelIndex;
 class QPoint;
 class QPushButton;
+class QToolButton;
 class QWidget;
 
 // The Explorer window
 //
-// The crumb trail is built by hand out of labels rather than with KDE's own
+// The crumb trail uses split segments rather than KDE's own
 // navigator, whose rendering is not reachable from a stylesheet, and dropping
 // that means dropping its history too, hence the stack below
 class MainWindow : public QMainWindow {
@@ -123,7 +126,7 @@ private:
 
     // The subfolders of the crumb to the arrow's left, and the leading icon's
     // arrow lists the places instead
-    void showCrumbMenu(QLabel *arrow);
+    void showCrumbMenu(const QUrl &parent, const QPoint &globalPos);
 
     // Prefers the folder's places entry, so the glyphs match the pane's
     QIcon locationIcon(const QUrl &url) const;
@@ -152,9 +155,6 @@ private:
     void refreshBranding();
     void updateDetailsPane();
 
-    // Asynchronous, the query blocking for seconds on a dead network mount
-    void updateFreeSpace();
-
     void updateListMessage();
 
     // In one place, so the command bar, the menus and the context menu cannot
@@ -166,6 +166,7 @@ private:
 
     // The command bar's selection dependent buttons
     void rebuildContextualCommands();
+    void layoutCommandBar();
 
     void activateIndex(const QModelIndex &index);
     void openItems(const QList<KFileItem> &items);
@@ -202,6 +203,7 @@ private:
     void showOptionsDialog();
 
     void showAboutDialog();
+    void showHelp();
 
     // Called for every open window, the settings belonging to the application
     void applyOptions();
@@ -255,11 +257,15 @@ private:
     // While the list shows drives its rows are devices rather than files and
     // the location is not a real one, so most file behaviour stands down
     bool isComputerView() const;
+    bool isLibrariesView() const;
     bool isTrashView() const;
 
     DirectoryModel *m_model = nullptr;
     ComputerModel  *m_computerModel = nullptr;
     ComputerView   *m_computerView = nullptr;
+    LibrariesView  *m_librariesView = nullptr;
+    QWidget        *m_libraryHeader = nullptr;
+    QLabel         *m_libraryHeading = nullptr;
 
     // Swapping whole widgets rather than models keeps the tree bound to the
     // directory model, with no column state bleeding across and nothing to
@@ -300,6 +306,7 @@ private:
     DetailsPane    *m_details = nullptr;
     PreviewPane    *m_previewPane = nullptr;
     QLineEdit      *m_searchBox = nullptr;
+    QPointer<HelpDialog> m_helpWindow;
 
     // Shown under the command bar only while search results are up
     QWidget *m_searchAgainBar = nullptr;
@@ -320,11 +327,10 @@ private:
     QPushButton *m_backBtn = nullptr;
     QPushButton *m_forwardBtn = nullptr;
 
-    // The crumb menu is given the arrow and has to look its folder up, where
-    // the crumb links carry their own destination in the handler
-    QHash<QObject *, QUrl> m_crumbArrows;
-
     // The command bar, and the buttons rebuilt on selection change
+    QWidget *m_commandBar = nullptr;
+    QToolButton *m_commandOverflow = nullptr;
+    QToolButton *m_viewButton = nullptr;
     QHBoxLayout *m_commandLayout = nullptr;
     QList<QWidget *> m_contextualCommands;
 
@@ -358,13 +364,13 @@ private:
     QAction *m_actConnectDrives = nullptr;
     QAction *m_actMapDrive = nullptr;
     QAction *m_actPreviewPane = nullptr;
+    QAction *m_actHelp = nullptr;
     QAction *m_actExtract = nullptr;
     QAction *m_actOptions = nullptr;
     QAction *m_actOpenAsAdmin = nullptr;
     QAction *m_actUseCheckBoxes = nullptr;
 
     // Hidden rather than disabled in Computer, where Win7 has no such buttons
-    QWidget *m_newButton = nullptr;
     QWidget *m_newFolderButton = nullptr;
 
     QActionGroup *m_viewModeGroup = nullptr;
@@ -396,13 +402,6 @@ private:
     // Alt on its own shows the classic menu bar, so this tracks whether it was
     // pressed with no other key in between and the combinations still work
     bool m_altAlone = false;
-
-    QString m_freeSpace;
-    QUrl    m_freeSpaceUrl;
-
-    // Navigating away abandons the query rather than leaving it running against
-    // a mount that may never answer
-    QPointer<KJob> m_freeSpaceJob;
 
     // Mutable so the check can stay a const query
     mutable QUrl m_writableUrl;

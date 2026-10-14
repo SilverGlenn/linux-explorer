@@ -7,9 +7,8 @@
 // How the rest of the desktop asks a file manager to reveal a file, and the
 // single instance lock that comes with owning a bus name
 //
-// Two names are claimed, Explorer's own, which decides which process is
-// primary, and the shared one, best effort, so a rival file manager holding the
-// shared name cannot swallow Explorer's launches
+// The fork has its own instance name. The shared desktop service is opt-in so
+// trying this build does not take over the user's existing file manager.
 class FileManagerService : public QObject {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.FileManager1")
@@ -19,7 +18,7 @@ public:
 
     // False when another Explorer already holds the private name, in which case
     // nothing was registered and the caller should forward rather than open
-    bool claim();
+    bool claim(bool registerSharedService = false);
 
     bool ownsSharedName() const { return m_ownsSharedName; }
 
