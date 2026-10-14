@@ -1,33 +1,25 @@
 #pragma once
 
-#include <QFontMetrics>
 #include <QPainter>
 #include <QStyledItemDelegate>
 
-// Keeps the navigation selection/hover treatment around the row's content,
-// rather than extending it across the unused width of the navigation pane.
+// Keeps tree selection and hover backgrounds full-row, clipped to the
+// navigation viewport rather than extending past its pane boundary.
 class NavigationItemDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
-    static QRect contentRect(const QStyleOptionViewItem &option,
-                             const QModelIndex &index)
+    static QRect boundedRowRect(const QStyleOptionViewItem &option)
     {
-        int contentWidth = QFontMetrics(option.font).horizontalAdvance(option.text);
-        if (option.features.testFlag(QStyleOptionViewItem::HasDecoration))
-            contentWidth += option.decorationSize.width() + 4;
-        // A few pixels after the label keep the selection from touching glyphs.
-        contentWidth += 6;
-        const int right = qMin(option.rect.right(), option.rect.left() + contentWidth - 1);
-        return QRect(option.rect.left(), option.rect.top(),
-                     qMax(1, right - option.rect.left() + 1), option.rect.height());
+        return option.widget ? option.rect.intersected(option.widget->rect())
+                             : option.rect;
     }
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override
     {
-        QStyleOptionViewItem contentOption(option);
-        contentOption.rect = contentRect(option, index);
-        QStyledItemDelegate::paint(painter, contentOption, index);
+        QStyleOptionViewItem rowOption(option);
+        rowOption.rect = boundedRowRect(option);
+        QStyledItemDelegate::paint(painter, rowOption, index);
     }
 };
