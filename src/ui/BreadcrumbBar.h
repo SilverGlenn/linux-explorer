@@ -17,6 +17,9 @@ public:
     struct Segment { QString label; QUrl url; };
     explicit BreadcrumbBar(QWidget *parent = nullptr);
     void setTrail(const QIcon &icon, const QList<Segment> &segments);
+    // Call when the actual menu opens/closes. An invalid URL is the leading
+    // locations/hidden-ancestors dropdown, as in menuRequested.
+    void setPopupOpen(const QUrl &url, bool open);
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
     int hiddenAncestorCount() const { return m_hidden; }
