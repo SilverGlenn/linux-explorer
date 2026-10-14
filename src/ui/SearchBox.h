@@ -10,5 +10,10 @@ public:
     explicit SearchBox(QWidget *parent = nullptr);
 
 protected:
+    void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
+
+private:
+    QPalette m_blurredPalette;
 };

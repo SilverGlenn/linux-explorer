@@ -3,13 +3,17 @@
 #include <AeroQt/stylesheet.h>
 
 #include <QApplication>
+#include <QAccessible>
 #include <QDir>
 #include <QFile>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
+#include <QPointer>
 #include <QSignalBlocker>
 #include <QSignalSpy>
 #include <QTest>
+#include <QTimer>
 #include <QToolButton>
 
 class AddressControlsTest : public QObject {
@@ -66,6 +70,75 @@ private Q_SLOTS:
         QTest::mouseClick(arrows.last(), Qt::LeftButton);
         QCOMPARE(navigation.size(), 4);
         QCOMPARE(menus.size(), 5);
+    }
+
+    void breadcrumbMenusOpenOnPressWithoutDuplicateActivation()
+    {
+        BreadcrumbBar bar;
+        bar.resize(500, 22);
+        bar.setTrail(QIcon(), trail());
+        expose(bar);
+        QSignalSpy menus(&bar, &BreadcrumbBar::menuRequested);
+        QSignalSpy navigation(&bar, &BreadcrumbBar::urlActivated);
+        bool sawOpenState = false;
+        connect(&bar, &BreadcrumbBar::menuRequested, &bar,
+                [&bar, &sawOpenState](const QUrl &url, const QPoint &position) {
+            QMenu menu;
+            menu.addAction(QStringLiteral("Child folder"));
+            connect(&menu, &QMenu::aboutToShow, &menu, [&bar, url, &sawOpenState] {
+                bar.setPopupOpen(url, true);
+                auto *arrow = url.isValid()
+                    ? bar.findChildren<QToolButton *>(QStringLiteral("crumbDropdown")).last()
+                    : bar.findChild<QToolButton *>(QStringLiteral("breadcrumbLocations"));
+                sawOpenState = arrow->property("popupOpen").toBool();
+            });
+            connect(&menu, &QMenu::aboutToHide, &menu,
+                    [&bar, url] { bar.setPopupOpen(url, false); });
+            QTimer::singleShot(0, &menu, &QMenu::close);
+            menu.exec(position);
+        });
+        auto *arrow = bar.findChildren<QToolButton *>(QStringLiteral("crumbDropdown")).last();
+        QTest::mousePress(arrow, Qt::LeftButton);
+        QCOMPARE(menus.size(), 1);
+        QVERIFY(sawOpenState);
+        QVERIFY(!arrow->isDown());
+        QVERIFY(!arrow->property("popupOpen").toBool());
+        QTest::mouseMove(arrow, QPoint(-2, -2));
+        QTest::mouseMove(arrow, arrow->rect().center());
+        QCOMPARE(menus.size(), 1);
+        QTest::mouseRelease(arrow, Qt::LeftButton);
+        QCOMPARE(menus.size(), 1);
+        arrow->setFocus(Qt::TabFocusReason);
+        QTest::keyPress(arrow, Qt::Key_Space);
+        QCOMPARE(menus.size(), 2);
+        QTest::keyRelease(arrow, Qt::Key_Space);
+        QCOMPARE(menus.size(), 2);
+        auto *leading = bar.findChild<QToolButton *>(QStringLiteral("breadcrumbLocations"));
+        QTest::mousePress(leading, Qt::LeftButton);
+        QCOMPARE(menus.size(), 3);
+        QVERIFY(!menus.last().first().toUrl().isValid());
+        QVERIFY(!leading->isDown());
+        QTest::mouseRelease(leading, Qt::LeftButton);
+        QCOMPARE(menus.size(), 3);
+        QCOMPARE(navigation.size(), 0);
+    }
+
+    void breadcrumbPressAllowsTrailReplacement()
+    {
+        BreadcrumbBar bar;
+        bar.resize(500, 22);
+        bar.setTrail(QIcon(), trail());
+        expose(bar);
+        const QPointer<QToolButton> arrow(
+            bar.findChildren<QToolButton *>(QStringLiteral("crumbDropdown")).last());
+        QSignalSpy menus(&bar, &BreadcrumbBar::menuRequested);
+        connect(&bar, &BreadcrumbBar::menuRequested, &bar,
+                [&bar] { bar.setTrail(QIcon(), trail()); });
+        QTest::mousePress(arrow, Qt::LeftButton);
+        QTest::mouseRelease(&bar, Qt::LeftButton, Qt::NoModifier, QPoint(490, 10));
+        QCOMPARE(menus.size(), 1);
+        QVERIFY(arrow.isNull());
+        QCOMPARE(bar.findChildren<QToolButton *>(QStringLiteral("crumbDropdown")).size(), 3);
     }
 
     void breadcrumbPopupAndSharedChrome()
@@ -187,6 +260,61 @@ private Q_SLOTS:
         QCOMPARE(search->placeholderText(), QStringLiteral("Search Explorer Reference"));
     }
 
+    void searchHidesFocusedPlaceholderAndRestoresLocationOnBlur()
+    {
+        QWidget window;
+        auto *layout = new QHBoxLayout(&window);
+        auto *search = new SearchBox;
+        auto *other = new QLineEdit;
+        layout->addWidget(search);
+        layout->addWidget(other);
+        const QString location = QStringLiteral("Search Explorer Reference");
+        search->setPlaceholderText(location);
+        search->setAccessibleName(location);
+        expose(window);
+        QSignalSpy changes(search, &QLineEdit::textChanged);
+        search->setFocus(Qt::TabFocusReason);
+        QVERIFY(search->hasFocus());
+        const QImage focusedCue = search->grab().toImage();
+        QCOMPARE(search->placeholderText(), location);
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        auto *accessible = QAccessible::queryAccessibleInterface(search);
+        QVERIFY(accessible);
+        QCOMPARE(accessible->text(QAccessible::Name), location);
+        // A focused field with a location cue must render exactly as an empty
+        // cue: no text drawn, without clearing the actual placeholder property.
+        search->setPlaceholderText(QString());
+        const QImage focusedBlank = search->grab().toImage();
+        QCOMPARE(focusedCue, focusedBlank);
+        const QString nextLocation = QStringLiteral("Search Pictures");
+        search->setPlaceholderText(nextLocation);
+        QCOMPARE(search->grab().toImage(), focusedBlank);
+        {
+            QSignalBlocker blocker(search);
+            search->setText(QStringLiteral("restored"));
+        }
+        search->grab();
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        QVERIFY(!search->font().italic());
+        {
+            QSignalBlocker blocker(search);
+            search->clear();
+        }
+        QCOMPARE(search->grab().toImage(), focusedBlank);
+        QCOMPARE(search->placeholderText(), nextLocation);
+        other->setFocus(Qt::TabFocusReason);
+        QVERIFY(!search->hasFocus());
+        const QImage blurredCue = search->grab().toImage();
+        QCOMPARE(search->placeholderText(), nextLocation);
+        search->setPlaceholderText(QString());
+        QVERIFY(search->grab().toImage() != blurredCue);
+        search->setPlaceholderText(nextLocation);
+        QCOMPARE(search->grab().toImage(), blurredCue);
+        QCOMPARE(changes.size(), 0);
+        QCOMPARE(search->text(), QString());
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+    }
+
     void renderStateSnapshots()
     {
         const QString output = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
@@ -211,9 +339,13 @@ private Q_SLOTS:
         QTest::mouseRelease(names.last(), Qt::LeftButton);
         QTest::mouseMove(arrows.last(), arrows.last()->rect().center());
         save(bar, QStringLiteral("breadcrumb-arrow-hover"));
+        const auto popupStateConnection = connect(&bar, &BreadcrumbBar::menuRequested, &bar,
+            [&bar](const QUrl &url) { bar.setPopupOpen(url, true); });
         QTest::mousePress(arrows.last(), Qt::LeftButton);
         save(bar, QStringLiteral("breadcrumb-arrow-pressed"));
         QTest::mouseRelease(arrows.last(), Qt::LeftButton);
+        bar.setPopupOpen(trail().last().url, false);
+        disconnect(popupStateConnection);
         QTest::mouseMove(&bar, QPoint(420, 10));
         names.last()->setFocus(Qt::TabFocusReason);
         save(bar, QStringLiteral("breadcrumb-keyboard-focus"));

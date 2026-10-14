@@ -3,7 +3,9 @@
 
 #include <utility>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QResizeEvent>
 #include <QStyle>
 #include <QStyleOptionFocusRect>
@@ -45,6 +47,17 @@ protected:
         return result;
     }
 
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        // A dropdown has already opened on press. QAbstractButton otherwise
+        // emits pressed again when a held pointer re-enters after popup close.
+        if (property("menuButton").toBool() && (event->buttons() & Qt::LeftButton)) {
+            event->accept();
+            return;
+        }
+        QToolButton::mouseMoveEvent(event);
+    }
+
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
@@ -81,6 +94,7 @@ public:
         name = new CrumbButton(this);
         arrow = new CrumbButton(this);
         arrow->setProperty("arrow", true);
+        arrow->setProperty("menuButton", true);
     }
     CrumbButton *name;
     CrumbButton *arrow;
@@ -128,8 +142,12 @@ BreadcrumbBar::BreadcrumbBar(QWidget *parent) : QWidget(parent)
     m_leading->setObjectName(QStringLiteral("breadcrumbLocations"));
     m_leading->setAccessibleName(tr("Locations and hidden ancestors"));
     m_leading->setToolTip(tr("Locations and hidden ancestors"));
-    connect(m_leading, &QToolButton::clicked, this, [this] {
-        Q_EMIT menuRequested(QUrl(), m_leading->mapToGlobal(QPoint(0, height())));
+    connect(m_leading, &QToolButton::pressed, this, [this] {
+        const QPointer<QToolButton> button(m_leading);
+        Q_EMIT menuRequested(QUrl(), button->mapToGlobal(QPoint(0, button->height())));
+        // A popup can consume the release or navigation can destroy the bar.
+        // Its open highlight belongs to setPopupOpen, not a stuck button press.
+        if (button) button->setDown(false);
     });
 }
 
@@ -152,8 +170,10 @@ void BreadcrumbBar::setTrail(const QIcon &icon, const QList<Segment> &segments)
         arrow->setObjectName(QStringLiteral("crumbDropdown"));
         arrow->setAccessibleName(tr("Folders in %1").arg(segment.label));
         arrow->setToolTip(tr("Folders in %1").arg(segment.label));
-        connect(arrow, &QToolButton::clicked, this, [this, arrow, url = segment.url] {
-            Q_EMIT menuRequested(url, arrow->mapToGlobal(QPoint(0, arrow->height())));
+        connect(arrow, &QToolButton::pressed, this, [this, arrow, url = segment.url] {
+            const QPointer<QToolButton> button(arrow);
+            Q_EMIT menuRequested(url, button->mapToGlobal(QPoint(0, button->height())));
+            if (button) button->setDown(false);
         });
         m_parts.append({segment, group, name, arrow});
         group->show();
