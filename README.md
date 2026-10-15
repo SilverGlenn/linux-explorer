@@ -131,8 +131,8 @@ they are not this fork's installation instructions or publishing targets.
 
 ## Explorer-owned Open/Save chooser
 
-Other applications can request a Windows 7–style **single-file Open or Save**
-dialog over the private, asynchronous `org.win7explorer.FileChooser1` session-bus
+Other applications can request a Windows 7–style **Open or Save** dialog over
+the private, asynchronous `org.win7explorer.FileChooser1` session-bus
 API. The chooser reuses Explorer's real navigation, locations and file-view
 components, but is a separate service and a common-file-dialog layout—not a
 reveal window. It never launches the chosen file or writes the Save destination.
@@ -150,13 +150,36 @@ scripts/install-chooser-local.sh build
 D-Bus activates the independent service on the next client request. The installer
 reports if an already-running chooser needs an idle restart; it never terminates
 Explorer windows or file operations. No default-manager, shortcut, theme or portal
-settings are changed.
+settings are changed by that chooser-only installer.
 
 See **[the v1 interface and integration guide](docs/file-chooser-api.md)** for exact
 wire types, filtering/extensions/overwrite behavior, URI encoding, cancellation
 and disconnect handling, activation paths, client examples, Wayland exported-parent
-and activation-token requirements, tests and remaining limitations. Folder,
-multiple and remote selection are explicitly unsupported in v1.
+and activation-token requirements, tests and remaining limitations. Open also
+supports multiple files and folder selection; Save remains single-file. Remote
+selection is unsupported.
+
+## Optional standard FileChooser portal
+
+An opt-in backend lets portal-aware applications use this same Explorer chooser,
+including folders, multiple files, extra checkbox/combo choices, and batch-save
+destinations. Only FileChooser is selected; KDE's screen sharing, screenshots,
+settings, secrets and other portal functions retain their existing providers.
+
+```bash
+scripts/install-portal-local.sh build "$HOME/.local"       # install only
+~/.local/bin/explorer-win7-portal-setup enable             # explicit opt-in
+~/.local/bin/explorer-win7-portal-client open --deb --multiple
+~/.local/bin/explorer-win7-portal-client open --directory
+```
+
+The installer never restarts portal/app processes. Apply a selection/code update
+with a new login or deliberate idle frontend/backend restart, not while dialogs
+or portal sessions are active. The setup tool backs up the prior profile and
+supports guarded rollback. It does not force applications with custom/nonportal
+pickers to use portals or change global Qt theme settings.
+
+See **[portal installation, API, coverage and rollback](docs/file-chooser-portal.md)**.
 
 ## Tests and visual review
 
@@ -215,7 +238,7 @@ offscreen backend (tested on Qt 6.10):
 tests/run-display-matrix.sh build
 ```
 
-This runs **all ten widget/service suites** at 800×600/100%, 1024×768/125%, and
+This runs the widget/service suites listed by the runner at 800×600/100%, 1024×768/125%, and
 1200×900/150%, including chooser keyboard behavior and full-UI assertions of actual
 screen geometry and scale. Each suite retains its temporary HOME and private bus.
 Logs/images stay under `build/`. CTest additionally checks installed chooser
