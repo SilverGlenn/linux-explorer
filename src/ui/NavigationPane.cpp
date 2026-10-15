@@ -625,7 +625,8 @@ void NavigationPane::rebuild()
     // Each expand starts a scan whose children reopen in turn as results land
     for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
         const QUrl url = urlForItem(*it);
-        if (url.isValid() && m_expanded.contains(url))
+        if (url.isValid() && !(*it)->data(0, kGroupIdRole).isValid()
+            && m_expanded.contains(url))
             (*it)->setExpanded(true);
     }
 

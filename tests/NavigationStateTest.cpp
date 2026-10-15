@@ -10,6 +10,7 @@
 #include <QTreeWidgetItem>
 #include <QTest>
 #include <QImage>
+#include <QtMath>
 
 namespace {
 
@@ -96,6 +97,24 @@ private Q_SLOTS:
         QVERIFY(!group(tree, QStringLiteral("Favorites"))->isExpanded());
     }
 
+    void lastPaneGroupActionWinsOnOtherPaneRefresh()
+    {
+        NavigationPane paneA;
+        NavigationPane paneB;
+        QTreeWidget *treeA = treeFor(paneA);
+        QTreeWidget *treeB = treeFor(paneB);
+        QTRY_VERIFY(group(treeA, QStringLiteral("Libraries")));
+        QTRY_VERIFY(group(treeB, QStringLiteral("Libraries")));
+        QVERIFY(group(treeA, QStringLiteral("Libraries"))->isExpanded());
+        QVERIFY(group(treeB, QStringLiteral("Libraries"))->isExpanded());
+
+        group(treeB, QStringLiteral("Libraries"))->setExpanded(false);
+        QVERIFY(!Settings::navigationGroupExpanded(QStringLiteral("libraries")).value());
+        paneA.refresh();
+        QTRY_VERIFY(group(treeA, QStringLiteral("Libraries")));
+        QVERIFY(!group(treeA, QStringLiteral("Libraries"))->isExpanded());
+    }
+
     void realTreeSelectionLeavesVisibleRightGutter()
     {
         NavigationPane pane;
@@ -116,6 +135,14 @@ private Q_SLOTS:
         tree->setFocus();
         QCoreApplication::processEvents();
 
+        // The places model may asynchronously rebuild the tree while the test
+        // pumps events, so reacquire its row before using tree geometry.
+        favorites = group(tree, QStringLiteral("Favorites"));
+        QTRY_VERIFY(favorites && favorites->childCount() > 0);
+        row = favorites->child(0);
+        favorites->setExpanded(true);
+        tree->scrollToItem(row);
+        tree->setCurrentItem(row);
         const QRect rect = tree->visualItemRect(row);
         QVERIFY(rect.isValid());
         QVERIFY(tree->verticalScrollBar()->maximum() > 0);
@@ -128,16 +155,23 @@ private Q_SLOTS:
         QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier, rect.center());
         QCoreApplication::processEvents();
         const QImage active = tree->viewport()->grab().toImage();
-        const int selectedX = qMin(qMax(rect.left(), rect.right() - 5), active.width() - 4);
+        const qreal dpr = active.devicePixelRatio();
+        QVERIFY(dpr > 0.0);
+        const int logicalWidth = qRound(active.width() / dpr);
+        const int selectedLogicalX = qMin(qMax(rect.left(), rect.right() - 5), logicalWidth - 4);
         const int y = rect.center().y();
-        QVERIFY(selectedX >= rect.left());
+        QVERIFY(selectedLogicalX >= rect.left());
+        QVERIFY(selectedLogicalX < logicalWidth - 3);
+        const int selectedX = qFloor((selectedLogicalX + 0.5) * dpr);
+        const int gutterX = qFloor((logicalWidth - 1.5) * dpr);
+        const int pixelY = qFloor((y + 0.5) * dpr);
         if (!captureDir.isEmpty()) {
             QDir().mkpath(captureDir);
             normal.save(captureDir + QStringLiteral("/navigation-normal.png"));
             hover.save(captureDir + QStringLiteral("/navigation-hover.png"));
             active.save(captureDir + QStringLiteral("/navigation-active-selected.png"));
         }
-        QVERIFY(active.pixelColor(selectedX, y) != active.pixelColor(active.width() - 2, y));
+        QVERIFY(active.pixelColor(selectedX, pixelY) != active.pixelColor(gutterX, pixelY));
 
         tree->clearFocus();
         QCoreApplication::processEvents();
