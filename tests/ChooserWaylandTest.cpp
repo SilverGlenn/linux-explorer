@@ -1,5 +1,6 @@
 // Optional native-protocol smoke test under a PRIVATE, virtual KWin compositor.
 // This does not claim physical user-input/activation-token focus acceptance.
+#include "PortalDBusTypes.h"
 #include <KWaylandExtras>
 #include <KWindowSystem>
 
@@ -116,10 +117,54 @@ private Q_SLOTS:
         QCOMPARE(call(path, requestInterface, QStringLiteral("Close")).type(), QDBusMessage::ReplyMessage);
     }
 
+    void portalForeignParentModalAndDecorations()
+    {
+        // This test owns the frontend identity only on the virtual session bus.
+        // Public frontend routing is covered separately by PortalFrontendTest.
+        registerPortalDBusTypes();
+        auto bus = QDBusConnection::sessionBus();
+        QVERIFY(bus.registerService(QStringLiteral("org.freedesktop.portal.Desktop")));
+        m_portalTrace = m_trace + QStringLiteral(".portal");
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("WAYLAND_DEBUG"), QStringLiteral("client"));
+        m_portal.setProcessEnvironment(environment);
+        m_portal.setStandardErrorFile(m_portalTrace);
+        m_portal.setStandardOutputFile(QProcess::nullDevice());
+        m_portal.start(qEnvironmentVariable("EXPLORER_PORTAL_BINARY"));
+        QVERIFY(m_portal.waitForStarted(5000));
+        const QString backend = QStringLiteral("org.freedesktop.impl.portal.desktop.explorerwin7");
+        QTRY_VERIFY_WITH_TIMEOUT(bus.interface()->isServiceRegistered(backend).value(), 10000);
+        const QString path = QStringLiteral("/org/freedesktop/portal/desktop/request/virtual/parent");
+        auto message = QDBusMessage::createMethodCall(backend, QStringLiteral("/org/freedesktop/portal/desktop"),
+            QStringLiteral("org.freedesktop.impl.portal.FileChooser"), QStringLiteral("OpenFile"));
+        message.setArguments({QVariant::fromValue(QDBusObjectPath(path)), QStringLiteral("org.example.Virtual"),
+            QStringLiteral("wayland:") + m_handle, QStringLiteral("Virtual portal chooser"), QVariantMap{{QStringLiteral("modal"), true}}});
+        QDBusPendingCallWatcher pending(bus.asyncCall(message, 10000));
+        QTRY_VERIFY_WITH_TIMEOUT(portalTrace().contains(".import_toplevel("), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(portalTrace().contains(".set_parent_of("), 5000);
+        QVERIFY(portalTrace().contains(m_handle.toUtf8()));
+        QTRY_VERIFY(portalTrace().contains(".set_app_id(\"linux-explorer-win7-dialog\")"));
+        QTRY_VERIFY(portalTrace().contains(".get_toplevel_decoration("));
+        QTRY_VERIFY(portalTrace().contains(".set_modal("));
+        QVERIFY(!pending.isFinished());
+        auto close = QDBusMessage::createMethodCall(backend, path,
+            QStringLiteral("org.freedesktop.impl.portal.Request"), QStringLiteral("Close"));
+        QDBusPendingCallWatcher closed(bus.asyncCall(close, 5000));
+        QTRY_VERIFY(closed.isFinished());
+        QCOMPARE(closed.reply().type(), QDBusMessage::ReplyMessage);
+        QTRY_VERIFY(pending.isFinished());
+        QCOMPARE(pending.reply().arguments().first().toUInt(), 1u);
+        QVERIFY(bus.unregisterService(QStringLiteral("org.freedesktop.portal.Desktop")));
+    }
+
     void cleanupTestCase()
     {
         if (!m_handle.isEmpty()) KWaylandExtras::unexportWindow(m_parent.windowHandle());
         m_parent.hide();
+        m_portal.terminate();
+        if (m_portal.state() != QProcess::NotRunning && !m_portal.waitForFinished(5000)) {
+            m_portal.kill(); m_portal.waitForFinished(5000);
+        }
         // Only this test's QProcess child, on this test's bus/compositor.
         m_service.terminate();
         if (!m_service.waitForFinished(5000)) {
@@ -134,6 +179,13 @@ private:
         QFile file(m_trace);
         return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
     }
+    QByteArray portalTrace() const
+    {
+        QFile file(m_portalTrace);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    }
+    QProcess m_portal;
+    QString m_portalTrace;
     QProcess m_service;
     QWidget m_parent;
     QString m_handle;

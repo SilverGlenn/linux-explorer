@@ -9,13 +9,15 @@ for entry in '96dpi 1 800x600' '120dpi 1.25 1024x768' '144dpi 1.5 1200x900'; do
     echo "Testing $display at $name ($scale scaling)"
     log="$build/test-$name.log"
     : > "$log"
-    for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests navigation_state_tests browser_navigation_tests file_chooser_tests chooser_service_tests pdf_preview_tests explorer_ui_tests; do
+    for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests navigation_state_tests browser_navigation_tests file_chooser_tests chooser_service_tests chooser_presentation_tests portal_chooser_tests portal_frontend_tests pdf_preview_tests explorer_ui_tests; do
         echo "  $suite" | tee -a "$log"
+        runner="$root/tests/run-ui-tests.sh"
+        if [[ "$suite" == portal_frontend_tests ]]; then runner="$root/tests/run-portal-frontend-test.sh"; fi
         QT_QPA_PLATFORM="offscreen:configfile=$root/tests/screens/$name.json" \
           QT_STYLE_OVERRIDE=Fusion QT_SCALE_FACTOR="$scale" \
           EXPLORER_EXPECT_DISPLAY="$display" EXPLORER_EXPECT_SCALE="$scale" \
           EXPLORER_SNAPSHOTS="$build/screenshots-$name" \
-          "$root/tests/run-ui-tests.sh" "$build/$suite" >> "$log" 2>&1 || {
+          bash "$runner" "$build/$suite" >> "$log" 2>&1 || {
             tail -n 80 "$log"
             exit 1
           }

@@ -183,7 +183,9 @@ def enable(prefix):
         target = config_root() / config_names()[0]
     before = target.read_bytes() if target.exists() else None
     fallback = previous_value or preferences.get("default", "")
-    providers = [BACKEND] + [p.strip() for p in fallback.split(";") if p.strip() and p.strip() != BACKEND]
+    # 'none' disables the whole interface even when later in the list; explicit
+    # enable must remove that sentinel, not retain it as a fallback provider.
+    providers = [BACKEND] + [p.strip() for p in fallback.split(";") if p.strip() and p.strip() not in (BACKEND, "none")]
     value = ";".join(dict.fromkeys(providers)) + ";"
     after = patch_preference(original, value).encode("utf-8")
     mode = stat.S_IMODE(target.stat().st_mode) if before is not None else 0o600

@@ -652,6 +652,7 @@ void FileChooserDialog::validateSelection(const QUrl &url, bool overwriteApprove
             auto *confirmation = new QMessageBox(QMessageBox::Warning, tr("Confirm Save As"),
                 tr("%1 already exists.\nDo you want to replace it?").arg(info.fileName()),
                 QMessageBox::Yes | QMessageBox::No, this);
+            confirmation->setTextFormat(Qt::PlainText);
             confirmation->setObjectName(QStringLiteral("chooserOverwrite"));
             confirmation->setDefaultButton(QMessageBox::No);
             confirmation->setWindowModality(Qt::WindowModal);

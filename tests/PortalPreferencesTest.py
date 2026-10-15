@@ -57,6 +57,28 @@ class PortalPreferencesTest(unittest.TestCase):
         self.assertTrue(Path(result["backup"]).joinpath("manifest.json").exists())
         self.assertTrue(prefs.status()["configured"])
 
+    def test_default_none_does_not_disable_explicit_enable(self):
+        self.system_profile.write_text(self.baseline.replace("default=kde", "default=none"))
+        result = prefs.enable(self.prefix)
+        values = prefs.preferred(prefs.read_text(Path(result["config_file"])))
+        self.assertEqual(values[prefs.INTERFACE], "explorer-win7;")
+        self.assertEqual(values["default"], "none")
+        self.assertEqual(values["org.freedesktop.impl.portal.Settings"], "kde;gtk;")
+        prefs.restore(Path(result["backup"]))
+        self.assertFalse(Path(result["config_file"]).exists())
+
+    def test_explicit_none_is_restored_exactly(self):
+        self.config.mkdir(parents=True)
+        target = self.config / "kde-portals.conf"
+        before = self.baseline + prefs.INTERFACE + "=none;\n"
+        target.write_text(before)
+        result = prefs.enable(self.prefix)
+        values = prefs.preferred(prefs.read_text(target))
+        self.assertEqual(values[prefs.INTERFACE], "explorer-win7;")
+        self.assertEqual(values["default"], "kde")
+        prefs.restore(Path(result["backup"]))
+        self.assertEqual(target.read_text(), before)
+
     def test_existing_config_comments_crlf_and_other_groups_preserved(self):
         self.config.mkdir(parents=True)
         target = self.config / "portals.conf"

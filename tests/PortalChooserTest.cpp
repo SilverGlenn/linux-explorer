@@ -576,11 +576,22 @@ private Q_SLOTS:
     void saveOverwriteCloseNeverWrites()
     {
         QTemporaryDir dir;
-        const QString file = dir.filePath("existing.txt");
+        const QString file = dir.filePath("<b>keep me.txt");
         writeFile(file);
         const Pending pending = begin("SaveFile", {{"current_file", pathBytes(file)}});
         QTRY_VERIFY(m_service->dialogForRequest(pending.path));
         QPointer<FileChooserDialog> dialog = m_service->dialogForRequest(pending.path);
+        QTest::mouseClick(acceptButton(dialog), Qt::LeftButton);
+        QTRY_VERIFY(dialog->findChild<QMessageBox *>("chooserOverwrite"));
+        QPointer<QMessageBox> confirmation = dialog->findChild<QMessageBox *>("chooserOverwrite");
+        QCOMPARE(confirmation->textFormat(), Qt::PlainText);
+        QVERIFY(confirmation->text().startsWith(QStringLiteral("<b>keep me.txt already exists.")));
+        QCOMPARE(confirmation->defaultButton(), confirmation->button(QMessageBox::No));
+        QVERIFY(!pending.watcher->isFinished());
+        QTest::mouseClick(confirmation->button(QMessageBox::No), Qt::LeftButton);
+        QTRY_VERIFY(confirmation.isNull());
+        QVERIFY(!pending.watcher->isFinished());
+        { QFile original(file); QVERIFY(original.open(QIODevice::ReadOnly)); QCOMPARE(original.readAll(), QByteArray("untouched")); }
         QTest::mouseClick(acceptButton(dialog), Qt::LeftButton);
         QTRY_VERIFY(dialog->findChild<QMessageBox *>("chooserOverwrite"));
         QVERIFY(!pending.watcher->isFinished());

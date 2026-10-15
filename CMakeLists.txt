@@ -186,3 +186,8 @@ endif()
 
 include(cmake/ChooserDeployment.cmake)
 explorer_install_chooser(explorer_chooser)
+include(cmake/PortalDeployment.cmake)
+explorer_install_portal(explorer_portal)
+if(BUILD_TESTING)
+    include(tests/portal-frontend-tests.cmake)
+endif()

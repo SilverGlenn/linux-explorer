@@ -238,12 +238,16 @@ offscreen backend (tested on Qt 6.10):
 tests/run-display-matrix.sh build
 ```
 
-This runs the widget/service suites listed by the runner at 800×600/100%, 1024×768/125%, and
+This runs all thirteen widget/service/frontend suites at 800×600/100%, 1024×768/125%, and
 1200×900/150%, including chooser keyboard behavior and full-UI assertions of actual
 screen geometry and scale. Each suite retains its temporary HOME and private bus.
-Logs/images stay under `build/`. CTest additionally checks installed chooser
-activation and, when `kwin_wayland` is available, native parent/decorations/modality
-protocols on a separate virtual compositor; neither uses the desktop service.
+Logs/images stay under `build/`. CTest additionally checks installed private and
+portal chooser activation, FileChooser-only preference/rollback fixtures, and,
+when `kwin_wayland` is available, private and portal parent/decorations/modality
+protocols on a separate virtual compositor. The real system `xdg-desktop-portal`
+frontend is required for frontend tests; it runs with curated portal/service
+metadata and temporary settings, not the desktop service. Host-client tests do
+not require a document-portal FUSE mount or prove sandbox document grants.
 
 End-to-end checks cover stable 9 pt search and its visible focused frame, blocked
 navigation restore, real breadcrumb popup lifetime, navigation/inset agreement,

@@ -58,7 +58,11 @@ org.freedesktop.impl.portal.FileChooser=explorer-win7;kde;
 ```
 
 The fallback list reflects the prior preference/default, rather than always
-forcing `kde` on another desktop. A backend list is a discovery preference, **not**
+forcing `kde` on another desktop. Explicit enable omits the `none` sentinel from
+that FileChooser list, because the frontend treats it anywhere in a list as
+disabling the whole interface. The prior value remains backed up for rollback;
+`default=none` and all other interface preferences remain untouched.
+A backend list is a discovery preference, **not**
 a promise to retry KDE after an in-progress Explorer request fails.
 
 The tool checks that the installed metadata is discoverable in the current XDG

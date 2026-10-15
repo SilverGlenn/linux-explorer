@@ -32,7 +32,8 @@ function(explorer_install_chooser service_target)
     if(BUILD_TESTING)
         add_executable(chooser_wayland_tests "${PROJECT_SOURCE_DIR}/tests/ChooserWaylandTest.cpp")
         target_link_libraries(chooser_wayland_tests PRIVATE Qt6::Widgets Qt6::DBus
-            Qt6::Test KF6::WindowSystem)
+            Qt6::Test KF6::WindowSystem explorer_portal_wire)
+        add_dependencies(chooser_wayland_tests explorer_portal)
         find_program(EXPLORER_TEST_KWIN_WAYLAND kwin_wayland)
         if(EXPLORER_TEST_KWIN_WAYLAND)
             add_test(NAME chooser_wayland_tests COMMAND bash

@@ -14,6 +14,7 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 build="$(cd -- "${1:-$root/build}" && pwd)"
 kwin="${2:-$(command -v kwin_wayland)}"
 export EXPLORER_CHOOSER_BINARY="$build/explorer-win7-chooser"
+export EXPLORER_PORTAL_BINARY="$build/explorer-win7-portal"
 export EXPLORER_CHOOSER_WAYLAND_TEST="$build/chooser_wayland_tests"
 export EXPLORER_CHOOSER_WAYLAND_TRACE="$build/chooser-wayland-client.log"
 export EXPLORER_CHOOSER_WAYLAND_STATUS

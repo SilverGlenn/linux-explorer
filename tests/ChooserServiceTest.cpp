@@ -2,6 +2,8 @@
 #include "ChooserDBusTypes.h"
 #include "ChooserOptions.h"
 #include "FileChooserDialog.h"
+#include "FileView.h"
+#include <QDir>
 
 #include <QApplication>
 #include <QDBusMessage>
@@ -389,6 +391,50 @@ private Q_SLOTS:
         QTRY_VERIFY(dialog.isNull());
         QVERIFY(file.open(QIODevice::ReadOnly));
         QCOMPARE(file.readAll(), QByteArray("keep this content"));
+    }
+    void acceptedMultipleAndDirectories_data()
+    {
+        QTest::addColumn<bool>("multiple");
+        QTest::addColumn<bool>("directory");
+        QTest::newRow("multiple-files") << true << false;
+        QTest::newRow("one-directory") << false << true;
+        QTest::newRow("multiple-directories") << true << true;
+    }
+    void acceptedMultipleAndDirectories()
+    {
+        QFETCH(bool, multiple);
+        QFETCH(bool, directory);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QList<QUrl> urls;
+        for (const auto &name : (multiple ? QStringList{"first # % Ω", "second space"} : QStringList{"one folder"})) {
+            const QString path = dir.filePath(name);
+            if (directory) {
+                QVERIFY(QDir(dir.path()).mkdir(name));
+            } else {
+                QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write("original"), qint64(8));
+            }
+            urls.append(QUrl::fromLocalFile(path));
+        }
+        const QString path = request(m_owner, {{"starting_location", QUrl::fromLocalFile(dir.path()).toString(QUrl::FullyEncoded)},
+            {"multiple", multiple}, {"directory", directory}});
+        QTRY_VERIFY(m_service->dialogForRequest(path));
+        auto *dialog = m_service->dialogForRequest(path);
+        auto *view = dialog->findChild<FileView *>(); QVERIFY(view);
+        QTRY_VERIFY(view->selectUrls(urls).isEmpty());
+        ChooserSignalRecorder recorder; subscribe(m_owner, path, &recorder);
+        auto *buttons = dialog->findChild<QDialogButtonBox *>(); QVERIFY(buttons);
+        for (auto *button : buttons->buttons())
+            if (buttons->buttonRole(button) == QDialogButtonBox::AcceptRole)
+                QTest::mouseClick(qobject_cast<QPushButton *>(button), Qt::LeftButton);
+        QTRY_COMPARE(recorder.statuses.size(), 1);
+        QCOMPARE(recorder.statuses.first(), 0u);
+        const auto snapshot = result(m_owner, path);
+        QCOMPARE(snapshot.value("state").toString(), QStringLiteral("accepted"));
+        auto actual = snapshot.value("uris").toStringList(); actual.sort();
+        QStringList expected; for (const auto &url : urls) expected.append(url.toString(QUrl::FullyEncoded)); expected.sort();
+        QCOMPARE(actual, expected);
+        close(m_owner, path);
     }
     void acceptedSelectionIsEncodedAndIndependent()
     {
