@@ -19,6 +19,8 @@
 #include <QCollator>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QDir>
+#include <QRegularExpression>
 #include <QIcon>
 #include <QLocale>
 #include <QMimeData>
@@ -112,12 +114,45 @@ public:
         return m_columns.contains(sourceColumn);
     }
 
+    void setChooserFilter(const QStringList &globs, const QStringList &mimeTypes)
+    {
+        m_chooserGlobs = globs;
+        m_chooserMimeTypes = mimeTypes;
+        invalidate();
+    }
+
     // Drops the directories friendly mode hides rather than renames, and
     // showing hidden files brings them back
     bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override
     {
         if (isHiddenSystemFolder(sourceRow, sourceParent))
             return false;
+        const KFileItem item = fileItem(sourceModel()->index(sourceRow, KDirModel::Name, sourceParent));
+        if (!item.isNull() && !item.isDir()
+            && (!m_chooserGlobs.isEmpty() || !m_chooserMimeTypes.isEmpty())) {
+            bool matches = false;
+            for (const QString &glob : m_chooserGlobs) {
+                const QRegularExpression expression(QRegularExpression::wildcardToRegularExpression(
+                    glob, QRegularExpression::NonPathWildcardConversion), QRegularExpression::CaseInsensitiveOption);
+                if (expression.match(item.name()).hasMatch()) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches && !m_chooserMimeTypes.isEmpty()) {
+                const QMimeType mime = item.url().isLocalFile()
+                    ? QMimeDatabase().mimeTypeForFile(item.url().toLocalFile())
+                    : QMimeDatabase().mimeTypeForName(item.mimetype());
+                for (const QString &type : m_chooserMimeTypes) {
+                    if (mime.name() == type || mime.inherits(type)) {
+                        matches = true;
+                        break;
+                    }
+                }
+            }
+            if (!matches)
+                return false;
+        }
         return KDirSortFilterProxyModel::filterAcceptsRow(sourceRow, sourceParent);
     }
 
@@ -352,6 +387,8 @@ private:
         return faded;
     }
 
+    QStringList m_chooserGlobs;
+    QStringList m_chooserMimeTypes;
     QList<int> m_columns;
     QCollator m_nameCollator;
     QSet<QUrl> m_cutUrls;
@@ -550,4 +587,9 @@ QModelIndex DirectoryModel::indexForUrl(const QUrl &url) const
 int DirectoryModel::rowCount() const
 {
     return m_proxy->rowCount();
+}
+
+void DirectoryModel::setChooserFilter(const QStringList &globs, const QStringList &mimeTypes)
+{
+    m_proxy->setChooserFilter(globs, mimeTypes);
 }

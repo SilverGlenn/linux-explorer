@@ -4,6 +4,7 @@
 #include <QModelIndexList>
 #include <QObject>
 #include <QUrl>
+#include <QStringList>
 
 #include <KFileItem>
 
@@ -66,6 +67,10 @@ public:
 
     // Filters what is already listed, searching subfolders being a navigation
     void setNameFilter(const QString &pattern);
+
+    // Independent of fixed-text search; empty lists allow all files.
+    // Glob and MIME alternatives are ORed, while folders remain navigable.
+    void setChooserFilter(const QStringList &globs, const QStringList &mimeTypes);
 
     // An invalid index yields a null item
     KFileItem itemForIndex(const QModelIndex &proxyIndex) const;

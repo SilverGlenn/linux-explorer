@@ -56,6 +56,9 @@ public:
 
     void focusPathEdit(bool dropHistory = false);
     void endPathEdit();
+    // Commit the current address using the shared parser/policy. Hosts with a
+    // default dialog button can consume Return and call this to avoid bubbling.
+    void submitPathEdit();
     QLineEdit *pathEditor() const { return m_pathEdit; }
     void refreshTrail(); // Does not destroy an active edit.
     QList<Crumb> crumbsFor(const QUrl &url) const;

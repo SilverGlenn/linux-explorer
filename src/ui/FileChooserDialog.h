@@ -1,0 +1,77 @@
+#pragma once
+
+#include "ChooserOptions.h"
+#include <QDialog>
+#include <QPointer>
+
+class BrowserNavigation;
+class ComputerModel;
+class ComputerView;
+class DirectoryModel;
+class FileView;
+class LibrariesView;
+class NavigationPane;
+class SearchBox;
+class QComboBox;
+class QDialogButtonBox;
+class QLabel;
+class QLineEdit;
+class QMessageBox;
+class QStackedWidget;
+class QTimer;
+
+// A selection-only common file dialog. No file operations or application launches.
+class FileChooserDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit FileChooserDialog(const ChooserOptions &options, QWidget *parent = nullptr);
+    ~FileChooserDialog() override;
+    QList<QUrl> selectedUrls() const { return m_selectedUrls; }
+    QString selectedFilter() const;
+    QUrl currentUrl() const;
+    QString errorMessage() const;
+    void setVisible(bool visible) override;
+
+public slots:
+    void navigateTo(const QUrl &url);
+    void accept() override;
+    void reject() override;
+    void done(int result) override;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
+private:
+    QString locationError(const QUrl &url) const;
+    void showLocation(const QUrl &url);
+    void showError(const QString &message);
+    void activateUrl(const QUrl &url);
+    QUrl typedUrl() const;
+    void validateSelection(const QUrl &url, bool overwriteApproved = false);
+    QString defaultExtension() const;
+    void applyFilter();
+    void cycleFocus(bool backwards);
+    void dismissOverwrite();
+    void restrictViews(QWidget *container);
+
+    ChooserOptions m_options;
+    QList<QUrl> m_selectedUrls;
+    QUrl m_selectedDirectory;
+    NavigationPane *m_places;
+    DirectoryModel *m_model;
+    ComputerModel *m_computerModel;
+    BrowserNavigation *m_navigation;
+    FileView *m_files;
+    LibrariesView *m_libraries;
+    ComputerView *m_computer;
+    QStackedWidget *m_stack;
+    SearchBox *m_search;
+    QLineEdit *m_name;
+    QComboBox *m_filters;
+    QLabel *m_error;
+    QDialogButtonBox *m_buttons;
+    QTimer *m_loadingDelay;
+    QPointer<QMessageBox> m_overwrite;
+    bool m_optionsSupported = true;
+    bool m_validated = false;
+};

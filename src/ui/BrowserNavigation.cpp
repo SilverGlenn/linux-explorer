@@ -496,62 +496,67 @@ void BrowserNavigation::beginPathEdit()
     completer->setCaseSensitivity(Qt::CaseInsensitive);
     m_pathEdit->setCompleter(completer);
 
-    connect(m_pathEdit, &QLineEdit::returnPressed, this, [this] {
-        QString text = m_pathEdit->text().trimmed();
-        if (text.isEmpty()) {
-            endPathEdit();
-            return;
-        }
-        if (text.startsWith(QLatin1Char('~')))
-            text.replace(0, 1, QDir::homePath());
-
-        QUrl target = QUrl::fromUserInput(text, QDir::homePath(),
-                                          QUrl::AssumeLocalFile);
-
-        if (!accepts(target)) {
-            endPathEdit();
-            return;
-        }
-
-        // Or a nonexistent path pushes a history entry and shows nothing at all
-        if (target.isLocalFile()) {
-            const QFileInfo info(target.toLocalFile());
-            if (info.isFile()) {
-                // A file rather than a folder, which Win7 opens and stays put
-                endPathEdit();
-                emit typedFileActivated(target);
-                return;
-            }
-            if (!info.isDir()) {
-                emit errorOccurred(tr("Windows can't find '%1'. Check the "
-                                          "spelling and try again.").arg(text));
-                endPathEdit();
-                return;
-            }
-        }
-
-        // A path typed into an elevated window stays elevated, as its crumbs do.
-        if (target.isLocalFile() && currentUrl().scheme() == QLatin1String("admin"))
-            target.setScheme(QStringLiteral("admin"));
-        if (!accepts(target)) {
-            endPathEdit();
-            return;
-        }
-        Settings::addRecentPath(text);
-
-        // Navigating rebuilds the trail and destroys the editor, so when it
-        // declines to move the trail has to be put back by hand
-        const bool movesSomewhere = target.isValid()
-            && !target.matches(currentUrl(), QUrl::StripTrailingSlash);
-        if (!movesSomewhere || !navigateTo(target))
-            endPathEdit();
-    });
+    connect(m_pathEdit, &QLineEdit::returnPressed, this, &BrowserNavigation::submitPathEdit);
 
     // Layout insertion queues show() for later. Show now so F6/Alt+D
     // actually transfer the keyboard instead of leaving it on the file list.
     m_pathEdit->show();
     m_pathEdit->setFocus();
     m_pathEdit->selectAll();
+}
+
+void BrowserNavigation::submitPathEdit()
+{
+    if (!m_pathEdit)
+        return;
+    QString text = m_pathEdit->text().trimmed();
+    if (text.isEmpty()) {
+        endPathEdit();
+        return;
+    }
+    if (text.startsWith(QLatin1Char('~')))
+        text.replace(0, 1, QDir::homePath());
+
+    QUrl target = QUrl::fromUserInput(text, QDir::homePath(),
+                                      QUrl::AssumeLocalFile);
+
+    if (!accepts(target)) {
+        endPathEdit();
+        return;
+    }
+
+    // Or a nonexistent path pushes a history entry and shows nothing at all
+    if (target.isLocalFile()) {
+        const QFileInfo info(target.toLocalFile());
+        if (info.isFile()) {
+            // A file rather than a folder, which Win7 opens and stays put
+            endPathEdit();
+            emit typedFileActivated(target);
+            return;
+        }
+        if (!info.isDir()) {
+            emit errorOccurred(tr("Windows can't find '%1'. Check the "
+                                      "spelling and try again.").arg(text));
+            endPathEdit();
+            return;
+        }
+    }
+
+    // A path typed into an elevated window stays elevated, as its crumbs do.
+    if (target.isLocalFile() && currentUrl().scheme() == QLatin1String("admin"))
+        target.setScheme(QStringLiteral("admin"));
+    if (!accepts(target)) {
+        endPathEdit();
+        return;
+    }
+    Settings::addRecentPath(text);
+
+    // Navigating rebuilds the trail and destroys the editor, so when it
+    // declines to move the trail has to be put back by hand
+    const bool movesSomewhere = target.isValid()
+        && !target.matches(currentUrl(), QUrl::StripTrailingSlash);
+    if (!movesSomewhere || !navigateTo(target))
+        endPathEdit();
 }
 
 void BrowserNavigation::endPathEdit()

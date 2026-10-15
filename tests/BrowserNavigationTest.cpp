@@ -8,6 +8,7 @@
 #include <KFilePlacesModel>
 #include <QApplication>
 #include <QFile>
+#include <QDir>
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QMenu>
@@ -222,6 +223,41 @@ private slots:
             nav.goUp();
             QCOMPARE(nav.currentUrl(), Locations::libraries());
         }
+    }
+
+    void explicitAddressSubmissionUsesSharedParserAndPolicy()
+    {
+        Browser browser;
+        auto &nav = browser.navigation;
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("sub")));
+        const QString filePath = directory.filePath(QStringLiteral("a # %.txt"));
+        QFile file(filePath);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        QVERIFY(nav.initialize(QUrl::fromLocalFile(directory.path())));
+        QSignalSpy files(&nav, &BrowserNavigation::typedFileActivated);
+        QSignalSpy errors(&nav, &BrowserNavigation::errorOccurred);
+        nav.submitPathEdit(); // No active editor is a no-op.
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(directory.filePath(QStringLiteral("sub")));
+        nav.submitPathEdit();
+        QCOMPARE(nav.currentUrl(), QUrl::fromLocalFile(directory.filePath(QStringLiteral("sub"))));
+        QVERIFY(!nav.pathEditor());
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(QString::fromUtf8(QUrl::fromLocalFile(filePath).toEncoded()));
+        nav.submitPathEdit();
+        QCOMPARE(files.count(), 1);
+        QCOMPARE(files.first().first().toUrl(), QUrl::fromLocalFile(filePath));
+        QVERIFY(!nav.pathEditor());
+        nav.setUrlPolicy([](const QUrl &) { return QStringLiteral("denied"); });
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(directory.path());
+        nav.submitPathEdit();
+        QCOMPARE(errors.count(), 1);
+        QCOMPARE(files.count(), 1);
+        QVERIFY(!nav.pathEditor());
     }
 
     void progressUsesSharedAddressSurface()

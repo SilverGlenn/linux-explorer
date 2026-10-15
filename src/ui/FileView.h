@@ -83,6 +83,9 @@ public:
     // the desktop's global setting rather than this application's
     void setSingleClickToOpen(bool single);
 
+    // Opt-in chooser policy; normal Explorer behavior is unchanged.
+    void setChooserMode(bool enabled);
+
 Q_SIGNALS:
     // The index is into the flat listing, never the grouping proxy
     void activated(const QModelIndex &index);
@@ -158,6 +161,7 @@ private:
     Settings::ViewMode m_mode = Settings::ViewMode::Details;
     bool m_checkBoxes = false;
     bool m_singleClick = false;
+    bool m_chooserMode = false;
 
     // How far an inline rename has got: Normal when there is none, Locked
     // while the editor is open, and Renaming once the new name was handed on

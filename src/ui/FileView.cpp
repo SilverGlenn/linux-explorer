@@ -532,7 +532,8 @@ public:
 protected:
     void mousePressEvent(QMouseEvent *event) override
     {
-        if (event->button() == Qt::LeftButton && !indexAt(event->pos()).isValid()) {
+        if (selectionMode() != QAbstractItemView::SingleSelection
+            && event->button() == Qt::LeftButton && !indexAt(event->pos()).isValid()) {
             m_banding = true;
             m_origin = event->pos();
             // A modifier adds to the selection, so the starting point is
@@ -1027,8 +1028,8 @@ void FileView::applyMode()
     // QListView treats a Static movement as "nothing may be dragged", so both
     // setMovement() and setViewMode() switch dragging off along with the
     // viewport's drops, undoing the DragDrop mode set when the view was built
-    m_icons->setDragEnabled(true);
-    m_icons->viewport()->setAcceptDrops(true);
+    m_icons->setDragEnabled(!m_chooserMode);
+    m_icons->viewport()->setAcceptDrops(!m_chooserMode);
 
     rebuildPreviews();
     m_previewUpdateTimer->start();
@@ -1141,6 +1142,12 @@ void FileView::setCheckBoxesVisible(bool visible)
 
 bool FileView::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_chooserMode && (event->type() == QEvent::DragEnter
+        || event->type() == QEvent::DragMove || event->type() == QEvent::Drop
+        || event->type() == QEvent::ContextMenu)) {
+        event->ignore();
+        return true;
+    }
     if (event->type() != QEvent::MouseButtonPress)
         return QWidget::eventFilter(watched, event);
 
@@ -1151,6 +1158,8 @@ bool FileView::eventFilter(QObject *watched, QEvent *event)
     auto *mouse = static_cast<QMouseEvent *>(event);
 
     if (mouse->button() == Qt::MiddleButton) {
+        if (m_chooserMode)
+            return true;
         const QModelIndex flat =
             mapToFlat(view->indexAt(mouse->position().toPoint()), m_model->model());
         if (flat.isValid())
@@ -1225,6 +1234,8 @@ QModelIndex FileView::viewIndexFor(const QUrl &url) const
 
 void FileView::renameItem(const QUrl &url)
 {
+    if (m_chooserMode)
+        return;
     const QModelIndex index = viewIndexFor(url);
     if (!index.isValid())
         return;
@@ -1385,5 +1396,23 @@ void FileView::resizeEvent(QResizeEvent *event)
         const int width = m_icons->viewport()->width();
         delegate->setRowWidth(width);
         m_icons->setGridSize(QSize(width, kContentHeight));
+    }
+}
+
+void FileView::setChooserMode(bool enabled)
+{
+    m_chooserMode = enabled;
+    if (enabled)
+        setCheckBoxesVisible(false);
+    for (QAbstractItemView *view : {static_cast<QAbstractItemView *>(m_details),
+                                   static_cast<QAbstractItemView *>(m_icons)}) {
+        view->setSelectionMode(enabled ? QAbstractItemView::SingleSelection
+                                       : QAbstractItemView::ExtendedSelection);
+        view->setDragDropMode(enabled ? QAbstractItemView::NoDragDrop : QAbstractItemView::DragDrop);
+        view->setDragEnabled(!enabled);
+        view->setAcceptDrops(!enabled);
+        view->viewport()->setAcceptDrops(!enabled);
+        view->setContextMenuPolicy(enabled ? Qt::PreventContextMenu : Qt::CustomContextMenu);
+        view->setEditTriggers(QAbstractItemView::NoEditTriggers);
     }
 }
