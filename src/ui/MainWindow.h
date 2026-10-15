@@ -314,6 +314,7 @@ private:
     QWidget     *m_navBar = nullptr;
     QWidget     *m_pathBox = nullptr;
     QHBoxLayout *m_pathLayout = nullptr;
+    QPointer<QMenu> m_crumbMenu;
 
     // Fills the address box while a folder is listed, on the same delay as the
     // placeholder page

@@ -16,4 +16,14 @@ export XDG_CACHE_HOME="$sandbox/cache"
 export XDG_RUNTIME_DIR="$sandbox/runtime"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
+if [[ -n "${EXPLORER_NATIVE_THEME:-}" ]]; then
+    # QTEST_MAIN component suites also need the selected Kvantum theme. Only
+    # preferences are copied; the live config and desktop bus remain untouched.
+    mkdir -p "$XDG_CONFIG_HOME/Kvantum"
+    for preference in kdeglobals Kvantum/kvantum.kvconfig; do
+        if [[ -f "$EXPLORER_NATIVE_CONFIG_DIR/$preference" ]]; then
+            cp -- "$EXPLORER_NATIVE_CONFIG_DIR/$preference" "$XDG_CONFIG_HOME/$preference"
+        fi
+    done
+fi
 dbus-run-session --config-file="$root/tests/session-bus.conf" -- "$binary" "$@"

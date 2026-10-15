@@ -170,6 +170,94 @@ full-row library Details selection, default Favorites parity, fresh-window
 screen fitting, keyboard focus fixes, display scaling, and real KIO file-operation
 regression checks.
 
+## Refinement pass 2
+
+The fresh offline Basic-frame evidence is in
+`~/VMs/windows7/reference-pass2/25-folder-baseline.png` through
+`40-picture-folder.png`. The VM remains shut down. In particular:
+
+- `26-crumb-current-hover.png`, `27-crumb-arrow-hover.png`, and
+  `28-crumb-pressed-popup.png`: one shared split-segment highlight and a retained
+  popup-open state, without link underlines.
+- `29-selected-directory-footer.png`: name, File folder, and Date modified;
+  no creation date or recursive directory size.
+- `30-details-header-normal.png`, `33-header-hover.png`, and
+  `34-header-pressed.png`: Details header state feedback.
+- `35-search-focused-empty.png` and `36-search-typed.png`: focused-empty cue
+  hidden, with stable small search text. Windows' search-filter suggestion flyout
+  is not implemented by this Linux folder filter.
+- `37-sidebar-documents.png` and `38-sidebar-expanded.png`: selection spans the
+  navigation pane, not just the text label, but stops at the pane boundary.
+- `39-picture-thumbnails.png` and `40-picture-folder.png`: real cold-folder image
+  thumbnails rather than generic picture icons.
+
+The completed components use native line editing with 9 pt search typography,
+shared breadcrumb split chrome, bounded sidebar/header painting, asynchronous
+KIO thumbnails with cache/stale-result checks, and flexible footer metadata.
+Integration regressions verify these hooks in a real MainWindow, including
+QSignalBlocker search-URL restore and dismissal, action navigation, and external
+navigation during the actual breadcrumb QMenu's lifetime. External navigation
+now closes the old menu before replacing the trail.
+
+Navigation height is owned by AeroQt's sizeHint/inset contract, not a conflicting
+fixed-height clamp. The earlier source-image estimate was 35 px plus a 2 px inset;
+the **loaded runtime on this host measures 34 px and 36 px**, respectively, in
+both Fusion and AeroQt/Kvantum. Tests derive the row expectation from the loaded
+NavButtons height plus layout margins, require geometry == sizeHint, and require
+the inset/central top == sizeHint + 2. No installed AeroQt code was patched to
+force the estimate.
+
+Validation on Qt 6.10.2: all five Fusion suites pass; all five suites pass at each
+of 800×600/100%, 1024×768/125%, and 1200×900/150%; and all five native-widget-theme
+runs pass. Full UI/address explicitly register AeroQt over Windows7Aero Kvantum;
+the remaining three suites use Kvantum only. A fractional-DPR test correction
+maps logical border coordinates into grabbed image pixels and routes the arrow
+hover through QPA, rather than sampling transparent padding or relying on Qt's
+offscreen cursor conversion. Assertions of shared-border feedback are retained.
+
+Local whole-client captures are under `build/screenshots-refinement/` and
+`build/screenshots-refinement-themed/`, including `selected-folder.png`,
+`narrow-selected-folder.png`, `search-focused-empty.png`, and
+`search-focused-input.png`. Matrix images/logs are in `build/screenshots-96dpi/`,
+`build/screenshots-120dpi/`, `build/screenshots-144dpi/` and `build/test-*.log`.
+These are QWidget grabs of the complete client, **not native framed/glass visual
+acceptance**. Narrow footer fields intentionally elide; their full accessible
+names and tooltips remain available.
+
+## Native decoration dependency
+
+The app's transparent navigation row does not own the compositor's caption or
+inner-border artwork. SMOD's default caption/client boundary remains a separate
+integration dependency. Removing the navigation height clamp cannot remove it.
+Do not compensate with frameless window-control clones or remove real native
+controls.
+
+For a deliberately approved SMOD configuration change only:
+
+1. Back up the user's `smodrc` and inspect the existing exception order before
+   editing. Preserve every unrelated rule and setting. SMOD uses the first
+   matching enabled exception, so check for an earlier broader match.
+2. Add an enabled **window-class** exception matching the exact whitespace-delimited
+   browser token with `(^|\s)linux-explorer-win7($|\s)`. Do not use an unanchored
+   substring: `linux-explorer-win7-dialog` must not match. This also accommodates
+   a composite resource-name/class string.
+3. For this browser exception only set `HideInnerBorder=true`,
+   `HideCaption=true`, `HideIcon=true`, and **`HideTitleBar=false`**. The real
+   titlebar controls, move/resize, and system menu must remain usable. Follow
+   SMOD's configuration UI/version-specific exception format; these are not
+   global Windeco defaults.
+4. After user approval and deliberate reload/relaunch, validate a positively
+   identified preview browser in Libraries or a synthetic non-personal folder,
+   restored/maximized and active/inactive, with menus open/closed; confirm the
+   dialog class remains unaffected. Only capture that identified window.
+
+No helper or live rule was applied during this integration pass; user approval
+is still required. No KWin settings, installed theme, or original Explorer binary
+were changed. The pre-existing positively identified native Libraries capture is
+`build/native-frame-before.png`; its compositor frame alpha appears black in a
+black-backed viewer. It is an old-preview **before** image, not a final-head or
+post-rule comparison. Native framed visual sign-off remains pending.
+
 ## Remaining fidelity work
 
 - Multi-location libraries and a real library-management UI.

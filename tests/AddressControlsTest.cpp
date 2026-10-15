@@ -152,27 +152,40 @@ private Q_SLOTS:
         auto *leading = bar.findChild<QToolButton *>(QStringLiteral("breadcrumbLocations"));
         if (bar.focusWidget()) bar.focusWidget()->clearFocus();
         QTest::mouseMove(&bar, QPoint(490, 10));
-        const QImage normal = names.last()->parentWidget()->grab().toImage();
+        auto *segment = names.last()->parentWidget();
+        const auto borderColor = [](const QImage &image, const QPoint &logicalPosition) {
+            const qreal dpr = image.devicePixelRatio();
+            const int x = qBound(0, qFloor(logicalPosition.x() * dpr), image.width() - 1);
+            const int y = qBound(0, qFloor(logicalPosition.y() * dpr), image.height() - 1);
+            return image.pixelColor(x, y);
+        };
+        const QPoint rightBorder(segment->width() - 1, 5);
+        const QPoint leftBorder(0, 5);
+        const QImage normal = segment->grab().toImage();
         QTest::mouseMove(names.last(), names.last()->rect().center());
-        const QImage nameHover = names.last()->parentWidget()->grab().toImage();
-        QVERIFY(nameHover.pixelColor(nameHover.width() - 1, 5)
-                != normal.pixelColor(normal.width() - 1, 5));
+        const QImage nameHover = segment->grab().toImage();
+        // QImage coordinates are physical pixels. Fractional DPR can leave
+        // padding after the last logical border pixel in the grabbed image.
+        QVERIFY(borderColor(nameHover, rightBorder) != borderColor(normal, rightBorder));
         QTest::mousePress(names.last(), Qt::LeftButton);
         const QImage namePressed = names.last()->parentWidget()->grab().toImage();
         QVERIFY(namePressed != nameHover);
         QSignalSpy cancelledNavigation(&bar, &BreadcrumbBar::urlActivated);
         QTest::mouseRelease(names.last(), Qt::LeftButton, Qt::NoModifier, QPoint(-4, -4));
         QCOMPARE(cancelledNavigation.size(), 0);
-        QTest::mouseMove(arrows.last(), arrows.last()->rect().center());
+        // QWidget mouseMove uses QCursor::setPos; the offscreen cursor path
+        // misroutes fractional-DPR positions. Inject through QPA instead.
+        QTest::mouseMove(bar.windowHandle(), arrows.last()->mapTo(&bar, arrows.last()->rect().center()));
+        QTRY_VERIFY(arrows.last()->underMouse());
         const QImage arrowHover = names.last()->parentWidget()->grab().toImage();
-        QVERIFY(arrowHover.pixelColor(0, 5) != normal.pixelColor(0, 5));
+        QVERIFY(borderColor(arrowHover, leftBorder) != borderColor(normal, leftBorder));
         QTest::mouseMove(&bar, QPoint(490, 10));
         bar.setPopupOpen(trail().last().url, true);
         QVERIFY(arrows.last()->property("popupOpen").toBool());
         const QImage popup = names.last()->parentWidget()->grab().toImage();
         QVERIFY(popup != normal);
         // The name's outer edge changes too, not just the independent arrow.
-        QVERIFY(popup.pixelColor(0, 5) != normal.pixelColor(0, 5));
+        QVERIFY(borderColor(popup, leftBorder) != borderColor(normal, leftBorder));
         bar.setPopupOpen(trail().first().url, true);
         QVERIFY(!arrows.last()->property("popupOpen").toBool());
         QVERIFY(arrows.first()->property("popupOpen").toBool());

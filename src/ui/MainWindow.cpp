@@ -1063,7 +1063,7 @@ void MainWindow::buildNavigationBar()
 {
     m_navBar = new QWidget;
     // AeroQt reserves top->sizeHint().height(). Do not clamp that below the
-    // 29 px navigation artwork plus its layout margins (35 px in this theme).
+    // loaded navigation artwork plus its layout margins.
     auto *layout = new QHBoxLayout(m_navBar);
     layout->setContentsMargins(4, 3, 6, 3);
     layout->setSpacing(2);
@@ -1261,6 +1261,10 @@ QIcon MainWindow::locationIcon(const QUrl &url) const
 
 void MainWindow::clearPathLayout()
 {
+    // A location change (including a D-Bus reveal) must not leave a menu for
+    // the old trail visible. Close it while its breadcrumb still exists.
+    if (m_crumbMenu)
+        m_crumbMenu->close();
     while (QLayoutItem *item = m_pathLayout->takeAt(0)) {
         if (QWidget *widget = item->widget()) {
             widget->deleteLater();
@@ -1472,6 +1476,9 @@ void MainWindow::showCrumbMenu(const QUrl &parent, const QPoint &globalPos)
 
     if (menu.isEmpty())
         return;
+    if (m_crumbMenu)
+        m_crumbMenu->close();
+    m_crumbMenu = &menu; // QPointer clears when this stack menu is destroyed.
     menu.exec(globalPos);
 }
 

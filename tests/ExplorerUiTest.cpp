@@ -10,8 +10,10 @@
 #include "NavigationPane.h"
 #include "PreviewPane.h"
 #include "Settings.h"
+#include "SearchBox.h"
 #include "ViewModeMenu.h"
 #include <AeroQt/stylesheet.h>
+#include <AeroQt/navbuttons.h>
 
 #include <QActionGroup>
 #include <QApplication>
@@ -26,11 +28,13 @@
 #include <QFile>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QListView>
 #include <QMenuBar>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QScreen>
 #include <QSettings>
@@ -503,6 +507,193 @@ private Q_SLOTS:
         QTRY_COMPARE(win->windowTitle(), QStringLiteral("Libraries"));
     }
 
+    void searchBoxKeepsNinePointTextAcrossFocusAndNavigationRestore()
+    {
+        auto win = window(m_folder);
+        auto *search = win->findChild<SearchBox *>();
+        auto *view = win->findChild<FileView *>();
+        QVERIFY(search && view);
+        view->focusView();
+        QTRY_VERIFY(!search->hasFocus());
+        const QString cue = QStringLiteral("Search Explorer Reference");
+        QCOMPARE(search->placeholderText(), cue);
+        QVERIFY(search->palette().color(QPalette::PlaceholderText).alpha() > 0);
+        search->grab();
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        QVERIFY(search->font().italic());
+        const int textHeight = search->fontMetrics().height();
+
+        QTest::keyClick(win.get(), Qt::Key_E, Qt::ControlModifier);
+        QTRY_VERIFY(search->hasFocus());
+        QCOMPARE(search->palette().color(QPalette::PlaceholderText).alpha(), 0);
+        QCOMPARE(search->placeholderText(), cue);
+        QCOMPARE(search->accessibleName(), cue);
+        QTest::keyClicks(search, QStringLiteral("Notes"));
+        QCOMPARE(search->text(), QStringLiteral("Notes"));
+        search->grab();
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        QVERIFY(!search->font().italic());
+        QCOMPARE(search->fontMetrics().height(), textHeight);
+        view->focusView();
+        QTRY_VERIFY(!search->hasFocus());
+        QVERIFY(search->palette().color(QPalette::PlaceholderText).alpha() > 0);
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        QVERIFY(!search->font().italic());
+
+        // Exercise MainWindow's real QSignalBlocker restore, not a standalone
+        // SearchBox mutation. No recursive search is started by typing here.
+        navigate(*win, Locations::libraries());
+        navigate(*win, m_folder);
+        QCOMPARE(search->text(), QString());
+        search->grab();
+        QVERIFY(search->font().italic());
+        QSignalSpy changed(search, &QLineEdit::textChanged);
+        navigate(*win, Locations::search(m_folder, QStringLiteral("Readme")));
+        QCOMPARE(search->text(), QStringLiteral("Readme"));
+        QCOMPARE(changed.count(), 0);
+        search->grab();
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        QVERIFY(!search->font().italic());
+        QCOMPARE(search->fontMetrics().height(), textHeight);
+        navigate(*win, m_folder);
+        QCOMPARE(search->text(), QString());
+        search->grab();
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        QVERIFY(search->font().italic());
+    }
+
+    void breadcrumbPopupLifetime_data()
+    {
+        QTest::addColumn<QString>("closeBy");
+        QTest::newRow("dismiss") << QStringLiteral("dismiss");
+        QTest::newRow("folder-action") << QStringLiteral("action");
+        QTest::newRow("external-navigation") << QStringLiteral("navigate");
+    }
+
+    void breadcrumbPopupLifetime()
+    {
+        QFETCH(QString, closeBy);
+        auto win = window(m_folder);
+        const QPointer<BreadcrumbBar> bar(win->findChild<BreadcrumbBar *>());
+        QVERIFY(bar);
+        const QPointer<QToolButton> arrow(
+            bar->findChildren<QToolButton *>(QStringLiteral("crumbDropdown")).last());
+        QVERIFY(arrow->isVisible());
+        QSignalSpy requested(bar, &BreadcrumbBar::menuRequested);
+        QPointer<QMenu> popup;
+        bool sawOpen = false;
+        bool closedOnNavigation = false;
+        bool foundFolderAction = false;
+        QTimer::singleShot(0, win.get(), [&] {
+            popup = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!popup) return;
+            sawOpen = popup->isVisible() && arrow->property("popupOpen").toBool();
+            if (closeBy == QLatin1String("navigate")) {
+                navigate(*win, Locations::libraries());
+                closedOnNavigation = !popup->isVisible();
+                popup->close(); // Bound the test even if navigation fails to close it.
+            } else if (closeBy == QLatin1String("action")) {
+                for (QAction *action : popup->actions()) {
+                    if (action->text() != QLatin1String("Photos")) continue;
+                    foundFolderAction = true;
+                    QTest::mouseClick(popup, Qt::LeftButton, Qt::NoModifier,
+                                      popup->actionGeometry(action).center());
+                    break;
+                }
+                if (popup && popup->isVisible()) popup->close();
+            } else {
+                QTest::keyClick(popup, Qt::Key_Escape);
+            }
+        });
+        QTimer::singleShot(1000, win.get(), [] {
+            if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget()))
+                menu->close();
+        });
+        QTest::mousePress(arrow, Qt::LeftButton);
+        QTest::mouseRelease(win.get(), Qt::LeftButton, Qt::NoModifier, QPoint(0, 0));
+        QCOMPARE(requested.count(), 1);
+        QVERIFY(sawOpen);
+        QVERIFY(popup.isNull()); // MainWindow's stack QMenu dies after exec().
+        if (closeBy == QLatin1String("dismiss")) {
+            QVERIFY(bar);
+            QVERIFY(!arrow->property("popupOpen").toBool());
+            QCOMPARE(win->windowTitle(), QStringLiteral("Explorer Reference"));
+        } else {
+            QTRY_VERIFY(bar.isNull()); // Deferred deletion of the replaced trail.
+            if (closeBy == QLatin1String("action")) {
+                QVERIFY(foundFolderAction);
+                QCOMPARE(win->windowTitle(), QStringLiteral("Photos"));
+            } else {
+                QVERIFY(closedOnNavigation);
+                QCOMPARE(win->windowTitle(), QStringLiteral("Libraries"));
+            }
+            auto *replacement = win->findChild<BreadcrumbBar *>();
+            QVERIFY(replacement);
+            for (auto *button : replacement->findChildren<QToolButton *>())
+                QVERIFY(!button->property("popupOpen").toBool());
+        }
+    }
+
+    void navigationSizeHintMatchesInsetReservation()
+    {
+        auto win = window(m_folder);
+        auto *search = win->findChild<SearchBox *>();
+        QVERIFY(search);
+        auto *navigation = search->parentWidget();
+        auto *buttons = navigation->findChild<Aero::NavButtons *>();
+        QVERIFY(buttons && navigation->layout());
+        const QMargins margins = navigation->layout()->contentsMargins();
+        const int expectedHint = buttons->height() + margins.top() + margins.bottom();
+        for (const QSize size : {QSize(820, 560), QSize(500, 400)}) {
+            win->resize(size);
+            QTRY_COMPARE(navigation->height(), navigation->sizeHint().height());
+            const int hint = navigation->sizeHint().height();
+            QCOMPARE(hint, expectedHint);
+            QCOMPARE(navigation->geometry(), QRect(0, 0, win->width(), hint));
+            QCOMPARE(win->contentsMargins().top(), hint + 2);
+            QCOMPARE(win->centralWidget()->geometry().top(), hint + 2);
+        }
+    }
+
+    void selectedDirectoryFooterKeepsMetadataAtNormalAndNarrowWidths()
+    {
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        auto *footer = win->findChild<DetailsPane *>();
+        QTRY_COMPARE(model->rowCount(), 4);
+        QVERIFY(view->selectUrl(QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Project notes"))));
+        auto *name = footer->findChild<QLabel *>(QStringLiteral("detailsPrimary"));
+        auto *type = footer->findChild<QLabel *>(QStringLiteral("detailsSecondary"));
+        auto *modified = footer->findChild<QLabel *>(QStringLiteral("detailsTopMetadata"));
+        auto *size = footer->findChild<QLabel *>(QStringLiteral("detailsBottomMetadata"));
+        auto *created = footer->findChild<QLabel *>(QStringLiteral("detailsCreatedMetadata"));
+        QVERIFY(name && type && modified && size && created);
+        for (const int width : {820, 500}) {
+            win->resize(width, 560);
+            QTRY_COMPARE(footer->width(), win->centralWidget()->width());
+            QTRY_COMPARE(name->toolTip(), QStringLiteral("Project notes"));
+            QCOMPARE(type->toolTip(), QStringLiteral("File folder"));
+            QVERIFY(modified->toolTip().startsWith(QStringLiteral("Date modified:")));
+            QCOMPARE(size->toolTip(), QString());
+            QCOMPARE(created->toolTip(), QString());
+            QVERIFY(created->isHidden());
+            QCOMPARE(footer->height(), 54);
+            for (auto *label : {name, type, modified}) {
+                QCOMPARE(label->accessibleName(), label->toolTip());
+                QVERIFY(label->isVisible());
+                QVERIFY(footer->rect().contains(label->geometry()));
+            }
+            if (width == 820) {
+                QCOMPARE(name->text(), name->toolTip());
+                QCOMPARE(modified->text(), modified->toolTip());
+            }
+        }
+        navigate(*win, Locations::libraries());
+        QCOMPARE(modified->toolTip(), QString());
+        QCOMPARE(type->toolTip(), QString());
+    }
+
     void fileViewsPreserveSelectionAndRenameBaseName()
     {
         auto win = window(m_folder);
@@ -774,6 +965,22 @@ private Q_SLOTS:
         auto *view = win->findChild<FileView *>();
         QTest::qWait(100);
         QVERIFY(win->grab().save(path + QStringLiteral("/details.png")));
+        QVERIFY(view->selectUrl(QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Project notes"))));
+        QTest::qWait(30);
+        QVERIFY(win->grab().save(path + QStringLiteral("/selected-folder.png")));
+        win->resize(500, 400);
+        QTest::qWait(30);
+        QVERIFY(win->grab().save(path + QStringLiteral("/narrow-selected-folder.png")));
+        win->resize(820, 560);
+        auto *search = win->findChild<SearchBox *>();
+        QVERIFY(search);
+        search->setFocus();
+        QTRY_VERIFY(search->hasFocus());
+        QVERIFY(win->grab().save(path + QStringLiteral("/search-focused-empty.png")));
+        QTest::keyClicks(search, QStringLiteral("Notes"));
+        QVERIFY(win->grab().save(path + QStringLiteral("/search-focused-input.png")));
+        search->clear();
+        view->focusView();
         QVERIFY(view->selectUrl(m_notes));
         QAction *content = actionNamed(*win, QStringLiteral("Content"));
         QVERIFY(content);

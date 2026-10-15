@@ -96,9 +96,13 @@ launcher. It does not replace `explorer`, Dolphin, your Meta+E shortcut, your
 directory MIME association, or your existing file-manager D-Bus service.
 Preferences and the single-instance bus name are separate from upstream.
 
-The browser app ID is `linux-explorer-win7`. If your decoration theme has an
-application-specific inset/no-caption exception for upstream Explorer, add this
-ID to the same exception manually; this fork does not alter your KWin settings.
+The browser app ID is `linux-explorer-win7`; dialogs use
+`linux-explorer-win7-dialog`. Continuous caption/navigation glass depends on an
+**opt-in browser-only SMOD decoration exception**, not just the client layout.
+This fork does not alter KWin/SMOD settings. See the [decoration integration
+notes](docs/windows7-reference.md#native-decoration-dependency) for the exact
+match and retained native controls; live configuration and framed visual sign-off
+are still pending approval.
 
 For deliberate desktop integration, close the preview's existing instance and
 launch it with:
@@ -127,8 +131,8 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-Generate review images of Libraries, Details, Content, Preview, Computer, and the
-view flyout:
+Generate review images of Libraries, Details, selected folders (normal/narrow),
+focused-empty/typed search, Content, Preview, Computer, and the view flyout:
 
 ```bash
 EXPLORER_SNAPSHOTS="$PWD/build/screenshots" \
@@ -144,11 +148,23 @@ For a second client-layout pass using libAeroQt and your installed Kvantum theme
 ```bash
 QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=kvantum EXPLORER_NATIVE_THEME=1 \
   EXPLORER_SNAPSHOTS="$PWD/build/screenshots-themed" \
-  tests/run-ui-tests.sh "$PWD/build/explorer_ui_tests" renderSnapshots
+  tests/run-ui-tests.sh "$PWD/build/explorer_ui_tests"
 ```
 
-This copies only KDE/Kvantum theme preferences into the temporary config. It still
-excludes the compositor frame and does not require changing focus on your desktop.
+For all five suites with the native widget theme, use the same environment with
+this runner loop (CTest intentionally pins Fusion):
+
+```bash
+for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests explorer_ui_tests; do
+  QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=kvantum EXPLORER_NATIVE_THEME=1 \
+    tests/run-ui-tests.sh "$PWD/build/$suite" || exit 1
+done
+```
+
+Only `kdeglobals` and `Kvantum/kvantum.kvconfig` are copied into the temporary
+config. Full UI and address tests explicitly register AeroQt over Kvantum; the
+other three suites exercise Kvantum without registering AeroQt. These runs still
+exclude the compositor frame and do not change focus or settings on your desktop.
 
 The Guide's display/scaling matrix is reproducible with Qt's configurable
 offscreen backend (tested on Qt 6.10):
@@ -157,8 +173,18 @@ offscreen backend (tested on Qt 6.10):
 tests/run-display-matrix.sh build
 ```
 
-This verifies 800×600 at 100%, 1024×768 at 125%, and 1200×900 at 150%, including
-the actual requested screen geometry and scale. Logs/images stay under `build/`.
+This runs **all five suites** at 800×600/100%, 1024×768/125%, and 1200×900/150%,
+including full-UI assertions of the actual screen geometry and scale. Each suite
+retains its temporary HOME and private bus. Logs/images stay under `build/`.
+
+Refinement pass 2 has passed the five Fusion suites, all 15 matrix suite runs,
+and the five native-widget-theme runs. End-to-end checks cover stable 9 pt search
+through focus, typing, blur and blocked navigation restore; real breadcrumb popup
+lifetime/close-on-navigation; navigation/inset height agreement; and selected
+folder footer metadata at normal/narrow widths. Asynchronous thumbnail and
+list/header/sidebar regressions remain covered by the component suites. See the
+[reference notes](docs/windows7-reference.md#refinement-pass-2) for evidence and
+unverified native-frame dependencies.
 
 The GitHub build workflow is configured to build and run the suite in Arch. Release
 publishing is limited to this repository's own artifacts; the upstream AUR
@@ -187,21 +213,13 @@ Useful optional packages remain `kio-extras`, `kio-admin`, `ark`,
 
 ## Fork status and publishing
 
-The local development branch is `windows7-fidelity`. A local branch/checkout is
-not a GitHub-hosted fork; publication requires authentication to the user's
-GitHub account. Do not push these changes to the upstream remote. The prepared
-local commit uses the automation author `Pi <pi@localhost>` rather than
-inventing a user identity; amend it with your identity if desired before publishing.
-
-After authorizing GitHub CLI and creating your own fork, point `origin` at that
-fork and push the branch:
-
-```bash
-gh auth login
-gh repo fork actuallyaridan/linux-explorer --clone=false --remote=false
-git remote add origin https://github.com/YOUR_USERNAME/linux-explorer.git
-git push -u origin windows7-fidelity
-```
+The development branch is `windows7-fidelity`; this checkout's `origin` is the
+user's fork, `https://github.com/SilverGlenn/linux-explorer.git`, not upstream.
+Refinement pass 2 remains **local and unpublished** pending review of the exact
+final commit. No installation or push is part of these validation runs. Commits
+use the per-command automation identity `Pi <pi@localhost>` without changing the
+user's Git identity. After approval, publish only the reviewed branch with a
+normal, non-force push; do not change the default branch or create a release.
 
 ## Credits and license
 
