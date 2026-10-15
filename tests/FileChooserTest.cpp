@@ -19,6 +19,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -27,9 +28,12 @@
 #include <QScreen>
 #include <QScopeGuard>
 #include <QSignalSpy>
+#include <QStyle>
+#include <QStyleOptionComboBox>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTreeWidget>
+#include <QtMath>
 
 class FileChooserTest : public QObject {
     Q_OBJECT
@@ -673,6 +677,80 @@ private slots:
         QVERIFY(dialog.isVisible());
         QVERIFY(!dialog.errorMessage().isEmpty());
         QVERIFY(dialog.selectedUrls().isEmpty());
+    }
+
+    void fileTypeArrowUsesAeroGlyphAndNativePopup()
+    {
+        QTemporaryDir dir;
+        writeFile(dir.filePath(QStringLiteral("selected.deb")));
+        auto options = optionsFor(dir.path());
+        options.suggestedName = QStringLiteral("selected.deb");
+        options.filters = {{"deb", "Debian packages (*.deb)", {"*.deb"}, {}},
+                           {"all", "All files (*)", {"*"}, {}}};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        QSignalSpy accepted(&dialog, &QDialog::accepted);
+        auto *combo = dialog.findChild<QComboBox *>(QStringLiteral("chooserFileType"));
+        QVERIFY(combo);
+        const QImage glyph(QStringLiteral(":/AeroQt/ribbon/arrowDown.svg.png"));
+        QVERIFY(!glyph.isNull());
+        QVERIFY(dialog.styleSheet().contains(QStringLiteral("url(:/AeroQt/ribbon/arrowDown.svg.png)")));
+        QStyleOptionComboBox option;
+        option.initFrom(combo);
+        const QRect arrow = combo->style()->subControlRect(QStyle::CC_ComboBox, &option,
+                                                           QStyle::SC_ComboBoxArrow, combo);
+        QVERIFY(arrow.width() >= 18);
+        QTest::mouseMove(&dialog, QPoint(1, 1));
+        for (int state = 0; state < 3; ++state) {
+            if (state == 1) QTest::mouseMove(combo, arrow.center());
+            if (state == 2) {
+                QTest::mouseClick(combo, Qt::LeftButton, Qt::NoModifier, arrow.center());
+                QTRY_VERIFY(combo->view()->isVisible());
+            }
+            QTest::qWait(10);
+            const QImage image = combo->grab().toImage();
+            const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+            if (!snapshots.isEmpty()) {
+                QVERIFY(QDir().mkpath(snapshots));
+                QVERIFY(image.save(snapshots + QStringLiteral("/chooser-file-type-%1.png").arg(state)));
+            }
+            const qreal dpr = image.devicePixelRatio();
+            const QRect inside = arrow.adjusted(3, 2, -3, -2);
+            const QRect pixels = QRect(qRound(inside.x() * dpr), qRound(inside.y() * dpr),
+                qRound(inside.width() * dpr), qRound(inside.height() * dpr)).intersected(image.rect());
+            QRect ink;
+            int darkPixels = 0;
+            for (int y = pixels.top(); y <= pixels.bottom(); ++y) {
+                for (int x = pixels.left(); x <= pixels.right(); ++x) {
+                    const QColor color = image.pixelColor(x, y);
+                    if (qMax(color.red(), qMax(color.green(), color.blue())) >= 128) continue;
+                    // The old platform arrow was navy. Fractional-DPI blending
+                    // of black over the pressed #D6E4F0 surface can differ by 14
+                    // between red/blue while all channels remain below 128.
+                    QVERIFY2(qAbs(color.red() - color.blue()) <= 14,
+                        qPrintable(QStringLiteral("state %1 pixel %2").arg(state).arg(color.name())));
+                    ++darkPixels;
+                    ink = ink.united(QRect(x, y, 1, 1));
+                }
+            }
+            QVERIFY(darkPixels >= qRound(4 * dpr * dpr));
+            QVERIFY(ink.width() <= qCeil(7 * dpr));
+            QVERIFY(ink.height() <= qCeil(5 * dpr));
+            const QPointF center = QRectF(ink).center() / dpr;
+            QVERIFY(qAbs(center.x() - QRectF(arrow).center().x()) <= 2);
+            QVERIFY(qAbs(center.y() - QRectF(arrow).center().y()) <= 2);
+        }
+        QTest::keyClick(combo->view(), Qt::Key_Escape);
+        QTRY_VERIFY(!combo->view()->isVisible());
+        combo->setFocus();
+        QTest::keyClick(combo, Qt::Key_Down, Qt::AltModifier);
+        QTRY_VERIFY(combo->view()->isVisible());
+        QTest::keyClick(combo->view(), Qt::Key_Down);
+        QTest::keyClick(combo->view(), Qt::Key_Return);
+        QTRY_COMPARE(dialog.selectedFilter(), QStringLiteral("all"));
+        QCOMPARE(accepted.count(), 0);
+        QVERIFY(dialog.isVisible());
+        QVERIFY(dialog.errorMessage().isEmpty());
     }
 
     void geometryAndNativeDialogIdentity()

@@ -106,7 +106,22 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
         "QDialog#fileChooserDialog QHeaderView::section { background: #F7F7F7; color: black; }"
         "QDialog#fileChooserDialog QLineEdit#chooserFileName,"
         "QDialog#fileChooserDialog QComboBox#chooserFileType { background: white; color: black;"
-        " border-image: none; border: 1px solid #7F9DB9; padding: 2px; }"));
+        " border-image: none; border: 1px solid #7F9DB9; padding: 2px; }"
+        // Skin the subcontrol too: an otherwise styled combo falls back to the
+        // platform's classic beveled button/arrow. Reuse AeroQt's small glyph.
+        "QDialog#fileChooserDialog QComboBox#chooserFileType { padding-right: 20px; }"
+        "QDialog#fileChooserDialog QComboBox#chooserFileType::drop-down {"
+        " subcontrol-origin: padding; subcontrol-position: top right; width: 18px;"
+        " border: none; border-left: 1px solid transparent; background: transparent; }"
+        "QDialog#fileChooserDialog QComboBox#chooserFileType::drop-down:hover {"
+        " border-left-color: %1; background: %2; }"
+        "QDialog#fileChooserDialog QComboBox#chooserFileType::drop-down:on {"
+        " border-left-color: %1; background: %3; }"
+        "QDialog#fileChooserDialog QComboBox#chooserFileType::down-arrow {"
+        " image: url(:/AeroQt/ribbon/arrowDown.svg.png); width: 6px; height: 4px; }")
+        .arg(QLatin1String(Aero::Palette::GlassBorder),
+             QLatin1String(Aero::Palette::GlassHover),
+             QLatin1String(Aero::Palette::GlassPressed)));
     setWindowTitle(options.title.isEmpty()
         ? (options.mode == ChooserMode::SaveFile ? tr("Save As") : tr("Open")) : options.title);
     setSizeGripEnabled(true);
