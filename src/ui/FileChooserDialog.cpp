@@ -310,6 +310,7 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
                 const int initial = combo->findData(choice.selected);
                 combo->setCurrentIndex(initial < 0 ? 0 : initial);
                 auto *label = new QLabel(choice.label);
+                label->setTextFormat(Qt::PlainText);
                 label->setBuddy(combo);
                 label->setWordWrap(true);
                 choicesLayout->addWidget(label, row, 0);

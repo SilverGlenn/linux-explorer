@@ -121,6 +121,21 @@ set_target_properties(explorer_chooser PROPERTIES
     BUILD_RPATH "$ORIGIN"
 )
 
+# Standard portal wire types are reusable by non-GUI clients.
+add_library(explorer_portal_wire STATIC src/data/PortalDBusTypes.cpp)
+target_include_directories(explorer_portal_wire PUBLIC src/data)
+target_link_libraries(explorer_portal_wire PUBLIC Qt6::Core Qt6::DBus)
+
+add_library(explorer_portal_service STATIC
+    src/data/PortalChooserService.cpp
+    src/data/PortalChooserOptions.cpp
+)
+target_link_libraries(explorer_portal_service PUBLIC explorer_ui explorer_portal_wire)
+target_sources(explorer_portal_service INTERFACE $<TARGET_OBJECTS:explorer_ui>)
+add_executable(explorer_portal src/portal-main.cpp)
+target_link_libraries(explorer_portal PRIVATE explorer_portal_service)
+set_target_properties(explorer_portal PROPERTIES OUTPUT_NAME explorer-win7-portal BUILD_RPATH "$ORIGIN")
+
 add_executable(explorer src/main.cpp)
 target_link_libraries(explorer PRIVATE explorer_ui)
 
@@ -149,6 +164,7 @@ if(BUILD_TESTING)
     include(tests/browser-navigation-tests.cmake)
     include(tests/file-chooser-tests.cmake)
     include(tests/chooser-service-tests.cmake)
+    include(tests/portal-chooser-tests.cmake)
     add_executable(chooser_presentation_tests tests/ChooserPresentationTest.cpp)
     target_link_libraries(chooser_presentation_tests PRIVATE explorer_ui Qt6::Test)
     add_test(NAME chooser_presentation_tests COMMAND bash
