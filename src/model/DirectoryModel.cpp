@@ -114,8 +114,11 @@ public:
         return m_columns.contains(sourceColumn);
     }
 
-    void setChooserFilter(const QStringList &globs, const QStringList &mimeTypes)
+    void setChooserFilter(const QStringList &globs, const QStringList &mimeTypes,
+                          Qt::CaseSensitivity sensitivity, bool foldersOnly)
     {
+        m_chooserSensitivity = sensitivity;
+        m_foldersOnly = foldersOnly;
         m_chooserGlobs = globs;
         m_chooserMimeTypes = mimeTypes;
         invalidate();
@@ -128,12 +131,16 @@ public:
         if (isHiddenSystemFolder(sourceRow, sourceParent))
             return false;
         const KFileItem item = fileItem(sourceModel()->index(sourceRow, KDirModel::Name, sourceParent));
+        if (m_foldersOnly && !item.isNull() && !item.isDir())
+            return false;
         if (!item.isNull() && !item.isDir()
             && (!m_chooserGlobs.isEmpty() || !m_chooserMimeTypes.isEmpty())) {
             bool matches = false;
             for (const QString &glob : m_chooserGlobs) {
                 const QRegularExpression expression(QRegularExpression::wildcardToRegularExpression(
-                    glob, QRegularExpression::NonPathWildcardConversion), QRegularExpression::CaseInsensitiveOption);
+                    glob, QRegularExpression::NonPathWildcardConversion),
+                    m_chooserSensitivity == Qt::CaseInsensitive
+                        ? QRegularExpression::CaseInsensitiveOption : QRegularExpression::NoPatternOption);
                 if (expression.match(item.name()).hasMatch()) {
                     matches = true;
                     break;
@@ -144,7 +151,9 @@ public:
                     ? QMimeDatabase().mimeTypeForFile(item.url().toLocalFile())
                     : QMimeDatabase().mimeTypeForName(item.mimetype());
                 for (const QString &type : m_chooserMimeTypes) {
-                    if (mime.name() == type || mime.inherits(type)) {
+                    if (mime.name() == type || mime.inherits(type)
+                        || (type.endsWith(QLatin1String("/*"))
+                            && mime.name().startsWith(type.chopped(1)))) {
                         matches = true;
                         break;
                     }
@@ -387,6 +396,8 @@ private:
         return faded;
     }
 
+    Qt::CaseSensitivity m_chooserSensitivity = Qt::CaseInsensitive;
+    bool m_foldersOnly = false;
     QStringList m_chooserGlobs;
     QStringList m_chooserMimeTypes;
     QList<int> m_columns;
@@ -589,7 +600,8 @@ int DirectoryModel::rowCount() const
     return m_proxy->rowCount();
 }
 
-void DirectoryModel::setChooserFilter(const QStringList &globs, const QStringList &mimeTypes)
+void DirectoryModel::setChooserFilter(const QStringList &globs, const QStringList &mimeTypes,
+                                      Qt::CaseSensitivity sensitivity, bool foldersOnly)
 {
-    m_proxy->setChooserFilter(globs, mimeTypes);
+    m_proxy->setChooserFilter(globs, mimeTypes, sensitivity, foldersOnly);
 }

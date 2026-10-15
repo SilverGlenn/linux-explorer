@@ -84,7 +84,7 @@ public:
     void setSingleClickToOpen(bool single);
 
     // Opt-in chooser policy; normal Explorer behavior is unchanged.
-    void setChooserMode(bool enabled);
+    void setChooserMode(bool enabled, bool multiple = false);
 
 Q_SIGNALS:
     // The index is into the flat listing, never the grouping proxy

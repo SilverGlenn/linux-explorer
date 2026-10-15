@@ -1399,14 +1399,14 @@ void FileView::resizeEvent(QResizeEvent *event)
     }
 }
 
-void FileView::setChooserMode(bool enabled)
+void FileView::setChooserMode(bool enabled, bool multiple)
 {
     m_chooserMode = enabled;
     if (enabled)
         setCheckBoxesVisible(false);
     for (QAbstractItemView *view : {static_cast<QAbstractItemView *>(m_details),
                                    static_cast<QAbstractItemView *>(m_icons)}) {
-        view->setSelectionMode(enabled ? QAbstractItemView::SingleSelection
+        view->setSelectionMode(enabled && !multiple ? QAbstractItemView::SingleSelection
                                        : QAbstractItemView::ExtendedSelection);
         view->setDragDropMode(enabled ? QAbstractItemView::NoDragDrop : QAbstractItemView::DragDrop);
         view->setDragEnabled(!enabled);

@@ -2,6 +2,7 @@
 
 #include "ChooserOptions.h"
 #include <QDialog>
+#include <QMap>
 #include <QPointer>
 
 class BrowserNavigation;
@@ -28,6 +29,7 @@ public:
     ~FileChooserDialog() override;
     QList<QUrl> selectedUrls() const { return m_selectedUrls; }
     QString selectedFilter() const;
+    QMap<QString, QString> selectedChoices() const;
     QUrl currentUrl() const;
     QString errorMessage() const;
     void setVisible(bool visible) override;
@@ -50,13 +52,18 @@ private:
     void validateSelection(const QUrl &url, bool overwriteApproved = false);
     QString defaultExtension() const;
     void applyFilter();
+    bool folderMode() const;
+    void acceptItems(const QList<QUrl> &urls, bool folders);
+    void acceptSaveFiles(const QUrl &folder);
+    void finishSelection(const QList<QUrl> &urls);
     void cycleFocus(bool backwards);
     void dismissOverwrite();
     void restrictViews(QWidget *container);
 
     ChooserOptions m_options;
     QList<QUrl> m_selectedUrls;
-    QUrl m_selectedDirectory;
+    bool m_selectionIntent = false;
+    QMap<QString, QWidget *> m_choiceControls;
     NavigationPane *m_places;
     DirectoryModel *m_model;
     ComputerModel *m_computerModel;

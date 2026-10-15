@@ -69,8 +69,11 @@ public:
     void setNameFilter(const QString &pattern);
 
     // Independent of fixed-text search; empty lists allow all files.
-    // Glob and MIME alternatives are ORed, while folders remain navigable.
-    void setChooserFilter(const QStringList &globs, const QStringList &mimeTypes);
+    // Glob and MIME alternatives (including subtype wildcards) are ORed.
+    // Folders remain navigable; foldersOnly hides every non-folder.
+    void setChooserFilter(const QStringList &globs, const QStringList &mimeTypes,
+                          Qt::CaseSensitivity sensitivity = Qt::CaseInsensitive,
+                          bool foldersOnly = false);
 
     // An invalid index yields a null item
     KFileItem itemForIndex(const QModelIndex &proxyIndex) const;

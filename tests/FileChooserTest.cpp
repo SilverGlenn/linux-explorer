@@ -11,6 +11,11 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QAccessible>
+#include <QItemSelectionModel>
 #include <QCompleter>
 #include <QStringListModel>
 #include <QContextMenuEvent>
@@ -663,8 +668,8 @@ private slots:
         auto options = optionsFor(dir.path());
         options.suggestedName = QStringLiteral("existing.txt");
         if (kind == 0) options.localOnly = false;
-        if (kind == 1) options.multiple = true;
-        if (kind == 2) options.directory = true;
+        if (kind == 1) { options.mode = ChooserMode::SaveFile; options.multiple = true; }
+        if (kind == 2) { options.mode = ChooserMode::SaveFile; options.directory = true; }
         if (kind == 3) options.selectedFilter = QStringLiteral("missing-id");
         if (kind == 4) options.defaultExtension = QStringLiteral(".txt");
         if (kind == 5) options.defaultExtension = QStringLiteral("a/b");
@@ -751,6 +756,375 @@ private slots:
         QCOMPARE(accepted.count(), 0);
         QVERIFY(dialog.isVisible());
         QVERIFY(dialog.errorMessage().isEmpty());
+    }
+
+    void multipleFileSelectionNeverParsesWhitespaceAndTypedIntentWins()
+    {
+        QTemporaryDir dir;
+        const QList<QUrl> urls = {QUrl::fromLocalFile(dir.filePath("a space # %.txt")),
+                                 QUrl::fromLocalFile(dir.filePath(QString::fromUtf8("日本語.txt")))};
+        for (const auto &url : urls) writeFile(url.toLocalFile());
+        auto options = optionsFor(dir.path());
+        options.multiple = true;
+        FileChooserDialog dialog(options);
+        show(dialog);
+        auto *model = dialog.findChild<DirectoryModel *>();
+        auto *files = dialog.findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 2);
+        QCOMPARE(files->currentView()->selectionMode(), QAbstractItemView::ExtendedSelection);
+        QVERIFY(files->selectUrls(urls).isEmpty());
+        QCOMPARE(model->itemsForIndexes(files->selectedIndexes()).size(), 2);
+        files->setViewMode(Settings::ViewMode::LargeIcons);
+        QCOMPARE(files->currentView()->selectionMode(), QAbstractItemView::ExtendedSelection);
+        QCOMPARE(model->itemsForIndexes(files->selectedIndexes()).size(), 2);
+        files->focusView();
+        QTest::keyClick(files->currentView(), Qt::Key_Return);
+        QCOMPARE(dialog.selectedUrls().size(), 2);
+        for (const auto &url : urls) QVERIFY(dialog.selectedUrls().contains(url));
+
+        FileChooserDialog typed(options);
+        show(typed);
+        auto *typedFiles = typed.findChild<FileView *>();
+        QTRY_COMPARE(typed.findChild<DirectoryModel *>()->rowCount(), 2);
+        QVERIFY(typedFiles->selectUrls(urls).isEmpty());
+        name(typed)->setText(QString::fromUtf8(urls.first().toEncoded()));
+        typed.accept();
+        QCOMPARE(typed.selectedUrls(), QList<QUrl>{urls.first()});
+    }
+
+    void mixedFileFolderSelectionAndStaleNameStayOpen()
+    {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkdir("folder"));
+        writeFile(dir.filePath("file.txt"));
+        auto options = optionsFor(dir.path());
+        options.multiple = true;
+        options.suggestedName = "file.txt";
+        FileChooserDialog dialog(options);
+        show(dialog);
+        auto *files = dialog.findChild<FileView *>();
+        QTRY_COMPARE(dialog.findChild<DirectoryModel *>()->rowCount(), 2);
+        const QList<QUrl> urls = {QUrl::fromLocalFile(dir.filePath("file.txt")),
+                                 QUrl::fromLocalFile(dir.filePath("folder"))};
+        QVERIFY(files->selectUrls(urls).isEmpty());
+        dialog.accept();
+        QVERIFY(dialog.selectedUrls().isEmpty());
+        QVERIFY(!dialog.errorMessage().isEmpty());
+        QVERIFY(dialog.isVisible());
+        QVERIFY(files->selectUrl(urls.first()));
+        QCOMPARE(name(dialog)->text(), QStringLiteral("file.txt"));
+        files->selectionModel()->clearSelection();
+        QVERIFY(name(dialog)->text().isEmpty());
+        dialog.accept();
+        QVERIFY(dialog.selectedUrls().isEmpty());
+        QVERIFY(dialog.isVisible());
+    }
+
+    void folderSelectionAndNavigation_data()
+    {
+        QTest::addColumn<bool>("multiple");
+        QTest::newRow("single") << false;
+        QTest::newRow("multiple") << true;
+    }
+
+    void folderSelectionAndNavigation()
+    {
+        QFETCH(bool, multiple);
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkdir("a space # %"));
+        QVERIFY(QDir(dir.path()).mkdir(QString::fromUtf8("日本語")));
+        writeFile(dir.filePath("not-a-folder.txt"));
+        auto options = optionsFor(dir.path());
+        options.directory = true;
+        options.multiple = multiple;
+        options.filters = {{"text", "Text", {"*.txt"}, {}}};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        auto *model = dialog.findChild<DirectoryModel *>();
+        auto *files = dialog.findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 2);
+        const QUrl first = QUrl::fromLocalFile(dir.filePath("a space # %"));
+        const QUrl second = QUrl::fromLocalFile(dir.filePath(QString::fromUtf8("日本語")));
+        QVERIFY(files->selectUrl(first));
+        auto *view = files->currentView();
+        const QModelIndex index = model->indexForUrl(first);
+        QTRY_VERIFY(!view->visualRect(index).isEmpty());
+        QTest::mouseClick(view->viewport(), Qt::LeftButton, Qt::NoModifier, view->visualRect(index).center());
+        QTest::mouseDClick(view->viewport(), Qt::LeftButton, Qt::NoModifier, view->visualRect(index).center());
+        QTRY_COMPARE(dialog.currentUrl(), first);
+        QVERIFY(dialog.selectedUrls().isEmpty());
+        dialog.navigateTo(options.startingLocation);
+        QTRY_COMPARE(model->rowCount(), 2);
+        QVERIFY(files->selectUrl(first));
+        files->focusView();
+        QTest::keyClick(files->currentView(), Qt::Key_Return);
+        QCOMPARE(dialog.currentUrl(), first);
+        QVERIFY(dialog.selectedUrls().isEmpty());
+        dialog.navigateTo(options.startingLocation);
+        QTRY_COMPARE(model->rowCount(), 2);
+        const QList<QUrl> selected = multiple ? QList<QUrl>{first, second} : QList<QUrl>{first};
+        QVERIFY(files->selectUrls(selected).isEmpty());
+        dialog.accept();
+        QCOMPARE(dialog.selectedUrls().size(), selected.size());
+        for (const auto &url : selected) QVERIFY(dialog.selectedUrls().contains(url));
+
+        FileChooserDialog current(options);
+        show(current);
+        current.accept();
+        QCOMPARE(current.selectedUrls(), QList<QUrl>{options.startingLocation});
+
+        FileChooserDialog typed(options);
+        show(typed);
+        name(typed)->setText(QString::fromUtf8(first.toEncoded()));
+        typed.accept();
+        QCOMPARE(typed.selectedUrls(), QList<QUrl>{first});
+    }
+
+    void folderModeVirtualLocationsRequireRealBackingFolders()
+    {
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path());
+        options.directory = true;
+        FileChooserDialog dialog(options);
+        show(dialog);
+        for (const auto &location : {Locations::libraries(), Locations::computer()}) {
+            dialog.navigateTo(location);
+            dialog.accept();
+            QCOMPARE(dialog.currentUrl(), location);
+            QVERIFY(dialog.selectedUrls().isEmpty());
+            QVERIFY(!dialog.errorMessage().isEmpty());
+        }
+        for (const auto &entry : Libraries::entries()) {
+            QVERIFY(QDir().mkpath(entry.url.toLocalFile()));
+            dialog.navigateTo(entry.url);
+            QCOMPARE(dialog.currentUrl(), entry.url);
+        }
+        const auto last = dialog.currentUrl();
+        dialog.accept();
+        QCOMPARE(dialog.selectedUrls(), QList<QUrl>{last});
+    }
+
+    void choicesAreNativeAccessibleAndFooterIsBounded()
+    {
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path());
+        options.acceptLabel = "&Choose && keep";
+        options.choices = {{"check", "&Reencode", {}, ""},
+                           {"encoding", "&Encoding:", {{"utf8", "Unicode"}, {"latin", "Western"}}, ""},
+                           {"enabled", "Enabled", {}, "true"},
+                           {"selected", "Selected:", {{"a", "A"}, {"b", "B"}}, "b"}};
+        for (int i = 0; i < 15; ++i)
+            options.choices.append({QString::number(i), QStringLiteral("Extra %1").arg(i), {}, ""});
+        FileChooserDialog dialog(options);
+        show(dialog);
+        QCOMPARE(dialog.selectedChoices().value("check"), QStringLiteral("false"));
+        QCOMPARE(dialog.selectedChoices().value("encoding"), QStringLiteral("utf8"));
+        QCOMPARE(dialog.selectedChoices().value("enabled"), QStringLiteral("true"));
+        QCOMPARE(dialog.selectedChoices().value("selected"), QStringLiteral("b"));
+        auto *scroll = dialog.findChild<QScrollArea *>("chooserChoices");
+        QVERIFY(scroll);
+        QVERIFY(scroll->height() <= 110);
+        QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
+        QComboBox *encoding = nullptr;
+        for (auto *combo : scroll->findChildren<QComboBox *>())
+            if (combo->accessibleName() == QStringLiteral("&Encoding:")) encoding = combo;
+        QVERIFY(encoding);
+        QVERIFY(encoding->property("chooserAeroCombo").toBool());
+        QVERIFY(encoding->focusPolicy() != Qt::NoFocus);
+        bool buddy = false;
+        for (auto *label : scroll->findChildren<QLabel *>())
+            if (label->buddy() == encoding) buddy = true;
+        QVERIFY(buddy);
+        auto *iface = QAccessible::queryAccessibleInterface(encoding);
+        QVERIFY(iface);
+        QVERIFY(!iface->text(QAccessible::Name).isEmpty());
+        scroll->ensureWidgetVisible(encoding);
+        encoding->setFocus();
+        QTest::keyClick(encoding, Qt::Key_Down, Qt::AltModifier);
+        QTRY_VERIFY(encoding->view()->isVisible());
+        QTest::keyClick(encoding->view(), Qt::Key_Down);
+        QTest::keyClick(encoding->view(), Qt::Key_Return);
+        QTRY_COMPARE(dialog.selectedChoices().value("encoding"), QStringLiteral("latin"));
+        auto *check = scroll->findChild<QCheckBox *>();
+        QVERIFY(check);
+        QCOMPARE(check->palette().color(QPalette::WindowText), QColor(Qt::black));
+        scroll->ensureWidgetVisible(check);
+        check->setFocus();
+        QTest::keyClick(check, Qt::Key_Space);
+        QCOMPARE(dialog.selectedChoices().value("check"), QStringLiteral("true"));
+        auto *buttons = dialog.findChild<QDialogButtonBox *>();
+        bool acceptLabel = false;
+        for (auto *button : buttons->buttons())
+            if (buttons->buttonRole(button) == QDialogButtonBox::AcceptRole)
+                acceptLabel = button->text() == options.acceptLabel;
+        QVERIFY(acceptLabel);
+        for (const QSize size : {QSize(760, 510), QSize(540, 400), QSize(480, 340)}) {
+            dialog.resize(size);
+            QTest::qWait(20);
+            QVERIFY(dialog.rect().contains(QRect(buttons->mapTo(&dialog, QPoint()), buttons->size())));
+            QVERIFY(name(dialog)->width() >= 100);
+            QVERIFY(encoding->width() >= 100);
+            QVERIFY(scroll->height() <= 110);
+        }
+    }
+
+    void saveFilesPreservesOrderUniquifiesAndNeverWrites()
+    {
+        QTemporaryDir dir;
+        writeFile(dir.filePath("same.txt"), "unchanged");
+        QVERIFY(QDir(dir.path()).mkdir("same (1).txt"));
+        QVERIFY(QFile::link(dir.filePath("missing"), dir.filePath("same (2).txt")));
+        auto options = optionsFor(dir.path(), ChooserMode::SaveFiles);
+        options.saveNames = {"same.txt", "same.txt", "same (3).txt", "space # %.txt", ".hidden", ".hidden"};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        dialog.accept();
+        const QStringList expected = {"same (3).txt", "same (4).txt", "same (3) (1).txt", "space # %.txt", ".hidden", ".hidden (1)"};
+        QCOMPARE(dialog.selectedUrls().size(), expected.size());
+        for (int i = 0; i < expected.size(); ++i) {
+            QCOMPARE(dialog.selectedUrls()[i], QUrl::fromLocalFile(dir.filePath(expected[i])));
+            QVERIFY(!QFileInfo::exists(dir.filePath(expected[i])));
+        }
+        QFile original(dir.filePath("same.txt"));
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), QByteArray("unchanged"));
+        QCOMPARE(QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot).size(), 3);
+    }
+
+    void saveFilesRejectsInvalidNamesAndPermissions_data()
+    {
+        QTest::addColumn<QString>("leaf");
+        QTest::newRow("empty") << QString();
+        QTest::newRow("dot") << QStringLiteral(".");
+        QTest::newRow("dotdot") << QStringLiteral("..");
+        QTest::newRow("path") << QStringLiteral("a/b");
+        QTest::newRow("nul") << QString(QChar::Null);
+        QTest::newRow("long") << QString(300, QLatin1Char('a'));
+        QTest::newRow("unicode-byte-limit") << QString(100, QChar(0x65e5));
+    }
+
+    void saveFilesRejectsInvalidNamesAndPermissions()
+    {
+        QFETCH(QString, leaf);
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path(), ChooserMode::SaveFiles);
+        options.saveNames = {"valid.txt", leaf};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        dialog.accept();
+        QVERIFY(dialog.selectedUrls().isEmpty());
+        QVERIFY(dialog.isVisible());
+        QVERIFY(!dialog.errorMessage().isEmpty());
+        QVERIFY(QDir(dir.path()).entryList(QDir::Files | QDir::Hidden).isEmpty());
+    }
+
+    void saveFilesSelectedFolderAndUnwritableParent()
+    {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkdir("dest"));
+        const QString dest = dir.filePath("dest");
+        auto options = optionsFor(dir.path(), ChooserMode::SaveFiles);
+        options.saveNames = {"exact", "literal\\name"};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        auto *model = dialog.findChild<DirectoryModel *>();
+        const QUrl folder = QUrl::fromLocalFile(dest);
+        QTRY_VERIFY(model->indexForUrl(folder).isValid());
+        QVERIFY(dialog.findChild<FileView *>()->selectUrl(folder));
+        QVERIFY(QFile::setPermissions(dest, QFile::ReadOwner | QFile::ExeOwner));
+        dialog.accept();
+        QVERIFY(dialog.selectedUrls().isEmpty());
+        QVERIFY(!dialog.errorMessage().isEmpty());
+        QVERIFY(QFile::setPermissions(dest, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        dialog.accept();
+        QCOMPARE(dialog.selectedUrls(), (QList<QUrl>{QUrl::fromLocalFile(dest + "/exact"),
+                                                    QUrl::fromLocalFile(dest + "/literal\\name")}));
+        QVERIFY(QDir(dest).entryList(QDir::Files | QDir::Hidden).isEmpty());
+    }
+
+    void saveFilesCollisionSearchIsBoundedAndCannotExceedByteLimit()
+    {
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path(), ChooserMode::SaveFiles);
+        const QString longName(255, QLatin1Char('a'));
+        writeFile(dir.filePath(longName));
+        options.saveNames = {longName};
+        FileChooserDialog tooLong(options);
+        show(tooLong);
+        tooLong.accept();
+        QVERIFY(tooLong.selectedUrls().isEmpty());
+        QVERIFY(!tooLong.errorMessage().isEmpty());
+
+        writeFile(dir.filePath("occupied.txt"));
+        for (int i = 1; i <= 10000; ++i) {
+            QFile file(dir.filePath(QStringLiteral("occupied (%1).txt").arg(i)));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        options.saveNames = {"occupied.txt"};
+        FileChooserDialog bounded(options);
+        show(bounded);
+        bounded.accept();
+        QVERIFY(bounded.selectedUrls().isEmpty());
+        QVERIFY(!bounded.errorMessage().isEmpty());
+        QVERIFY(!QFileInfo::exists(dir.filePath("occupied (10001).txt")));
+    }
+
+    void modeFootersFitNarrowWindow_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("multi-file") << 0;
+        QTest::newRow("multi-folder") << 1;
+        QTest::newRow("save-files") << 2;
+    }
+
+    void modeFootersFitNarrowWindow()
+    {
+        QFETCH(int, mode);
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path(), mode == 2 ? ChooserMode::SaveFiles : ChooserMode::OpenFile);
+        options.multiple = mode < 2;
+        options.directory = mode == 1;
+        options.saveNames = {"exact.txt"};
+        options.choices = {{"check", "&Enable", {}, ""},
+                           {"format", "&Format:", {{"one", "First"}, {"two", "Second"}}, ""}};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        for (const QSize size : {QSize(760, 510), QSize(540, 400), QSize(480, 340)}) {
+            dialog.resize(size);
+            QTest::qWait(20);
+            auto *buttons = dialog.findChild<QDialogButtonBox *>();
+            QVERIFY(dialog.rect().contains(QRect(buttons->mapTo(&dialog, QPoint()), buttons->size())));
+            QVERIFY(name(dialog)->width() >= 100);
+            const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+            if (!snapshots.isEmpty()) {
+                QVERIFY(QDir().mkpath(snapshots));
+                QVERIFY(dialog.grab().save(snapshots + QStringLiteral("/chooser-mode-%1-%2x%3.png")
+                    .arg(mode).arg(size.width()).arg(size.height())));
+            }
+        }
+    }
+
+    void portalSensitiveGlobsAndMimeFamilyAreOptIn()
+    {
+        QTemporaryDir dir;
+        writeFile(dir.filePath("lower.txt"));
+        writeFile(dir.filePath("upper.TxT"));
+        writeFile(dir.filePath("sound.wav"), QByteArray::fromHex("524946462400000057415645666d74201000000001000100401f0000803e0000020010006461746100000000"));
+        QVERIFY(QDir(dir.path()).mkdir("folder"));
+        auto options = optionsFor(dir.path());
+        options.filterCaseSensitivity = Qt::CaseSensitive;
+        options.filters = {{"portal", "Text or Audio", {"*.txt"}, {"audio/*"}}};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        auto *model = dialog.findChild<DirectoryModel *>();
+        QTRY_COMPARE(model->rowCount(), 3);
+        QVERIFY(model->indexForUrl(QUrl::fromLocalFile(dir.filePath("lower.txt"))).isValid());
+        QVERIFY(!model->indexForUrl(QUrl::fromLocalFile(dir.filePath("upper.TxT"))).isValid());
+        QVERIFY(model->indexForUrl(QUrl::fromLocalFile(dir.filePath("sound.wav"))).isValid());
+        options.filterCaseSensitivity = Qt::CaseInsensitive;
+        FileChooserDialog insensitive(options);
+        show(insensitive);
+        QTRY_COMPARE(insensitive.findChild<DirectoryModel *>()->rowCount(), 4);
     }
 
     void geometryAndNativeDialogIdentity()

@@ -21,6 +21,9 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QScrollArea>
+#include <QSet>
 #include <QCompleter>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -73,6 +76,16 @@ bool hasControl(const QString &text)
     return false;
 }
 
+bool pathFits(const QString &path)
+{
+    const QFileInfo info(path);
+    const QByteArray parentPath = QFile::encodeName(info.absolutePath());
+    const long nameLimit = ::pathconf(parentPath.constData(), _PC_NAME_MAX);
+    const long pathLimit = ::pathconf(parentPath.constData(), _PC_PATH_MAX);
+    return QFile::encodeName(info.fileName()).size() <= (nameLimit > 0 ? nameLimit : NAME_MAX)
+        && QFile::encodeName(path).size() < (pathLimit > 0 ? pathLimit : PATH_MAX);
+}
+
 bool localFileUrl(const QUrl &url)
 {
     return url.isValid() && url.isLocalFile() && url.host().isEmpty()
@@ -100,30 +113,31 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     // when the application's installed widget theme supplies dark text roles.
     setStyleSheet(QStringLiteral(
         "QDialog#fileChooserDialog { background: #F0F0F0; color: black; }"
-        "QDialog#fileChooserDialog QLabel, QDialog#fileChooserDialog QToolButton { color: black; }"
+        "QDialog#fileChooserDialog QLabel, QDialog#fileChooserDialog QToolButton,"
+        "QDialog#fileChooserDialog QCheckBox { color: black; }"
         "QDialog#fileChooserDialog QAbstractItemView { background: white; color: black;"
         " selection-background-color: #CCE8FF; selection-color: black; }"
         "QDialog#fileChooserDialog QHeaderView::section { background: #F7F7F7; color: black; }"
         "QDialog#fileChooserDialog QLineEdit#chooserFileName,"
-        "QDialog#fileChooserDialog QComboBox#chooserFileType { background: white; color: black;"
+        "QDialog#fileChooserDialog QComboBox[chooserAeroCombo=\"true\"] { background: white; color: black;"
         " border-image: none; border: 1px solid #7F9DB9; padding: 2px; }"
         // Skin the subcontrol too: an otherwise styled combo falls back to the
         // platform's classic beveled button/arrow. Reuse AeroQt's small glyph.
-        "QDialog#fileChooserDialog QComboBox#chooserFileType { padding-right: 20px; }"
-        "QDialog#fileChooserDialog QComboBox#chooserFileType::drop-down {"
+        "QDialog#fileChooserDialog QComboBox[chooserAeroCombo=\"true\"] { padding-right: 20px; }"
+        "QDialog#fileChooserDialog QComboBox[chooserAeroCombo=\"true\"]::drop-down {"
         " subcontrol-origin: padding; subcontrol-position: top right; width: 18px;"
         " border: none; border-left: 1px solid transparent; background: transparent; }"
-        "QDialog#fileChooserDialog QComboBox#chooserFileType::drop-down:hover {"
+        "QDialog#fileChooserDialog QComboBox[chooserAeroCombo=\"true\"]::drop-down:hover {"
         " border-left-color: %1; background: %2; }"
-        "QDialog#fileChooserDialog QComboBox#chooserFileType::drop-down:on {"
+        "QDialog#fileChooserDialog QComboBox[chooserAeroCombo=\"true\"]::drop-down:on {"
         " border-left-color: %1; background: %3; }"
-        "QDialog#fileChooserDialog QComboBox#chooserFileType::down-arrow {"
+        "QDialog#fileChooserDialog QComboBox[chooserAeroCombo=\"true\"]::down-arrow {"
         " image: url(:/AeroQt/ribbon/arrowDown.svg.png); width: 6px; height: 4px; }")
         .arg(QLatin1String(Aero::Palette::GlassBorder),
              QLatin1String(Aero::Palette::GlassHover),
              QLatin1String(Aero::Palette::GlassPressed)));
     setWindowTitle(options.title.isEmpty()
-        ? (options.mode == ChooserMode::SaveFile ? tr("Save As") : tr("Open")) : options.title);
+        ? (options.mode != ChooserMode::OpenFile ? tr("Save As") : tr("Open")) : options.title);
     setSizeGripEnabled(true);
     resize(760, 510);
     setMinimumSize(480, 340);
@@ -136,7 +150,7 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     m_computerModel = new ComputerModel(m_places->placesModel(), this);
     m_files = new FileView(m_model);
     m_files->setObjectName(QStringLiteral("chooserFiles"));
-    m_files->setChooserMode(true);
+    m_files->setChooserMode(true, options.mode == ChooserMode::OpenFile && options.multiple);
     m_files->setSingleClickToOpen(false);
     m_libraries = new LibrariesView;
     m_computer = new ComputerView(m_computerModel);
@@ -164,7 +178,7 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     layout->addWidget(navBar);
 
     auto *commandBar = Aero::commandBar(Explorer::Art::CommandBar);
-    commandBar->row()->addWidget(Aero::bodyLabel(tr("Select a file")));
+    commandBar->row()->addWidget(Aero::bodyLabel(folderMode() ? tr("Select a folder") : tr("Select a file")));
     commandBar->row()->addStretch();
     auto *modes = new QActionGroup(this);
     const QList<QPair<Settings::ViewMode, QString>> viewModes = {
@@ -223,11 +237,14 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     grid->setColumnStretch(1, 1);
     m_name = new QLineEdit(options.suggestedName);
     m_name->setObjectName(QStringLiteral("chooserFileName"));
-    auto *nameLabel = new QLabel(tr("File &name:"));
+    auto *nameLabel = new QLabel(folderMode() ? tr("Folder &name:") : tr("File &name:"));
     nameLabel->setBuddy(m_name);
-    m_name->setAccessibleName(tr("File name"));
+    m_name->setAccessibleName(folderMode() ? tr("Folder name") : tr("File name"));
     m_filters = new QComboBox;
     m_filters->setObjectName(QStringLiteral("chooserFileType"));
+    m_filters->setProperty("chooserAeroCombo", true);
+    m_filters->setMinimumWidth(100);
+    m_filters->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     auto *typeLabel = new QLabel(tr("Files of &type:"));
     typeLabel->setBuddy(m_filters);
     m_filters->setAccessibleName(tr("Files of type"));
@@ -241,7 +258,9 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
     m_buttons->setObjectName(QStringLiteral("chooserButtons"));
     m_buttons->setOrientation(Qt::Vertical);
-    auto *choose = m_buttons->addButton(options.mode == ChooserMode::SaveFile ? tr("&Save") : tr("&Open"),
+    auto *choose = m_buttons->addButton(!options.acceptLabel.isEmpty() ? options.acceptLabel
+        : options.mode != ChooserMode::OpenFile ? tr("&Save")
+        : folderMode() ? tr("Select &Folder") : tr("&Open"),
                                         QDialogButtonBox::AcceptRole);
     choose->setDefault(true);
     grid->addWidget(nameLabel, 0, 0);
@@ -257,6 +276,51 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     m_error->setStyleSheet(QStringLiteral("color: #9c1919;"));
     m_error->hide();
     grid->addWidget(m_error, 2, 0, 1, 3);
+    if (folderMode()) {
+        typeLabel->hide();
+        m_filters->hide();
+    }
+    if (!options.choices.isEmpty()) {
+        auto *scroll = new QScrollArea;
+        scroll->setObjectName(QStringLiteral("chooserChoices"));
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setMaximumHeight(110);
+        auto *contents = new QWidget;
+        auto *choicesLayout = new QGridLayout(contents);
+        choicesLayout->setContentsMargins(0, 0, 4, 0);
+        choicesLayout->setColumnStretch(1, 1);
+        int row = 0;
+        for (const auto &choice : options.choices) {
+            if (choice.options.isEmpty()) {
+                auto *check = new QCheckBox(choice.label);
+                check->setAccessibleName(choice.label);
+                check->setChecked(choice.selected == QLatin1String("true"));
+                choicesLayout->addWidget(check, row++, 0, 1, 2);
+                m_choiceControls.insert(choice.id, check);
+            } else {
+                auto *combo = new QComboBox;
+                combo->setProperty("chooserAeroCombo", true);
+                combo->setMinimumWidth(100);
+                combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                combo->setAccessibleName(choice.label);
+                for (const auto &option : choice.options)
+                    combo->addItem(option.label, option.id);
+                const int initial = combo->findData(choice.selected);
+                combo->setCurrentIndex(initial < 0 ? 0 : initial);
+                auto *label = new QLabel(choice.label);
+                label->setBuddy(combo);
+                label->setWordWrap(true);
+                choicesLayout->addWidget(label, row, 0);
+                choicesLayout->addWidget(combo, row++, 1);
+                m_choiceControls.insert(choice.id, combo);
+            }
+        }
+        scroll->setWidget(contents);
+        scroll->setMinimumHeight(qMin(110, contents->sizeHint().height() + 4));
+        grid->addWidget(scroll, 3, 0, 1, 3);
+    }
     layout->addWidget(bottom);
 
     m_loadingDelay = new QTimer(this);
@@ -296,17 +360,20 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     });
     connect(m_files, &FileView::selectionChanged, this, [this] {
         const auto items = m_model->itemsForIndexes(m_files->selectedIndexes());
-        m_selectedDirectory = QUrl();
+        const bool previousSelection = m_selectionIntent;
         if (items.size() == 1) {
-            if (items.first().isDir()) {
-                m_selectedDirectory = items.first().url();
-            } else {
-                // Real leaf name, never the friendly display text or hidden extension.
+            if (!items.first().isDir() && !folderMode()) {
+                // Never parse a display summary back into file names.
                 m_name->setText(QFileInfo(items.first().url().toLocalFile()).fileName());
             }
+        } else if (previousSelection || items.size() > 1) {
+            m_name->clear();
         }
+        m_selectionIntent = !items.isEmpty();
     });
-    connect(m_name, &QLineEdit::textChanged, this, [this] { m_selectedDirectory = QUrl(); });
+    connect(m_name, &QLineEdit::textChanged, this, [this] {
+        m_selectionIntent = false;
+    });
     connect(m_search, &QLineEdit::textChanged, m_model, &DirectoryModel::setNameFilter);
     connect(m_filters, &QComboBox::currentIndexChanged, this, &FileChooserDialog::applyFilter);
     connect(m_buttons, &QDialogButtonBox::accepted, this, &FileChooserDialog::accept);
@@ -335,7 +402,10 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     restrictViews(m_computer);
     applyFilter();
 
-    m_optionsSupported = options.localOnly && !options.multiple && !options.directory;
+    m_optionsSupported = options.localOnly
+        && (options.mode != ChooserMode::SaveFile || (!options.multiple && !options.directory))
+        && (options.mode != ChooserMode::SaveFiles
+            || (!options.multiple && !options.directory && !options.saveNames.isEmpty()));
     if (!options.selectedFilter.isEmpty() && selected < 0)
         m_optionsSupported = false;
     const QString extension = options.defaultExtension;
@@ -425,7 +495,7 @@ void FileChooserDialog::navigateTo(const QUrl &url)
 void FileChooserDialog::showLocation(const QUrl &url)
 {
     showError({});
-    m_selectedDirectory = QUrl();
+    m_selectionIntent = false;
     m_places->setCurrentUrl(url);
     m_search->clear();
     if (url == Locations::libraries() || url == Locations::computer()) {
@@ -447,9 +517,9 @@ void FileChooserDialog::applyFilter()
     const int index = m_filters->currentIndex();
     if (index >= 0 && index < m_options.filters.size()) {
         const auto &filter = m_options.filters.at(index);
-        m_model->setChooserFilter(filter.globs, filter.mimeTypes);
+        m_model->setChooserFilter(filter.globs, filter.mimeTypes, m_options.filterCaseSensitivity, folderMode());
     } else {
-        m_model->setChooserFilter({}, {});
+        m_model->setChooserFilter({}, {}, m_options.filterCaseSensitivity, folderMode());
     }
 }
 
@@ -497,6 +567,14 @@ void FileChooserDialog::activateUrl(const QUrl &url)
         navigateTo(url);
         return;
     }
+    if (folderMode()) {
+        showError(tr("Select an existing local folder."));
+        return;
+    }
+    if (m_options.multiple && m_selectionIntent && m_model->itemsForIndexes(m_files->selectedIndexes()).size() > 1) {
+        accept();
+        return;
+    }
     validateSelection(url);
 }
 
@@ -508,9 +586,32 @@ void FileChooserDialog::accept()
         // Address Enter is handled by the shared editor, never by the default button.
         return;
     }
-    if (m_selectedDirectory.isValid()) {
-        navigateTo(m_selectedDirectory);
+    if (!m_optionsSupported) { showError(tr("These file chooser options are not supported.")); return; }
+    QList<QUrl> selected;
+    if (m_selectionIntent && m_stack->currentWidget() == m_files) {
+        for (const auto &item : m_model->itemsForIndexes(m_files->selectedIndexes()))
+            selected.append(item.url());
+    }
+    if (folderMode()) {
+        if (selected.isEmpty())
+            selected = {m_name->text().isEmpty() ? currentUrl() : typedUrl()};
+        if (m_options.mode == ChooserMode::SaveFiles) {
+            if (selected.size() != 1) { showError(tr("Select one destination folder.")); return; }
+            acceptSaveFiles(selected.first());
+        } else {
+            acceptItems(selected, true);
+        }
         return;
+    }
+    if (!selected.isEmpty()) {
+        if (selected.size() == 1 && QFileInfo(selected.first().toLocalFile()).isDir()) {
+            navigateTo(selected.first());
+            return;
+        }
+        if (m_options.multiple) {
+            acceptItems(selected, false);
+            return;
+        }
     }
     activateUrl(typedUrl());
 }
@@ -532,11 +633,7 @@ void FileChooserDialog::validateSelection(const QUrl &url, bool overwriteApprove
     path = QDir::cleanPath(path);
     const QFileInfo info(path);
     const QFileInfo parent(info.absolutePath());
-    const QByteArray parentPath = QFile::encodeName(parent.filePath());
-    const long nameLimit = ::pathconf(parentPath.constData(), _PC_NAME_MAX);
-    const long pathLimit = ::pathconf(parentPath.constData(), _PC_PATH_MAX);
-    if (QFile::encodeName(info.fileName()).size() > (nameLimit > 0 ? nameLimit : NAME_MAX)
-        || QFile::encodeName(path).size() >= (pathLimit > 0 ? pathLimit : PATH_MAX)) {
+    if (!pathFits(path)) {
         showError(tr("The file name or path is too long for the destination filesystem.")); return;
     }
     if (!readableDirectory(parent)) { showError(tr("The containing folder cannot be read or searched.")); return; }
@@ -570,10 +667,93 @@ void FileChooserDialog::validateSelection(const QUrl &url, bool overwriteApprove
             return;
         }
     }
+    finishSelection({QUrl::fromLocalFile(path)});
+}
+
+bool FileChooserDialog::folderMode() const
+{
+    return m_options.directory || m_options.mode == ChooserMode::SaveFiles;
+}
+
+QMap<QString, QString> FileChooserDialog::selectedChoices() const
+{
+    QMap<QString, QString> result;
+    for (auto it = m_choiceControls.cbegin(); it != m_choiceControls.cend(); ++it) {
+        if (auto *check = qobject_cast<QCheckBox *>(it.value()))
+            result.insert(it.key(), check->isChecked() ? QStringLiteral("true") : QStringLiteral("false"));
+        else if (auto *combo = qobject_cast<QComboBox *>(it.value()))
+            result.insert(it.key(), combo->currentData().toString());
+    }
+    return result;
+}
+
+void FileChooserDialog::finishSelection(const QList<QUrl> &urls)
+{
     showError({});
-    m_selectedUrls = {QUrl::fromLocalFile(path)};
+    m_selectedUrls = urls;
     m_validated = true;
     done(QDialog::Accepted);
+}
+
+void FileChooserDialog::acceptItems(const QList<QUrl> &urls, bool folders)
+{
+    if (urls.isEmpty() || (!m_options.multiple && urls.size() != 1)) {
+        showError(tr("Select one item.")); return;
+    }
+    for (const QUrl &url : urls) {
+        if (!localFileUrl(url)) { showError(tr("Only local files and folders can be selected.")); return; }
+        const QFileInfo info(url.toLocalFile());
+        if (!pathFits(info.absoluteFilePath()) || !readableDirectory(QFileInfo(info.absolutePath()))
+            || (folders ? !readableDirectory(info)
+                        : (!info.isFile() || !readableFile(info)))) {
+            showError(folders ? tr("Select existing readable local folders.")
+                              : tr("Select existing readable files only, not folders."));
+            return;
+        }
+    }
+    finishSelection(urls);
+}
+
+void FileChooserDialog::acceptSaveFiles(const QUrl &folder)
+{
+    if (!localFileUrl(folder) || !readableDirectory(QFileInfo(folder.toLocalFile()))
+        || !writable(QFileInfo(folder.toLocalFile()))) {
+        showError(tr("Select a readable, searchable and writable local destination folder.")); return;
+    }
+    const QDir destination(folder.toLocalFile());
+    QSet<QString> reserved;
+    QList<QUrl> urls;
+    for (const QString &name : m_options.saveNames) {
+        if (name.isEmpty() || name == QLatin1String(".") || name == QLatin1String("..")
+            || name.contains(QLatin1Char('/')) || name.contains(QChar::Null)
+            || !pathFits(destination.filePath(name))) {
+            showError(tr("A supplied destination name is invalid or too long.")); return;
+        }
+        QString candidate = name;
+        // Keep the exact name unless occupied (including broken symlinks).
+        // Insert " (N)" before the final suffix, or after a dotfile's name.
+        const int dot = name.lastIndexOf(QLatin1Char('.'));
+        const QString base = dot > 0 ? name.left(dot) : name;
+        const QString suffix = dot > 0 ? name.mid(dot) : QString();
+        bool available = false;
+        for (int attempt = 0; attempt <= 10000; ++attempt) {
+            if (attempt > 0)
+                candidate = base + QStringLiteral(" (%1)").arg(attempt) + suffix;
+            const QString path = destination.filePath(candidate);
+            if (!pathFits(path)) break;
+            const QFileInfo info(path);
+            if (!reserved.contains(path) && !info.exists() && !info.isSymbolicLink()) {
+                reserved.insert(path);
+                urls.append(QUrl::fromLocalFile(path));
+                available = true;
+                break;
+            }
+        }
+        if (!available) {
+            showError(tr("No safe unique destination name could be found.")); return;
+        }
+    }
+    finishSelection(urls);
 }
 
 void FileChooserDialog::dismissOverwrite()
@@ -651,8 +831,11 @@ bool FileChooserDialog::eventFilter(QObject *watched, QEvent *event)
 void FileChooserDialog::cycleFocus(bool backwards)
 {
     QWidget *focused = QApplication::focusWidget();
-    const QList<QWidget *> stops = {m_navigation->pathEditor(), m_search,
-        m_places->findChild<QAbstractItemView *>(), m_stack->currentWidget(), m_name, m_filters, m_buttons};
+    QList<QWidget *> stops = {m_navigation->pathEditor(), m_search,
+        m_places->findChild<QAbstractItemView *>(), m_stack->currentWidget(), m_name, m_filters};
+    for (const auto &choice : m_options.choices)
+        stops.append(m_choiceControls.value(choice.id));
+    stops.append(m_buttons);
     int current = -1;
     for (int i = 0; i < stops.size(); ++i)
         if (stops[i] && (focused == stops[i] || stops[i]->isAncestorOf(focused))) current = i;
