@@ -1,0 +1,28 @@
+# Like the desktop-entry installer, honor a late cmake --install --prefix
+# override without baking DESTDIR into the activation command.
+set(service_dir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/dbus-1/services")
+file(MAKE_DIRECTORY "${service_dir}")
+# Escape the executable for D-Bus Exec's shell-like quoting, not for a shell.
+set(executable "${CMAKE_INSTALL_PREFIX}/bin/explorer-win7-chooser")
+string(REPLACE "\\" "\\\\" executable "${executable}")
+string(REPLACE "\"" "\\\"" executable "${executable}")
+file(WRITE "${service_dir}/org.win7explorer.FileChooser1.service"
+    "[D-BUS Service]\nName=org.win7explorer.FileChooser1\nExec=\"${executable}\"\n")
+
+# Preserve Explorer's hidden dialog launcher when the browser is installed.
+# A chooser-only prefix still needs a valid desktop identity/Exec for toolkits
+# and compositors, but must not require installing the browser executable.
+set(dialog_executable "${CMAKE_INSTALL_PREFIX}/bin/explorer-win7")
+set(dialog_arguments " %U")
+if(NOT EXISTS "$ENV{DESTDIR}${dialog_executable}")
+    set(dialog_executable "${CMAKE_INSTALL_PREFIX}/bin/explorer-win7-chooser")
+    set(dialog_arguments "")
+endif()
+string(REPLACE "\\" "\\\\" dialog_executable "${dialog_executable}")
+string(REPLACE "\"" "\\\"" dialog_executable "${dialog_executable}")
+file(READ "@CMAKE_CURRENT_SOURCE_DIR@/linux-explorer-win7-dialog.desktop" desktop)
+string(REPLACE "Exec=explorer-win7 %U"
+    "Exec=\"${dialog_executable}\"${dialog_arguments}" desktop "${desktop}")
+file(MAKE_DIRECTORY "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications")
+file(WRITE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications/linux-explorer-win7-dialog.desktop"
+    "${desktop}")

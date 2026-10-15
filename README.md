@@ -128,6 +128,35 @@ No system-wide D-Bus activation file is installed.
 The original `aur/`, desktop, and D-Bus files are retained as upstream references;
 they are not this fork's installation instructions or publishing targets.
 
+## Explorer-owned Open/Save chooser
+
+Other applications can request a Windows 7–style **single-file Open or Save**
+dialog over the private, asynchronous `org.win7explorer.FileChooser1` session-bus
+API. The chooser reuses Explorer's real navigation, locations and file-view
+components, but is a separate service and a common-file-dialog layout—not a
+reveal window. It never launches the chosen file or writes the Save destination.
+GDebi7 is not modified by this implementation.
+
+After building, install just the chooser without replacing or stopping Explorer:
+
+```bash
+scripts/install-chooser-local.sh build
+~/.local/bin/explorer-win7-chooser-client open --deb --start "$HOME/Downloads"
+~/.local/bin/explorer-win7-chooser-client save --log --start "$HOME/Documents" \
+  --name 'gdebi-install.log'
+```
+
+D-Bus activates the independent service on the next client request. The installer
+reports if an already-running chooser needs an idle restart; it never terminates
+Explorer windows or file operations. No default-manager, shortcut, theme or portal
+settings are changed.
+
+See **[the v1 interface and integration guide](docs/file-chooser-api.md)** for exact
+wire types, filtering/extensions/overwrite behavior, URI encoding, cancellation
+and disconnect handling, activation paths, client examples, Wayland exported-parent
+and activation-token requirements, tests and remaining limitations. Folder,
+multiple and remote selection are explicitly unsupported in v1.
+
 ## Tests and visual review
 
 The regression suite uses real Qt widgets and KIO in temporary HOME/config/data
