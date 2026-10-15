@@ -64,15 +64,22 @@ protected:
         const QColor color = palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled,
                                               QPalette::ButtonText);
         painter.setPen(color);
+        // The polygon's raster bounds sit above its mathematical centre.
+        // Align the visible ink with the 9 pt label, not the button rectangle;
+        // keep the split hit targets and the icon's geometry unchanged.
+        const QPoint arrowCenter = rect().center() + QPoint(0, 2);
         if (property("arrow").toBool()) {
             const bool down = property("popupOpen").toBool();
-            const QPoint c = rect().center();
+            const QPoint c = arrowCenter;
             const QPolygon triangle = down
                 ? QPolygon{c + QPoint(-3, -1), c + QPoint(3, -1), c + QPoint(0, 2)}
                 : QPolygon{c + QPoint(-1, -3), c + QPoint(-1, 3), c + QPoint(2, 0)};
             painter.setBrush(color);
             painter.setPen(Qt::NoPen);
             painter.drawPolygon(triangle);
+        } else if (property("overflow").toBool()) {
+            const QRect ink = fontMetrics().tightBoundingRect(text());
+            painter.drawText(arrowCenter - ink.center(), text());
         } else {
             painter.drawText(rect().adjusted(kTextPadding / 2, 0, -kTextPadding / 2, 0),
                              Qt::AlignVCenter | Qt::AlignLeft | Qt::TextSingleLine, text());

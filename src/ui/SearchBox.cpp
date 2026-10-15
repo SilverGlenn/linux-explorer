@@ -2,6 +2,8 @@
 #include "aero/palette.h"
 #include "aero/text.h"
 
+#include <QPainter>
+
 SearchBox::SearchBox(QWidget *parent) : QLineEdit(parent)
 {
     setObjectName(QStringLiteral("searchBox"));
@@ -12,16 +14,15 @@ SearchBox::SearchBox(QWidget *parent) : QLineEdit(parent)
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     setFixedHeight(24);
     setClearButtonEnabled(false);
-    // Keep the native unfocused field. Do not clear/reapply a focus stylesheet:
-    // that can replace the widget font with the application's inherited size.
-    // Win7 hides the empty search cue as soon as the field has focus. Hide only
-    // its paint colour, not the location-specific placeholder/accessibility text.
+    // AeroQt's glass ancestor supplies a border-image, even when a local focus
+    // rule sets a border. Suppress both style frames in every state and paint
+    // exactly one frame after the native editor. Keep QLineEdit responsible for
+    // editing, selection, actions and accessibility, with a stable text inset.
+    setFrame(false);
     setStyleSheet(QStringLiteral(
-        "QLineEdit { font-size: 9pt; }"
-        "QLineEdit:focus { border: 1px solid %1; border-radius: 2px;"
-        " background: %2; color: %3; }")
-        .arg(QLatin1String(Aero::Palette::FocusBorder),
-             QLatin1String(Aero::Palette::Surface), QLatin1String(Aero::Palette::Text)));
+        "#searchBox { font-size: 9pt; border-image: none; border: none;"
+        " border-radius: 0; padding: 2px; background: %1; color: %2; }")
+        .arg(QLatin1String(Aero::Palette::Surface), QLatin1String(Aero::Palette::Text)));
     connect(this, &QLineEdit::textChanged, this, [this](const QString &text) {
         QFont textFont = font();
         textFont.setPointSize(9);
@@ -65,4 +66,14 @@ void SearchBox::paintEvent(QPaintEvent *event)
         setFont(textFont);
     }
     QLineEdit::paintEvent(event);
+
+    // Filled edge strips remain continuous at fractional DPR too, without a
+    // second native/QSS frame or a half-clipped pen at the widget boundary.
+    QPainter painter(this);
+    const QColor border = !isEnabled() ? palette().color(QPalette::Disabled, QPalette::Mid)
+        : hasFocus() ? QColor(QLatin1String(Aero::Palette::FocusBorder)) : QColor("#7F9DB9");
+    painter.fillRect(QRect(0, 0, width(), 1), border);
+    painter.fillRect(QRect(0, height() - 1, width(), 1), border);
+    painter.fillRect(QRect(0, 1, 1, height() - 2), border);
+    painter.fillRect(QRect(width() - 1, 1, 1, height() - 2), border);
 }

@@ -3,6 +3,7 @@
 #include <AeroQt/stylesheet.h>
 
 #include <QApplication>
+#include <QAbstractButton>
 #include <QAccessible>
 #include <QDir>
 #include <QFile>
@@ -12,6 +13,7 @@
 #include <QPointer>
 #include <QSignalBlocker>
 #include <QSignalSpy>
+#include <QStyle>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
@@ -31,8 +33,221 @@ private:
         widget.activateWindow();
         QTest::qWait(20);
     }
+    static QRectF inkBounds(QWidget *widget)
+    {
+        const QImage image = widget->grab().toImage();
+        QRect bounds;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                const QColor color = image.pixelColor(x, y);
+                if (color.alpha() > 200 && qMax(color.red(), qMax(color.green(), color.blue())) < 180)
+                    bounds |= QRect(x, y, 1, 1);
+            }
+        }
+        const qreal dpr = image.devicePixelRatio();
+        return QRectF(bounds.x() / dpr, bounds.y() / dpr,
+                      bounds.width() / dpr, bounds.height() / dpr);
+    }
+    static void applyGlassTheme(QWidget &widget)
+    {
+        widget.setProperty("_Aero_transpbg", true);
+        if (qEnvironmentVariableIsSet("EXPLORER_NATIVE_THEME")) {
+            // Use the installed AeroQt rules inherited by MainWindow's inset
+            // navigation bar, not an approximation of its competing QSS.
+            QFile stylesheet(QStringLiteral(":/AeroQt/style.css"));
+            QVERIFY(stylesheet.open(QIODevice::ReadOnly));
+            widget.setStyleSheet(QString::fromUtf8(stylesheet.readAll()));
+        }
+    }
+    static void snapshot(QWidget &widget, const QString &name)
+    {
+        const QString output = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        if (output.isEmpty()) return;
+        QVERIFY(QDir().mkpath(output));
+        QVERIFY(widget.grab().save(output + QLatin1Char('/') + name + QStringLiteral(".png")));
+    }
 
 private Q_SLOTS:
+    void breadcrumbVisibleArrowAlignment_data()
+    {
+        QTest::addColumn<int>("height");
+        QTest::addColumn<int>("width");
+        QTest::newRow("integrated-locations") << 20 << 500;
+        QTest::newRow("integrated-overflow") << 20 << 150;
+        QTest::newRow("standalone-locations") << 22 << 500;
+        QTest::newRow("standalone-overflow") << 22 << 150;
+    }
+
+    void breadcrumbVisibleArrowAlignment()
+    {
+        QFETCH(int, height);
+        QFETCH(int, width);
+        BreadcrumbBar bar;
+        bar.resize(width, height);
+        QPixmap icon(16, 16);
+        icon.fill(Qt::cyan);
+        bar.setTrail(QIcon(icon), trail());
+        expose(bar);
+        const auto names = bar.findChildren<QToolButton *>(QStringLiteral("crumbName"));
+        const auto arrows = bar.findChildren<QToolButton *>(QStringLiteral("crumbDropdown"));
+        auto *leading = bar.findChild<QToolButton *>(QStringLiteral("breadcrumbLocations"));
+        const QStringList states = {QStringLiteral("normal"), QStringLiteral("name-hover"),
+            QStringLiteral("arrow-hover"), QStringLiteral("leading-hover"),
+            QStringLiteral("name-pressed"), QStringLiteral("arrow-pressed"),
+            QStringLiteral("menu-open")};
+        for (const QString &state : states) {
+            for (auto *button : bar.findChildren<QToolButton *>()) {
+                button->clearFocus();
+                button->setDown(false);
+            }
+            bar.setPopupOpen(QUrl(), false);
+            QTest::mouseMove(bar.windowHandle(), QPoint(8, height / 2));
+            if (state == QLatin1String("name-hover"))
+                QTest::mouseMove(bar.windowHandle(), names.last()->mapTo(&bar, names.last()->rect().center()));
+            if (state == QLatin1String("arrow-hover"))
+                QTest::mouseMove(bar.windowHandle(), arrows.last()->mapTo(&bar, arrows.last()->rect().center()));
+            if (state == QLatin1String("leading-hover")) {
+                QTest::mouseMove(bar.windowHandle(), leading->mapTo(&bar, leading->rect().center()));
+                QTRY_VERIFY(leading->underMouse());
+            }
+            if (state == QLatin1String("name-pressed")) names.last()->setDown(true);
+            if (state == QLatin1String("arrow-pressed")) {
+                for (auto *arrow : arrows) arrow->setDown(true);
+                leading->setDown(true);
+            }
+            // Measure the real raster ink, excluding the light split chrome.
+            // In MainWindow a 24px address frame leaves 20px for the bar; the
+            // original standalone captures use 22px. Neither may move globally.
+            for (int i = 0; i < arrows.size(); ++i) {
+                if (!arrows.at(i)->isVisible()) continue;
+                if (state == QLatin1String("menu-open")) bar.setPopupOpen(trail().at(i).url, true);
+                const QRectF label = inkBounds(names.at(i));
+                const QRectF arrow = inkBounds(arrows.at(i));
+                QVERIFY(!label.isEmpty());
+                QVERIFY(!arrow.isEmpty());
+                const qreal offset = arrow.center().y() - label.center().y();
+                qInfo() << QTest::currentDataTag() << state << i << "arrow" << arrow
+                        << "label" << label << "vertical offset" << offset;
+                QVERIFY2(qAbs(offset) <= 1.6, qPrintable(QStringLiteral("%1: visible arrow-label offset %2")
+                    .arg(state).arg(offset)));
+                const auto *labelIcon = bar.findChild<QLabel *>();
+                QCOMPARE(labelIcon->geometry(), QRect(0, (height - 16) / 2, 16, 16));
+                QVERIFY(qAbs(arrow.center().y() - (labelIcon->y() + 8.0)) <= 2.0);
+            }
+            if (state == QLatin1String("menu-open")) bar.setPopupOpen(QUrl(), true);
+            const QRectF leadingInk = inkBounds(leading);
+            const QRectF lastLabel = inkBounds(names.last());
+            QVERIFY(!leadingInk.isEmpty());
+            qInfo() << QTest::currentDataTag() << state << "leading" << leadingInk
+                    << "vertical offset" << leadingInk.center().y() - lastLabel.center().y();
+            QVERIFY2(qAbs(leadingInk.center().y() - lastLabel.center().y()) <= 1.6,
+                     qPrintable(QStringLiteral("%1: leading ink %2 vs label %3")
+                         .arg(state).arg(leadingInk.center().y()).arg(lastLabel.center().y())));
+            snapshot(bar, QStringLiteral("geometry-%1-%2").arg(QLatin1String(QTest::currentDataTag()), state));
+        }
+    }
+
+    void integratedAddressAndSearchEdges()
+    {
+        QWidget window;
+        applyGlassTheme(window);
+        auto *layout = new QHBoxLayout(&window);
+        layout->setContentsMargins(4, 3, 6, 3);
+        layout->setSpacing(6);
+        auto *address = new QWidget;
+        address->setObjectName(QStringLiteral("addressBox"));
+        address->setFixedHeight(24);
+        address->setStyleSheet(QStringLiteral(
+            "#addressBox { border-image: url(:/AeroQt/transpbg/entry/normal.png) 4 4 4 4 repeat; border-width: 4px; }"));
+        auto *addressLayout = new QHBoxLayout(address);
+        addressLayout->setContentsMargins(0, 2, 2, 2);
+        addressLayout->setSpacing(0);
+        auto *area = new QWidget;
+        auto *areaLayout = new QHBoxLayout(area);
+        areaLayout->setContentsMargins(4, 0, 4, 0);
+        areaLayout->setSpacing(0);
+        auto *bar = new BreadcrumbBar;
+        QPixmap icon(16, 16);
+        icon.fill(QColor("#329BC8"));
+        bar->setTrail(QIcon(icon), trail());
+        areaLayout->addWidget(bar, 1);
+        addressLayout->addWidget(area, 1);
+        auto *refresh = new QToolButton;
+        refresh->setText(QStringLiteral("R"));
+        refresh->setFixedWidth(24);
+        addressLayout->addWidget(refresh);
+        layout->addWidget(address, 1);
+        auto *search = new SearchBox;
+        search->setPlaceholderText(QStringLiteral("Search Explorer Reference"));
+        search->setAccessibleName(search->placeholderText());
+        search->addAction(window.style()->standardIcon(QStyle::SP_FileDialogContentsView), QLineEdit::TrailingPosition);
+        const auto iconButtons = search->findChildren<QAbstractButton *>();
+        search->setClearButtonEnabled(true);
+        QAbstractButton *clearButton = nullptr;
+        for (auto *button : search->findChildren<QAbstractButton *>())
+            if (!iconButtons.contains(button)) clearButton = button;
+        QVERIFY(clearButton);
+        layout->addWidget(search);
+        window.resize(760, 30);
+        expose(window);
+        QCOMPARE(bar->height(), 20);
+        const auto checkEdges = [search](const QString &state) {
+            const QImage image = search->grab().toImage();
+            const qreal dpr = image.devicePixelRatio();
+            const QColor border = search->hasFocus() ? QColor("#7EB4EA") : QColor("#7F9DB9");
+            // Every physical edge pixel must be present, including the corners.
+            // The inner parallel scan is white: no second Kvantum/AeroQt frame.
+            for (int x = 0; x < image.width(); ++x) {
+                QCOMPARE(image.pixelColor(x, 0), border);
+                QCOMPARE(image.pixelColor(x, image.height() - 1), border);
+            }
+            for (int y = 0; y < image.height(); ++y) {
+                QCOMPARE(image.pixelColor(0, y), border);
+                QCOMPARE(image.pixelColor(image.width() - 1, y), border);
+            }
+            const int inset = qCeil(2 * dpr);
+            for (int x = inset; x < image.width() - inset; ++x) {
+                QCOMPARE(image.pixelColor(x, inset), QColor(Qt::white));
+                QCOMPARE(image.pixelColor(x, image.height() - 1 - inset), QColor(Qt::white));
+            }
+            snapshot(*search, QStringLiteral("integrated-search-%1").arg(state));
+            QCOMPARE(search->font().pointSizeF(), 9.0);
+        };
+        refresh->setFocus();
+        checkEdges(QStringLiteral("blurred-empty"));
+        snapshot(window, QStringLiteral("integrated-address-normal"));
+        search->setFocus();
+        checkEdges(QStringLiteral("focused-empty"));
+        const QImage focusedCue = search->grab().toImage();
+        search->setPlaceholderText(QString());
+        QCOMPARE(search->grab().toImage(), focusedCue);
+        search->setPlaceholderText(QStringLiteral("Search Explorer Reference"));
+        QTest::keyClicks(search, "notes");
+        checkEdges(QStringLiteral("focused-typed"));
+        snapshot(window, QStringLiteral("integrated-address-search-typed"));
+        QTest::keyClick(search, Qt::Key_A, Qt::ControlModifier);
+        QCOMPARE(search->selectedText(), QStringLiteral("notes"));
+        checkEdges(QStringLiteral("focused-selection"));
+        QTest::keyClick(search, Qt::Key_Backspace);
+        checkEdges(QStringLiteral("focused-cleared"));
+        {
+            QSignalBlocker blocker(search);
+            search->setText(QStringLiteral("restored"));
+        }
+        checkEdges(QStringLiteral("focused-restored"));
+        QVERIFY(!search->font().italic());
+        // QLineEdit still owns its clear button and extra trailing icon; we
+        // have only replaced the frame, not the editor or its actions.
+        QTRY_VERIFY(clearButton->isVisible());
+        QTest::mouseClick(clearButton, Qt::LeftButton);
+        QCOMPARE(search->text(), QString());
+        checkEdges(QStringLiteral("focused-clear-action"));
+        refresh->setFocus();
+        checkEdges(QStringLiteral("blurred-cleared"));
+        search->setText(QStringLiteral("notes"));
+        checkEdges(QStringLiteral("blurred-typed"));
+    }
+
     void breadcrumbActivationAndKeyboard()
     {
         BreadcrumbBar bar;
