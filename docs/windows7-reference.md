@@ -251,12 +251,58 @@ For a deliberately approved SMOD configuration change only:
    restored/maximized and active/inactive, with menus open/closed; confirm the
    dialog class remains unaffected. Only capture that identified window.
 
-No helper or live rule was applied during this integration pass; user approval
-is still required. No KWin settings, installed theme, or original Explorer binary
-were changed. The pre-existing positively identified native Libraries capture is
-`build/native-frame-before.png`; its compositor frame alpha appears black in a
-black-backed viewer. It is an old-preview **before** image, not a final-head or
-post-rule comparison. Native framed visual sign-off remains pending.
+The application does not apply this rule automatically. It was subsequently
+applied manually on the development desktop after explicit user approval, and the
+user accepted the resulting appearance. This is a host-specific SMOD integration,
+not proof of Windows Aero Glass parity. The identified application captures are
+`build/native-frame-before.png` and `build/native-frame-after.png`; transparent
+compositor pixels can appear black in a black-backed viewer. No Microsoft frame
+resources were imported and no installed theme code was patched.
+
+## Follow-up: controls, navigation, and PDF
+
+Further direct user feedback identified problems not exposed by the old
+standalone control fixtures:
+
+- Only breadcrumb arrow ink (including locations/overflow) moves down two logical
+  pixels; labels, icons, hit targets and split-menu keyboard behavior stay put.
+  Raster tests compare visible arrow/label bounds at the real 20 px breadcrumb
+  height and at 100%, 125%, and 150%.
+- AeroQt's glass-ancestor QSS supplies a line-edit border-image. The focused
+  SearchBox now suppresses that inherited/native frame and paints one continuous
+  widget-local frame after native line editing. Integration fixtures include the
+  actual glass stylesheet and check focused-empty, typed, selected, cleared and
+  blurred states without changing 9 pt text. Disabled frames use the disabled
+  palette's Mid colour.
+- Sidebar selection ends three logical pixels before the content divider. Both
+  Qt's row/branch background and the item delegate are bounded; geometry-only
+  delegate checks are insufficient. This small gutter follows the user's stated
+  preference while retaining full-row rather than text-hug selection.
+- Favorites, Libraries, Computer and Network have stable-ID boolean preferences.
+  Missing keys use the original defaults; explicit false remains collapsed.
+  Rebuilds and current-folder highlighting must not overwrite the user's choice.
+- Local PDFs use the installed Poppler `/usr/bin/pdftoppm` in a subprocess, first
+  page only, scaled to at most 1024 px per edge. PPM output and errors are bounded,
+  the process has a five-second wall deadline and Linux memory/CPU limits, and
+  decode work stays off the GUI thread. Selection/visibility changes cancel
+  obsolete jobs; generations prevent stale images. No renderer tempfiles or
+  browser engine are used. Encrypted/unsupported documents may fall back, and
+  remote PDFs are not downloaded automatically. No page-navigation or PDF text
+  search is claimed.
+
+The seven test targets are registered in CTest and the three-scale display
+matrix. New controlled QPdfWriter fixtures validate first-page output and real
+MainWindow PDF-to-text transitions without reading user documents. PDF tests
+also exercise unavailable renderers, malformed/raster-size limits, timeout,
+resource limits, latest-selection cancellation and asynchronous child reaping.
+The optional provider's runtime package is `poppler-utils` on Debian/Ubuntu or
+`poppler` on Arch. Private Python helpers are test fixtures, not an application
+runtime dependency.
+
+Whole-client evidence is under `build/screenshots-followup-themed/`, including
+`pdf-preview-window.png`, `search-focused-input.png` and navigation images.
+These are not compositor-frame captures. Existing user default-manager,
+Meta+E and approved SMOD configuration must be preserved when installing updates.
 
 ## Remaining fidelity work
 

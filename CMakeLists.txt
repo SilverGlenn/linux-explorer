@@ -66,6 +66,7 @@ add_library(explorer_ui OBJECT
     src/ui/MainWindow.cpp
     src/ui/NavigationPane.cpp
     src/ui/PreviewPane.cpp
+    src/ui/PdfPreviewRenderer.cpp
     src/ui/DetailsPane.cpp
     src/ui/BreadcrumbBar.cpp
     src/ui/SearchBox.cpp
@@ -121,6 +122,8 @@ if(BUILD_TESTING)
     include(tests/thumbnail-tests.cmake)
     include(tests/details-tests.cmake)
     include(tests/list-tests.cmake)
+    include(tests/navigation-tests.cmake)
+    include(tests/pdf-tests.cmake)
     add_executable(explorer_ui_tests tests/ExplorerUiTest.cpp)
     target_link_libraries(explorer_ui_tests PRIVATE explorer_ui Qt6::Test)
     add_test(NAME explorer_ui_tests COMMAND bash

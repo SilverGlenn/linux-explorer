@@ -34,6 +34,9 @@
 #include <QMenuBar>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QPainter>
+#include <QPdfWriter>
+#include <QScopeGuard>
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
@@ -560,6 +563,140 @@ private Q_SLOTS:
         search->grab();
         QCOMPARE(search->font().pointSizeF(), 9.0);
         QVERIFY(search->font().italic());
+    }
+
+    void focusedSearchKeepsItsFrameInTheActualNavigationBar()
+    {
+        auto win = window(m_folder);
+        auto *search = win->findChild<SearchBox *>();
+        QVERIFY(search);
+        search->setFocus();
+        QTRY_VERIFY(search->hasFocus());
+        const auto checkFrame = [search] {
+            const QImage image = search->grab().toImage();
+            const qreal dpr = image.devicePixelRatio();
+            const QPoint points[] = {
+                QPoint(0, search->height() / 2),
+                QPoint(search->width() - 1, search->height() / 2),
+                QPoint(search->width() / 2, 0),
+                QPoint(search->width() / 2, search->height() - 1)
+            };
+            for (const QPoint &point : points) {
+                const QColor ink = image.pixelColor(
+                    qBound(0, qRound(point.x() * dpr), image.width() - 1),
+                    qBound(0, qRound(point.y() * dpr), image.height() - 1));
+                if (ink.red() > 220 || ink.green() > 220 || ink.blue() < 180)
+                    return false;
+            }
+            return true;
+        };
+        QVERIFY(checkFrame());
+        QTest::keyClicks(search, QStringLiteral("Notes"));
+        QVERIFY(checkFrame());
+        QCOMPARE(search->font().pointSizeF(), 9.0);
+        search->selectAll();
+        QVERIFY(checkFrame());
+        search->clear();
+        QVERIFY(checkFrame());
+    }
+
+    void collapsedNavigationGroupsSurviveMainWindowReconstruction()
+    {
+        const bool oldFavorites = Settings::navigationGroupExpanded(QStringLiteral("favorites")).value_or(true);
+        const bool oldLibraries = Settings::navigationGroupExpanded(QStringLiteral("libraries")).value_or(true);
+        const auto restore = qScopeGuard([oldFavorites, oldLibraries] {
+            Settings::setNavigationGroupExpanded(QStringLiteral("favorites"), oldFavorites);
+            Settings::setNavigationGroupExpanded(QStringLiteral("libraries"), oldLibraries);
+        });
+        Settings::setNavigationGroupExpanded(QStringLiteral("favorites"), true);
+        Settings::setNavigationGroupExpanded(QStringLiteral("libraries"), true);
+        {
+            auto win = window(Locations::libraries());
+            auto *tree = win->findChild<NavigationPane *>()->findChild<QTreeWidget *>();
+            QVERIFY(tree);
+            auto *libraries = heading(tree, Locations::libraries());
+            QVERIFY(libraries);
+            libraries->setExpanded(false);
+            for (int row = 0; row < tree->topLevelItemCount(); ++row)
+                if (tree->topLevelItem(row)->text(0) == QStringLiteral("Favorites"))
+                    tree->topLevelItem(row)->setExpanded(false);
+            win->close();
+        }
+        auto win = window(Locations::libraries());
+        auto *pane = win->findChild<NavigationPane *>();
+        auto *tree = pane->findChild<QTreeWidget *>();
+        QVERIFY(tree);
+        QVERIFY(!heading(tree, Locations::libraries())->isExpanded());
+        pane->refresh();
+        QVERIFY(!heading(tree, Locations::libraries())->isExpanded());
+        QCOMPARE(Settings::navigationGroupExpanded(QStringLiteral("favorites")).value_or(true), false);
+        QCOMPARE(Settings::navigationGroupExpanded(QStringLiteral("libraries")).value_or(true), false);
+    }
+
+    void localPdfPreviewUsesTheRealPreviewPaneAndClearsForText()
+    {
+        if (!QFile::exists(QStringLiteral("/usr/bin/pdftoppm")))
+            QSKIP("Optional Poppler PDF renderer is not installed");
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        const QString pdf = fixture.filePath(QStringLiteral("Preview reference.pdf"));
+        {
+            QPdfWriter writer(pdf);
+            writer.setResolution(72);
+            QPainter painter(&writer);
+            QVERIFY(painter.isActive());
+            painter.fillRect(QRect(0, 0, writer.width(), writer.height()), Qt::white);
+            QFont title = painter.font();
+            title.setPointSize(24);
+            painter.setFont(title);
+            painter.setPen(QColor(QStringLiteral("#195080")));
+            painter.drawText(QRect(40, 60, writer.width() - 80, 100),
+                             Qt::AlignCenter, QStringLiteral("Lightweight PDF preview"));
+            painter.setPen(Qt::black);
+            painter.drawText(QRect(40, 180, writer.width() - 80, 100),
+                             Qt::AlignCenter, QStringLiteral("A controlled first-page reference."));
+        }
+        const QString textPath = fixture.filePath(QStringLiteral("Notes.txt"));
+        {
+            QFile file(textPath);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.write("The text preview still works.") > 0);
+        }
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        auto *model = win->findChild<DirectoryModel *>();
+        QTRY_COMPARE(model->rowCount(), 2);
+        auto *view = win->findChild<FileView *>();
+        auto *button = win->findChild<QToolButton *>(QStringLiteral("previewPaneButton"));
+        auto *pane = win->findChild<PreviewPane *>();
+        QVERIFY(view && button && pane);
+        QVERIFY(view->selectUrl(QUrl::fromLocalFile(pdf)));
+        button->click();
+        QTRY_VERIFY(pane->isVisible());
+        auto *image = pane->findChild<QLabel *>(QStringLiteral("previewImage"));
+        auto *caption = pane->findChild<QLabel *>(QStringLiteral("pdfPreviewCaption"));
+        QVERIFY(image && caption);
+        QTRY_VERIFY(!image->pixmap().isNull());
+        QVERIFY(caption->isVisible());
+        QCOMPARE(caption->text(), QStringLiteral("PDF — first page only"));
+        win->hide();
+        QCoreApplication::processEvents();
+        win->show();
+        win->activateWindow();
+        QTRY_VERIFY(!image->pixmap().isNull());
+        QVERIFY(caption->isVisible());
+        QVERIFY(button->isChecked());
+        const QString output = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        if (!output.isEmpty()) {
+            QVERIFY(QDir().mkpath(output));
+            QVERIFY(win->grab().save(output + QStringLiteral("/pdf-preview-window.png")));
+        }
+        QVERIFY(view->selectUrl(QUrl::fromLocalFile(textPath)));
+        auto *text = pane->findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+        QTRY_COMPARE(text->toPlainText(), QStringLiteral("The text preview still works."));
+        QVERIFY(caption->isHidden());
+        QVERIFY(image->pixmap().isNull());
+        button->click();
+        QVERIFY(pane->isHidden());
     }
 
     void breadcrumbPopupLifetime_data()

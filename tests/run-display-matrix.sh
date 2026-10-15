@@ -9,7 +9,7 @@ for entry in '96dpi 1 800x600' '120dpi 1.25 1024x768' '144dpi 1.5 1200x900'; do
     echo "Testing $display at $name ($scale scaling)"
     log="$build/test-$name.log"
     : > "$log"
-    for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests explorer_ui_tests; do
+    for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests navigation_state_tests pdf_preview_tests explorer_ui_tests; do
         echo "  $suite" | tee -a "$log"
         QT_QPA_PLATFORM="offscreen:configfile=$root/tests/screens/$name.json" \
           QT_STYLE_OVERRIDE=Fusion QT_SCALE_FACTOR="$scale" \

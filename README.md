@@ -5,7 +5,7 @@ based on direct inspection of Windows 7 Ultimate SP1 Explorer in an offline VM.
 The upstream Qt6/KDE/KIO architecture is retained; this is a usable Linux file
 manager, not a mock desktop or a Windows emulator.
 
-**First fidelity pass, not complete parity.** Multi-location libraries, continuous
+**VM-driven fidelity work, not complete parity.** Multi-location libraries, continuous
 view-slider sizing, and native Windows preview handlers are still missing.
 The reference VM used Basic graphics, so its Aero Glass frame was not a valid
 reference for transparency or shadows.
@@ -21,8 +21,10 @@ Windows 7-era principles are used without overriding Explorer fidelity.
   backed by real XDG Documents/Music/Pictures/Videos folders.
 - Libraries is a selectable sidebar destination. Canonical library entries and
   Desktop/Downloads defaults no longer depend on KDE having bookmarked them.
-- Sidebar row/group spacing is closer to the Windows guest; Computer and Network
-  start collapsed.
+- Sidebar row/group spacing is closer to the Windows guest. Favorites, Libraries,
+  Computer, and Network remember their expanded/collapsed state; the first-run
+  defaults keep Computer and Network collapsed. Selection leaves a three-pixel
+  logical gap before the navigation/content divider.
 - View is a split button: its main half uses the verified five-mode cycle; its
   arrow opens an eight-choice flyout with a vertical slider.
 - A preview-pane toolbar button shares the Alt+P action.
@@ -35,6 +37,9 @@ Windows 7-era principles are used without overriding Explorer fidelity.
 - Text preview shows read-only content instead of a duplicate metadata card.
   Reads are asynchronous, bounded to 256 KiB, BOM-aware, and protected against
   stale results after selection changes.
+- Local PDFs have a lightweight, asynchronous first-page preview using Poppler.
+  Selection changes and hiding the pane cancel obsolete work; document processing
+  has pixel, output, CPU, memory, and time limits. No embedded browser is used.
 - Content view puts date/size at the right with row rules. Small icons uses
   side-by-side icon/text. Icon views have less vertical padding.
 - Natural name sorting preserves folders-first ordering in both directions.
@@ -55,6 +60,11 @@ by default, as in upstream, rather than copying Windows' hidden-extension defaul
 Requires CMake, a C++17 compiler, Qt6 Widgets/Concurrent/Multimedia/DBus/UiPlugin,
 KDE Frameworks 6 (KIO, CoreAddons, Config, WidgetsAddons, WindowSystem, Solid,
 FrameworkIntegration), and [libAeroQt](https://gitgud.io/atmk/libaero-qt).
+
+PDF preview optionally uses `/usr/bin/pdftoppm` (`poppler-utils` on Debian/Ubuntu,
+`poppler` on Arch). Without it, the pane explains that the renderer is unavailable.
+This is a local-file, first-page raster preview, not a full PDF viewer: no page
+navigation, PDF text search, password entry, or automatic remote download.
 
 With dependencies installed:
 
@@ -101,8 +111,8 @@ The browser app ID is `linux-explorer-win7`; dialogs use
 **opt-in browser-only SMOD decoration exception**, not just the client layout.
 This fork does not alter KWin/SMOD settings. See the [decoration integration
 notes](docs/windows7-reference.md#native-decoration-dependency) for the exact
-match and retained native controls; live configuration and framed visual sign-off
-are still pending approval.
+match and retained native controls. Apply live decoration changes only with
+explicit user approval; the application never installs this rule automatically.
 
 For deliberate desktop integration, close the preview's existing instance and
 launch it with:
@@ -151,20 +161,22 @@ QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=kvantum EXPLORER_NATIVE_THEME=1 \
   tests/run-ui-tests.sh "$PWD/build/explorer_ui_tests"
 ```
 
-For all five suites with the native widget theme, use the same environment with
-this runner loop (CTest intentionally pins Fusion):
+For all seven suites with the native widget theme, use this runner loop
+(CTest intentionally pins Fusion):
 
 ```bash
-for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests explorer_ui_tests; do
+for suite in address_controls_tests thumbnail_loading_tests details_pane_tests list_chrome_tests navigation_state_tests pdf_preview_tests explorer_ui_tests; do
   QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=kvantum EXPLORER_NATIVE_THEME=1 \
+    NAVIGATION_USE_AEROQT=1 LIST_CHROME_USE_AEROQT=1 \
     tests/run-ui-tests.sh "$PWD/build/$suite" || exit 1
 done
 ```
 
 Only `kdeglobals` and `Kvantum/kvantum.kvconfig` are copied into the temporary
-config. Full UI and address tests explicitly register AeroQt over Kvantum; the
-other three suites exercise Kvantum without registering AeroQt. These runs still
-exclude the compositor frame and do not change focus or settings on your desktop.
+config. Full UI/address tests explicitly register AeroQt over Kvantum; the flags
+above also enable it for the navigation/list suites. The remaining component
+suites exercise Kvantum only. These runs exclude the compositor frame and do not
+change focus or settings on your desktop.
 
 The Guide's display/scaling matrix is reproducible with Qt's configurable
 offscreen backend (tested on Qt 6.10):
@@ -173,18 +185,19 @@ offscreen backend (tested on Qt 6.10):
 tests/run-display-matrix.sh build
 ```
 
-This runs **all five suites** at 800×600/100%, 1024×768/125%, and 1200×900/150%,
+This runs **all seven suites** at 800×600/100%, 1024×768/125%, and 1200×900/150%,
 including full-UI assertions of the actual screen geometry and scale. Each suite
 retains its temporary HOME and private bus. Logs/images stay under `build/`.
 
-Refinement pass 2 has passed the five Fusion suites, all 15 matrix suite runs,
-and the five native-widget-theme runs. End-to-end checks cover stable 9 pt search
-through focus, typing, blur and blocked navigation restore; real breadcrumb popup
-lifetime/close-on-navigation; navigation/inset height agreement; and selected
-folder footer metadata at normal/narrow widths. Asynchronous thumbnail and
-list/header/sidebar regressions remain covered by the component suites. See the
-[reference notes](docs/windows7-reference.md#refinement-pass-2) for evidence and
-unverified native-frame dependencies.
+End-to-end checks cover stable 9 pt search and its visible focused frame, blocked
+navigation restore, real breadcrumb popup lifetime, navigation/inset agreement,
+selected-folder footer metadata, persisted sidebar groups across MainWindow
+reconstruction, and real first-page PDF-to-text preview transitions. Component
+suites additionally check actual arrow ink alignment, the sidebar divider gutter,
+asynchronous thumbnail identity/cache behavior, and PDF safety/cancellation
+limits. Logs and images remain under `build/`; see the
+[reference notes](docs/windows7-reference.md#follow-up-controls-navigation-and-pdf)
+for the bounded PDF feature and native-frame validation limits.
 
 The GitHub build workflow is configured to build and run the suite in Arch. Release
 publishing is limited to this repository's own artifacts; the upstream AUR
