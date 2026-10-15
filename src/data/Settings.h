@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
+#include <optional>
 
 class QUrl;
 
@@ -87,6 +88,10 @@ void setNotifyUnmountedDrives(bool notify);
 
 // Folder Options, reset folders
 void clearRememberedViewModes();
+
+// Stable navigation group IDs, independent of translated headings.
+std::optional<bool> navigationGroupExpanded(const QString &groupId);
+void setNavigationGroupExpanded(const QString &groupId, bool expanded);
 
 // Computer needs the difference, its own fallback being Tiles, and the mode
 // alone cannot say whether the default applied

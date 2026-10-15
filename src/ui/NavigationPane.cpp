@@ -1,5 +1,6 @@
 #include "NavigationPane.h"
 #include "NavigationItemDelegate.h"
+#include "../data/Settings.h"
 #include "Branding.h"
 #include "DriveLabel.h"
 #include "aero/icons.h"
@@ -33,6 +34,8 @@
 
 namespace {
 
+constexpr int kSelectionGutter = NavigationItemDelegate::rightGutter;
+
 // How long the expander arrows take to fade in or out, in milliseconds
 constexpr int kArrowFadeDuration = 500;
 
@@ -63,11 +66,27 @@ class NavigationTree : public QTreeWidget {
         QTreeWidget::leaveEvent(event);
     }
 
+    void drawRow(QPainter *painter, const QStyleOptionViewItem &option,
+                 const QModelIndex &index) const override
+    {
+        painter->save();
+        const QRect viewportRect = viewport()->rect();
+        painter->setClipRect(QRect(viewportRect.left(), viewportRect.top(),
+                                   qMax(0, viewportRect.width() - kSelectionGutter),
+                                   viewportRect.height()), Qt::IntersectClip);
+        QTreeWidget::drawRow(painter, option, index);
+        painter->restore();
+    }
+
     void drawBranches(QPainter *painter, const QRect &rect,
-                        const QModelIndex &index) const override
+                      const QModelIndex &index) const override
     {
         painter->save();
         painter->setOpacity(m_arrowOpacity);
+        const QRect viewportRect = viewport()->rect();
+        painter->setClipRect(QRect(viewportRect.left(), viewportRect.top(),
+                                   qMax(0, viewportRect.width() - kSelectionGutter),
+                                   viewportRect.height()), Qt::IntersectClip);
         QTreeWidget::drawBranches(painter, rect, index);
         painter->restore();
     }
@@ -90,6 +109,7 @@ constexpr int kPlaceholderRole = Qt::UserRole + 1;
 
 // Absent for the headings and for subfolders found by walking the filesystem
 constexpr int kPlaceRowRole = Qt::UserRole + 2;
+constexpr int kGroupIdRole = Qt::UserRole + 3;
 
 constexpr int kGroupSpacing = 20;
 
@@ -252,6 +272,9 @@ NavigationPane::NavigationPane(QWidget *parent)
     // folder, so opening or closing a branch moves it
     connect(m_tree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem *item) {
         const QUrl url = urlForItem(item);
+        const QString groupId = item->data(0, kGroupIdRole).toString();
+        if (!m_restoringTree && !groupId.isEmpty())
+            Settings::setNavigationGroupExpanded(groupId, true);
         if (url.isValid())
             m_expanded.insert(url);
         populateChildren(item);
@@ -259,6 +282,9 @@ NavigationPane::NavigationPane(QWidget *parent)
     });
     connect(m_tree, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem *item) {
         const QUrl url = urlForItem(item);
+        const QString groupId = item->data(0, kGroupIdRole).toString();
+        if (!m_restoringTree && !groupId.isEmpty())
+            Settings::setNavigationGroupExpanded(groupId, false);
         if (url.isValid())
             m_expanded.remove(url);
         syncHighlight();
@@ -340,12 +366,13 @@ QTreeWidgetItem *NavigationPane::itemForUrl(const QUrl &url) const
     return nullptr;
 }
 
-QTreeWidgetItem *NavigationPane::addGroup(const QString &title,
+QTreeWidgetItem *NavigationPane::addGroup(const QString &groupId, const QString &title,
                                           std::initializer_list<const char *> iconNames,
                                           const QUrl &url)
 {
     auto *item = new QTreeWidgetItem(m_tree);
     item->setText(0, title);
+    item->setData(0, kGroupIdRole, groupId);
     item->setSizeHint(0, QSize(0, 21));
     item->setIcon(0, Aero::themeIcon(iconNames));
     item->setData(0, kPlaceRowRole, -1);
@@ -465,16 +492,17 @@ void NavigationPane::rebuild()
         m_watch->removeDir(path);
     m_watched.clear();
 
+    m_restoringTree = true;
     m_tree->clear();
 
     QTreeWidgetItem *favorites =
-        addGroup(tr("Favorites"), {"favorites", "bookmarks", "starred"});
+        addGroup(QStringLiteral("favorites"), tr("Favorites"), {"favorites", "bookmarks", "starred"});
     QTreeWidgetItem *libraries =
-        addGroup(tr("Libraries"), {"folder-library", "folder-documents", "folder"}, Locations::libraries());
+        addGroup(QStringLiteral("libraries"), tr("Libraries"), {"folder-library", "folder-documents", "folder"}, Locations::libraries());
     QTreeWidgetItem *computer =
-        addGroup(tr("Computer"), {"computer", "computer-laptop"}, Locations::computer());
+        addGroup(QStringLiteral("computer"), tr("Computer"), {"computer", "computer-laptop"}, Locations::computer());
     QTreeWidgetItem *network =
-        addGroup(tr("Network"), {"folder-network", "network-workgroup", "network-server"},
+        addGroup(QStringLiteral("network"), tr("Network"), {"folder-network", "network-workgroup", "network-server"},
                  QUrl(QStringLiteral("remote:/")));
 
     for (int row = 0; row < m_places->rowCount(); ++row) {
@@ -581,12 +609,16 @@ void NavigationPane::rebuild()
         addPlaceholderIfExpandable(item, entry.url);
     }
 
-    // Favorites and Libraries start open; Computer and Network start collapsed.
+    // Defaults apply only until the user has explicitly chosen a group state.
+    const QHash<QString, bool> groupDefaults = {
+        {QStringLiteral("favorites"), true}, {QStringLiteral("libraries"), true},
+        {QStringLiteral("computer"), false}, {QStringLiteral("network"), false},
+    };
     for (QTreeWidgetItem *group : {favorites, libraries, computer, network}) {
-        if (group->childCount() > 0)
-            group->setExpanded(group == favorites || group == libraries
-                               || m_expanded.contains(urlForItem(group)));
-        else if (!group->data(0, Qt::UserRole).toUrl().isValid())
+        if (group->childCount() > 0 || group->data(0, Qt::UserRole).toUrl().isValid()) {
+            const QString id = group->data(0, kGroupIdRole).toString();
+            group->setExpanded(Settings::navigationGroupExpanded(id).value_or(groupDefaults.value(id)));
+        } else
             delete group;   // a heading with neither children nor a destination
     }
 
@@ -603,6 +635,7 @@ void NavigationPane::rebuild()
         m_tree->insertTopLevelItem(i, makeSpacer(i == 0 ? 10 : kGroupSpacing));
 
     setCurrentUrl(m_currentUrl);
+    m_restoringTree = false;
 }
 
 void NavigationPane::setCurrentUrl(const QUrl &url)

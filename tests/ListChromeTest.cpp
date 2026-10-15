@@ -39,15 +39,17 @@ private Q_SLOTS:
         const QRect row = NavigationItemDelegate::boundedRowRect(option);
         QVERIFY(!row.isEmpty());
         QCOMPARE(row.left(), option.rect.left());
-        QCOMPARE(row.right(), tree.viewport()->rect().right());
+        QCOMPARE(row.right(), tree.viewport()->rect().right() - NavigationItemDelegate::rightGutter);
         QCOMPARE(row.height(), option.rect.height());
 
         // Simulate a row geometry wider than a temporarily narrowed pane. The
         // background still fills all available pane width, but never escapes it.
         option.rect.setWidth(tree.viewport()->width() + 80);
         const QRect clipped = NavigationItemDelegate::boundedRowRect(option);
-        QCOMPARE(clipped, option.rect.intersected(tree.viewport()->rect()));
-        QCOMPARE(clipped.right(), tree.viewport()->rect().right());
+        QRect viewportBounds = tree.viewport()->rect();
+        viewportBounds.adjust(0, 0, -NavigationItemDelegate::rightGutter, 0);
+        QCOMPARE(clipped, option.rect.intersected(viewportBounds));
+        QCOMPARE(clipped.right(), tree.viewport()->rect().right() - NavigationItemDelegate::rightGutter);
     }
 
     void headerVisualStatesRenderForReferenceReview()

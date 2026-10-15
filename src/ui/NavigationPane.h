@@ -62,7 +62,7 @@ private:
     // be ignored rather than clearing the tree and rescanning every open branch
     QStringList placesSignature() const;
 
-    QTreeWidgetItem *addGroup(const QString &title,
+    QTreeWidgetItem *addGroup(const QString &groupId, const QString &title,
                               std::initializer_list<const char *> iconNames,
                               const QUrl &url = QUrl());
     void addEntry(QTreeWidgetItem *group, const QModelIndex &placeIndex);
@@ -102,6 +102,7 @@ private:
 
     // Reopened after a rebuild
     QSet<QUrl> m_expanded;
+    bool m_restoringTree = false;
 
     // Scans in flight, so reexpanding a folder starts no duplicate
     QSet<QUrl> m_scanning;

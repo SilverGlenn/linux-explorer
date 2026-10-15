@@ -3,16 +3,21 @@
 #include <QPainter>
 #include <QStyledItemDelegate>
 
-// Keeps tree selection and hover backgrounds full-row, clipped to the
-// navigation viewport rather than extending past its pane boundary.
+// Keeps row backgrounds clipped to a small gutter before the navigation
+// divider; NavigationTree also clips style painting outside the delegate.
 class NavigationItemDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
+    static constexpr int rightGutter = 3;
+
     static QRect boundedRowRect(const QStyleOptionViewItem &option)
     {
-        return option.widget ? option.rect.intersected(option.widget->rect())
-                             : option.rect;
+        if (!option.widget)
+            return option.rect;
+        QRect bounds = option.widget->rect();
+        bounds.adjust(0, 0, -rightGutter, 0);
+        return option.rect.intersected(bounds);
     }
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,

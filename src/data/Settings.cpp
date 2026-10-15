@@ -213,6 +213,22 @@ void clearRememberedViewModes()
     s.remove(QStringLiteral("FolderViews"));
 }
 
+std::optional<bool> navigationGroupExpanded(const QString &groupId)
+{
+    QSettings s;
+    s.beginGroup(QStringLiteral("Navigation/Groups"));
+    const QString key = groupId;
+    if (!s.contains(key))
+        return std::nullopt;
+    return s.value(key).toBool();
+}
+
+void setNavigationGroupExpanded(const QString &groupId, bool expanded)
+{
+    QSettings s;
+    s.setValue(QStringLiteral("Navigation/Groups/") + groupId, expanded);
+}
+
 QStringList recentPaths()
 {
     return QSettings().value(key("RecentPaths")).toStringList();
