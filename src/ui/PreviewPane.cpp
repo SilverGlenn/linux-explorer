@@ -10,8 +10,10 @@
 #include <QHideEvent>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStringConverter>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
@@ -130,6 +132,8 @@ void PreviewPane::showPlaceholder(const QString &text)
 
 void PreviewPane::setItems(const QList<KFileItem> &items)
 {
+    m_items = items;
+    m_resumeOnShow = false;
     cancelPreview();
     m_pixmap = {};
     m_image->clear();
@@ -206,11 +210,25 @@ void PreviewPane::updateImage()
 
 void PreviewPane::hideEvent(QHideEvent *event)
 {
+    m_resumeOnShow = true;
     cancelPreview();
     m_pixmap = {};
     m_image->clear();
     showPlaceholder(tr("Select a file to preview."));
     QWidget::hideEvent(event);
+}
+
+void PreviewPane::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (!m_resumeOnShow) return;
+    const quint64 generation = m_generation;
+    // MainWindow may synchronously set a new selection after showing the pane.
+    // Resume only if that did not supersede the preview canceled on hide.
+    QTimer::singleShot(0, this, [this, generation] {
+        if (isVisible() && m_resumeOnShow && generation == m_generation)
+            setItems(m_items);
+    });
 }
 
 void PreviewPane::resizeEvent(QResizeEvent *event)

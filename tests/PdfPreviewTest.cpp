@@ -12,6 +12,7 @@
 #include <QSignalSpy>
 #include <QStackedWidget>
 #include <QTemporaryDir>
+#include <QVBoxLayout>
 #include <QtTest>
 #include <cerrno>
 #include <csignal>
@@ -186,6 +187,10 @@ private slots:
         pane.hide();
         QTest::qWait(200);
         pane.show();
+        QTRY_COMPARE(stack->currentWidget(), pane.findChild<QLabel *>(QStringLiteral("previewImage")));
+        QVERIFY(caption->isVisible());
+        pane.setItems({});
+        QTest::qWait(200);
         QCOMPARE(stack->currentWidget(), placeholder);
         QVERIFY(!caption->isVisible());
         auto *shortLived = new PreviewPane;
@@ -193,6 +198,101 @@ private slots:
         shortLived->setItems({pdf});
         delete shortLived;
         QTest::qWait(200); // QProcess must be reaped without destructor waits/warnings.
+    }
+
+    void parentHideShowRestoresLatestSelection_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::addColumn<bool>("completed");
+        for (const QString &kind : {QStringLiteral("pdf"), QStringLiteral("text"), QStringLiteral("image")}) {
+            QTest::newRow(qPrintable(kind + QStringLiteral("-completed"))) << kind << true;
+            QTest::newRow(qPrintable(kind + QStringLiteral("-inflight"))) << kind << false;
+        }
+    }
+
+    void parentHideShowRestoresLatestSelection()
+    {
+        QFETCH(QString, kind);
+        QFETCH(bool, completed);
+        const QString imagePath = m_files.filePath(QStringLiteral("parent image.png"));
+        QImage fixture(120, 80, QImage::Format_RGB32);
+        fixture.fill(Qt::green);
+        QVERIFY(fixture.save(imagePath));
+        const KFileItem item = kind == QLatin1String("pdf")
+            ? pdfItem(m_files.filePath(QStringLiteral("-first page.pdf")))
+            : KFileItem(QUrl::fromLocalFile(kind == QLatin1String("text")
+                ? m_files.filePath(QStringLiteral("note.txt")) : imagePath));
+
+        QWidget window;
+        QVBoxLayout layout(&window);
+        auto *pane = new PreviewPane(&window);
+        layout.addWidget(pane);
+        window.resize(320, 440);
+        window.show();
+        auto *stack = pane->findChild<QStackedWidget *>();
+        auto *image = pane->findChild<QLabel *>(QStringLiteral("previewImage"));
+        auto *text = pane->findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+        auto *placeholder = pane->findChild<QLabel *>(QStringLiteral("previewPlaceholder"));
+        auto *caption = pane->findChild<QLabel *>(QStringLiteral("pdfPreviewCaption"));
+        QWidget *content = kind == QLatin1String("text") ? static_cast<QWidget *>(text) : image;
+        pane->setItems({item});
+        if (completed) {
+            QTRY_COMPARE(stack->currentWidget(), content);
+        } else {
+            QCOMPARE(stack->currentWidget(), placeholder);
+            QVERIFY(placeholder->text().startsWith(QStringLiteral("Loading")));
+        }
+        window.hide();
+        QVERIFY(!pane->isVisible());
+        QTest::qWait(100);
+        QCOMPARE(stack->currentWidget(), placeholder);
+        QVERIFY(!caption->isVisible());
+        window.show();
+        QTRY_COMPARE(stack->currentWidget(), content);
+        QCOMPARE(caption->isVisible(), kind == QLatin1String("pdf"));
+        if (kind == QLatin1String("text")) {
+            QCOMPARE(text->toPlainText(), QStringLiteral("Current text selection"));
+        } else {
+            const QImage result = image->pixmap().toImage();
+            QVERIFY(!result.isNull());
+            const QColor center = result.pixelColor(result.width() / 2, result.height() / 2);
+            if (kind == QLatin1String("pdf")) QVERIFY(center.red() > 200 && center.blue() < 100);
+            else QCOMPARE(center, QColor(Qt::green));
+        }
+    }
+
+    void showResumeCannotOverrideSynchronousSelectionChange_data()
+    {
+        QTest::addColumn<bool>("clearSelection");
+        QTest::newRow("new-text-selection") << false;
+        QTest::newRow("cleared-selection") << true;
+    }
+
+    void showResumeCannotOverrideSynchronousSelectionChange()
+    {
+        QFETCH(bool, clearSelection);
+        QWidget window;
+        QVBoxLayout layout(&window);
+        auto *pane = new PreviewPane(&window);
+        layout.addWidget(pane);
+        window.show();
+        auto *stack = pane->findChild<QStackedWidget *>();
+        auto *image = pane->findChild<QLabel *>(QStringLiteral("previewImage"));
+        auto *text = pane->findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+        auto *placeholder = pane->findChild<QLabel *>(QStringLiteral("previewPlaceholder"));
+        pane->setItems({pdfItem(m_files.filePath(QStringLiteral("-first page.pdf")))});
+        QTRY_COMPARE(stack->currentWidget(), image);
+        window.hide();
+        window.show();
+        if (clearSelection) pane->setItems({});
+        else pane->setItems({KFileItem(QUrl::fromLocalFile(m_files.filePath(QStringLiteral("note.txt"))))});
+        QWidget *expected = clearSelection ? static_cast<QWidget *>(placeholder) : text;
+        QTRY_COMPARE(stack->currentWidget(), expected);
+        QTest::qWait(200);
+        QCOMPARE(stack->currentWidget(), expected);
+        QVERIFY(!pane->findChild<QLabel *>(QStringLiteral("pdfPreviewCaption"))->isVisible());
+        if (clearSelection) QCOMPARE(placeholder->text(), QStringLiteral("Select a file to preview."));
+        else QCOMPARE(text->toPlainText(), QStringLiteral("Current text selection"));
     }
 
     void currentKioImageSurvivesCancelledPdf()

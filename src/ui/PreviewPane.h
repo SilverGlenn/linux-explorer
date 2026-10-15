@@ -25,6 +25,7 @@ public:
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
 private:
     void showPlaceholder(const QString &text);
@@ -37,6 +38,8 @@ private:
     PdfPreviewRenderer *m_pdf = nullptr;
     QPlainTextEdit *m_text = nullptr;
     QPixmap m_pixmap;
+    QList<KFileItem> m_items;
+    bool m_resumeOnShow = false;
     quint64 m_generation = 0;
     QPointer<KIO::PreviewJob> m_job;
 };
