@@ -1189,9 +1189,8 @@ void MainWindow::buildNavigationBar()
     connect(refreshButton, &QToolButton::clicked, this, &MainWindow::refresh);
     layout->addSpacing(6);
 
-    // The crumb bar is marked transparent by the inset call, so the theme gives
-    // a plain text field a glass background that a border of our own would
-    // override, and focus swaps to solid white since there is no glass for it
+    // SearchBox keeps the shared Aero entry artwork even while focused;
+    // address editing uses a separate full-width opaque typing surface.
     m_searchBox = new SearchBox;
     // The Win7 glyph comes first, with the standard name as the fallback
     m_searchBox->addAction(Aero::themeIcon({"gtk-search", "system-search"}),
@@ -1271,6 +1270,9 @@ void MainWindow::clearPathLayout()
         }
         delete item;
     }
+    // Restore breadcrumb padding; the editable field instead fills this
+    // whole surface and keeps its text inset inside the editor itself.
+    m_pathLayout->setContentsMargins(4, 0, 4, 0);
     // Cleared before the deferred deletes run, so anything reacting to the
     // editor losing focus sees edit mode as already finished
     m_pathEdit = nullptr;
@@ -1294,12 +1296,18 @@ void MainWindow::beginPathEdit()
     m_pathEdit->setObjectName(QStringLiteral("pathEditor"));
     m_pathEdit->setAccessibleName(tr("Address bar"));
     m_pathEdit->setFrame(false);
+    m_pathEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     Aero::setPointSize(m_pathEdit, 9);
-    // Transparent, so the editor looks like the bar rather than sits inside it
+    // Editing is one opaque surface up to the refresh separator. Keep the
+    // text padding inside QLineEdit, not as unpainted layout margins, and
+    // suppress the inherited glass border-image rather than nesting frames.
+    m_pathLayout->setContentsMargins(0, 0, 0, 0);
+    m_pathEdit->setTextMargins(4, 0, 4, 0);
     m_pathEdit->setStyleSheet(
-        QStringLiteral("QLineEdit { background: transparent; border: none;"
-                       " color: %1; }").arg(QLatin1String(Aero::Palette::Text)));
-    m_pathLayout->addWidget(m_pathEdit);
+        QStringLiteral("#pathEditor { background: white; border: none;"
+                       " border-image: none; padding: 0; color: %1; }")
+            .arg(QLatin1String(Aero::Palette::Text)));
+    m_pathLayout->addWidget(m_pathEdit, 1);
 
     // A filesystem model rather than a completion object, the completer needing
     // a model to pop up from and this one reading a directory only when the

@@ -511,6 +511,60 @@ private Q_SLOTS:
         QTRY_COMPARE(win->windowTitle(), QStringLiteral("Libraries"));
     }
 
+    void addressEditFillsItsWholeTypingSurface()
+    {
+        auto win = window(m_folder);
+        auto *box = win->findChild<QWidget *>(QStringLiteral("addressBox"));
+        QVERIFY(box);
+        const int widths[] = {820, 500};
+        const QString output = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        for (const int width : widths) {
+            win->resize(width, 440);
+            win->activateWindow();
+            win->findChild<FileView *>()->focusView();
+            QTRY_VERIFY(win->isActiveWindow());
+            QTest::keyClick(win.get(), Qt::Key_D, Qt::AltModifier);
+            auto *edit = win->findChild<QLineEdit *>(QStringLiteral("pathEditor"));
+            QVERIFY(edit);
+            QTRY_VERIFY(edit->hasFocus());
+            QCoreApplication::processEvents();
+            auto *surface = edit->parentWidget();
+            QCOMPARE(edit->geometry(), surface->rect());
+            QCOMPARE(edit->textMargins(), QMargins(4, 0, 4, 0));
+            auto *refresh = box->findChild<QToolButton *>();
+            QVERIFY(refresh);
+            QVERIFY(edit->mapTo(box, edit->rect().topRight()).x() < refresh->x());
+            edit->clear();
+            const QImage composite = win->grab().toImage();
+            const qreal dpr = composite.devicePixelRatio();
+            // Scan above and below the empty editor's insertion caret.
+            // The whole typing surface, including its former outer margins,
+            // must be white; the address frame and refresh remain outside it.
+            for (const int y : {0, surface->height() - 1}) {
+                for (int x = 0; x < surface->width(); ++x) {
+                    const QPoint point = surface->mapTo(win.get(), QPoint(x, y));
+                    QCOMPARE(composite.pixelColor(qFloor((point.x() + 0.5) * dpr),
+                                                   qFloor((point.y() + 0.5) * dpr)), QColor(Qt::white));
+                }
+            }
+            QTest::mouseClick(win->windowHandle(), Qt::LeftButton, Qt::NoModifier,
+                              surface->mapTo(win.get(), QPoint(surface->width() - 1, surface->height() / 2)));
+            QVERIFY(edit->hasFocus());
+            QTest::keyClicks(edit, QStringLiteral("/a path still being typed"));
+            QCOMPARE(edit->text(), QStringLiteral("/a path still being typed"));
+            if (!output.isEmpty()) {
+                QVERIFY(QDir().mkpath(output));
+                QVERIFY(win->grab().save(output + QStringLiteral("/address-edit-%1.png").arg(width)));
+            }
+            QTest::keyClick(edit, Qt::Key_Escape);
+            QTRY_VERIFY(!win->findChild<QLineEdit *>(QStringLiteral("pathEditor")));
+            auto *bar = win->findChild<BreadcrumbBar *>();
+            QVERIFY(bar);
+            QCOMPARE(bar->parentWidget()->layout()->contentsMargins(), QMargins(4, 0, 4, 0));
+            QCOMPARE(win->windowTitle(), QStringLiteral("Explorer Reference"));
+        }
+    }
+
     void searchBoxKeepsNinePointTextAcrossFocusAndNavigationRestore()
     {
         auto win = window(m_folder);
