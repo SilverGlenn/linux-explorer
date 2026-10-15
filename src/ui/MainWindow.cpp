@@ -11,6 +11,7 @@
 #include "HelpDialog.h"
 #include "Archives.h"
 #include "BreadcrumbBar.h"
+#include "SearchBox.h"
 #include "Libraries.h"
 #include "LibrariesView.h"
 #include "ViewModeMenu.h"
@@ -1061,7 +1062,8 @@ void MainWindow::cyclePanes(bool forward)
 void MainWindow::buildNavigationBar()
 {
     m_navBar = new QWidget;
-    m_navBar->setFixedHeight(34);
+    // AeroQt reserves top->sizeHint().height(). Do not clamp that below the
+    // 29 px navigation artwork plus its layout margins (35 px in this theme).
     auto *layout = new QHBoxLayout(m_navBar);
     layout->setContentsMargins(4, 3, 6, 3);
     layout->setSpacing(2);
@@ -1190,44 +1192,12 @@ void MainWindow::buildNavigationBar()
     // The crumb bar is marked transparent by the inset call, so the theme gives
     // a plain text field a glass background that a border of our own would
     // override, and focus swaps to solid white since there is no glass for it
-    m_searchBox = new QLineEdit;
-    m_searchBox->setObjectName(QStringLiteral("searchBox"));
-    m_searchBox->setPlaceholderText(tr("Search"));
-    m_searchBox->setMinimumWidth(140);
-    m_searchBox->setMaximumWidth(240);
-    m_searchBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_searchBox->setFixedHeight(24);
-    m_searchBox->setClearButtonEnabled(false);
+    m_searchBox = new SearchBox;
     // The Win7 glyph comes first, with the standard name as the fallback
     m_searchBox->addAction(Aero::themeIcon({"gtk-search", "system-search"}),
                            QLineEdit::TrailingPosition);
     m_searchBox->setToolTip(tr("Filters this folder as you type. Press Enter to "
                                "search subfolders as well."));
-
-    // Italic only while the placeholder shows
-    connect(m_searchBox, &QLineEdit::textChanged, m_searchBox,
-            [this](const QString &text) {
-        QFont font = m_searchBox->font();
-        font.setItalic(text.isEmpty());
-        m_searchBox->setFont(font);
-    });
-    QFont searchFont = m_searchBox->font();
-    searchFont.setItalic(true);
-    m_searchBox->setFont(searchFont);
-
-    connect(qApp, &QApplication::focusChanged, m_searchBox,
-            [this](QWidget *, QWidget *now) {
-        if (now == m_searchBox) {
-            m_searchBox->setStyleSheet(
-                QStringLiteral("QLineEdit { border: 1px solid %1; border-radius: 2px;"
-                               " background: %2; color: %3; }")
-                    .arg(QLatin1String(Aero::Palette::FocusBorder),
-                         QLatin1String(Aero::Palette::Surface),
-                         QLatin1String(Aero::Palette::Text)));
-        } else {
-            m_searchBox->setStyleSheet(QString());   // back to AeroQt's glass
-        }
-    });
 
     connect(m_searchBox, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_model->setNameFilter(text);
@@ -1417,6 +1387,13 @@ void MainWindow::setCrumbTrail(const QUrl &url)
 void MainWindow::showCrumbMenu(const QUrl &parent, const QPoint &globalPos)
 {
     QMenu menu(this);
+    const QPointer<BreadcrumbBar> bar(qobject_cast<BreadcrumbBar *>(sender()));
+    connect(&menu, &QMenu::aboutToShow, &menu, [bar, parent] {
+        if (bar) bar->setPopupOpen(parent, true);
+    });
+    connect(&menu, &QMenu::aboutToHide, &menu, [bar, parent] {
+        if (bar) bar->setPopupOpen(parent, false);
+    });
 
     if (!parent.isValid()) {
         // Hidden ancestors remain reachable in the leading dropdown.

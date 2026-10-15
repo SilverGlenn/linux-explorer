@@ -68,6 +68,7 @@ add_library(explorer_ui OBJECT
     src/ui/PreviewPane.cpp
     src/ui/DetailsPane.cpp
     src/ui/BreadcrumbBar.cpp
+    src/ui/SearchBox.cpp
     src/ui/LibrariesView.cpp
     src/ui/ViewModeMenu.cpp
 )
@@ -116,6 +117,10 @@ install(FILES LICENSE DESTINATION share/licenses/linux-explorer-win7)
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+    include(tests/address-tests.cmake)
+    include(tests/thumbnail-tests.cmake)
+    include(tests/details-tests.cmake)
+    include(tests/list-tests.cmake)
     add_executable(explorer_ui_tests tests/ExplorerUiTest.cpp)
     target_link_libraries(explorer_ui_tests PRIVATE explorer_ui Qt6::Test)
     add_test(NAME explorer_ui_tests COMMAND bash
