@@ -1,4 +1,5 @@
 #include "PreviewPane.h"
+#include "PdfPreviewRenderer.h"
 #include "aero/text.h"
 #include "aero/artwork.h"
 
@@ -6,6 +7,7 @@
 #include <QFile>
 #include <QFontDatabase>
 #include <QFutureWatcher>
+#include <QHideEvent>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QStackedWidget>
@@ -56,6 +58,7 @@ PreviewPane::PreviewPane(QWidget *parent) : QWidget(parent)
     m_placeholder->setWordWrap(true);
     m_stack->addWidget(m_placeholder);
     m_image = new QLabel;
+    m_image->setObjectName(QStringLiteral("previewImage"));
     m_image->setAlignment(Qt::AlignCenter);
     m_image->setMinimumSize(0, 0);
     m_image->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
@@ -69,20 +72,58 @@ PreviewPane::PreviewPane(QWidget *parent) : QWidget(parent)
     m_text->setFont(font);
     m_text->setStyleSheet(QStringLiteral("QPlainTextEdit { background: white; color: black; }"));
     m_stack->addWidget(m_text);
+    m_pdfCaption = Aero::label(tr("PDF — first page only"), 9, Aero::Palette::HeadingText);
+    m_pdfCaption->setObjectName(QStringLiteral("pdfPreviewCaption"));
+    m_pdfCaption->setAlignment(Qt::AlignCenter);
+    m_pdfCaption->setWordWrap(true);
+    root->addWidget(m_pdfCaption);
+    m_pdf = new PdfPreviewRenderer;
+    connect(m_pdf, &PdfPreviewRenderer::ready, this, [this](quint64 generation, const QImage &image) {
+        if (generation != m_generation) return;
+        m_pixmap = QPixmap::fromImage(image);
+        m_pdfCaption->show();
+        m_stack->setCurrentWidget(m_image);
+        updateImage();
+    });
+    connect(m_pdf, &PdfPreviewRenderer::failed, this,
+            [this](quint64 generation, PdfPreviewRenderer::Failure failure) {
+        if (generation != m_generation) return;
+        switch (failure) {
+        case PdfPreviewRenderer::Failure::Unavailable:
+            showPlaceholder(tr("PDF renderer is not available."));
+            break;
+        case PdfPreviewRenderer::Failure::TimedOut:
+            showPlaceholder(tr("PDF preview timed out."));
+            break;
+        case PdfPreviewRenderer::Failure::OutputLimit:
+            showPlaceholder(tr("PDF preview exceeded its safety limits."));
+            break;
+        case PdfPreviewRenderer::Failure::Invalid:
+            showPlaceholder(tr("Cannot preview this PDF. It may be invalid, encrypted, or unsupported."));
+            break;
+        }
+    });
     showPlaceholder(tr("Select a file to preview."));
 }
 
-PreviewPane::~PreviewPane() { cancelPreview(); }
+PreviewPane::~PreviewPane()
+{
+    cancelPreview();
+    disconnect(m_pdf, nullptr, this, nullptr);
+    m_pdf->shutdown();
+}
 
 void PreviewPane::cancelPreview()
 {
     ++m_generation;
     if (m_job) m_job->kill();
     m_job = nullptr;
+    if (m_pdf) m_pdf->cancel();
 }
 
 void PreviewPane::showPlaceholder(const QString &text)
 {
+    m_pdfCaption->hide();
     m_placeholder->setText(text);
     m_stack->setCurrentWidget(m_placeholder);
 }
@@ -91,6 +132,7 @@ void PreviewPane::setItems(const QList<KFileItem> &items)
 {
     cancelPreview();
     m_pixmap = {};
+    m_image->clear();
     m_text->clear();
     if (items.size() != 1) {
         showPlaceholder(items.isEmpty() ? tr("Select a file to preview.")
@@ -105,6 +147,15 @@ void PreviewPane::setItems(const QList<KFileItem> &items)
     const quint64 generation = m_generation;
     showPlaceholder(tr("Loading preview..."));
     const QString mime = item.mimetype();
+    if (mime == QLatin1String("application/pdf")) {
+        if (!item.url().isLocalFile()) {
+            showPlaceholder(tr("PDF preview is available for local files only."));
+            return;
+        }
+        showPlaceholder(tr("Loading PDF first page..."));
+        m_pdf->render(item.url().toLocalFile(), generation);
+        return;
+    }
     if (item.url().isLocalFile()
         && (mime.startsWith(QLatin1String("text/")) || mime == QLatin1String("application/json"))) {
         // Even a local path can be on a slow mount. Bound the read and keep it
@@ -151,6 +202,15 @@ void PreviewPane::updateImage()
     if (room.width() > 0 && room.height() > 0)
         m_image->setPixmap(m_pixmap.scaled(room.boundedTo(m_pixmap.size()),
                                          Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void PreviewPane::hideEvent(QHideEvent *event)
+{
+    cancelPreview();
+    m_pixmap = {};
+    m_image->clear();
+    showPlaceholder(tr("Select a file to preview."));
+    QWidget::hideEvent(event);
 }
 
 void PreviewPane::resizeEvent(QResizeEvent *event)

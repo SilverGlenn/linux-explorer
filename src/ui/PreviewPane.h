@@ -9,10 +9,12 @@
 class QLabel;
 class QPlainTextEdit;
 class QStackedWidget;
+class PdfPreviewRenderer;
 namespace KIO { class PreviewJob; }
 
 // A preview is content, not another metadata card. Plain text is rendered
-// read-only; other formats use KIO's installed thumbnail providers.
+// read-only; local PDFs render only their first page in a bounded process;
+// other formats use KIO's installed thumbnail providers.
 class PreviewPane : public QWidget {
     Q_OBJECT
 public:
@@ -22,6 +24,7 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 
 private:
     void showPlaceholder(const QString &text);
@@ -30,6 +33,8 @@ private:
     QStackedWidget *m_stack = nullptr;
     QLabel *m_placeholder = nullptr;
     QLabel *m_image = nullptr;
+    QLabel *m_pdfCaption = nullptr;
+    PdfPreviewRenderer *m_pdf = nullptr;
     QPlainTextEdit *m_text = nullptr;
     QPixmap m_pixmap;
     quint64 m_generation = 0;
