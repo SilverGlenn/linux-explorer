@@ -2,8 +2,6 @@
 #include "aero/palette.h"
 #include "aero/text.h"
 
-#include <QPainter>
-
 SearchBox::SearchBox(QWidget *parent) : QLineEdit(parent)
 {
     setObjectName(QStringLiteral("searchBox"));
@@ -14,15 +12,18 @@ SearchBox::SearchBox(QWidget *parent) : QLineEdit(parent)
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     setFixedHeight(24);
     setClearButtonEnabled(false);
-    // AeroQt's glass ancestor supplies a border-image, even when a local focus
-    // rule sets a border. Suppress both style frames in every state and paint
-    // exactly one frame after the native editor. Keep QLineEdit responsible for
-    // editing, selection, actions and accessibility, with a stable text inset.
-    setFrame(false);
+    // Use the address bar's translucent Aero entry, including while editing.
+    // Explicit local states keep native focus painting from replacing it with
+    // an opaque base or a second frame. QLineEdit still owns all input/actions.
     setStyleSheet(QStringLiteral(
-        "#searchBox { font-size: 9pt; border-image: none; border: none;"
-        " border-radius: 0; padding: 2px; background: %1; color: %2; }")
-        .arg(QLatin1String(Aero::Palette::Surface), QLatin1String(Aero::Palette::Text)));
+        "#searchBox { font-size: 9pt; background: transparent; color: %1;"
+        " border-image: url(:/AeroQt/transpbg/entry/normal.png) 4 4 4 4 repeat;"
+        " border-width: 4px; padding: 0; }"
+        "#searchBox:hover, #searchBox:focus {"
+        " border-image: url(:/AeroQt/transpbg/entry/hover.png) 4 4 4 4 repeat; }"
+        "#searchBox:disabled {"
+        " border-image: url(:/AeroQt/transpbg/entry/disabled.png) 4 4 4 4 repeat; }")
+        .arg(QLatin1String(Aero::Palette::Text)));
     connect(this, &QLineEdit::textChanged, this, [this](const QString &text) {
         QFont textFont = font();
         textFont.setPointSize(9);
@@ -66,14 +67,4 @@ void SearchBox::paintEvent(QPaintEvent *event)
         setFont(textFont);
     }
     QLineEdit::paintEvent(event);
-
-    // Filled edge strips remain continuous at fractional DPR too, without a
-    // second native/QSS frame or a half-clipped pen at the widget boundary.
-    QPainter painter(this);
-    const QColor border = !isEnabled() ? palette().color(QPalette::Disabled, QPalette::Mid)
-        : hasFocus() ? QColor(QLatin1String(Aero::Palette::FocusBorder)) : QColor("#7F9DB9");
-    painter.fillRect(QRect(0, 0, width(), 1), border);
-    painter.fillRect(QRect(0, height() - 1, width(), 1), border);
-    painter.fillRect(QRect(0, 1, 1, height() - 2), border);
-    painter.fillRect(QRect(width() - 1, 1, 1, height() - 2), border);
 }

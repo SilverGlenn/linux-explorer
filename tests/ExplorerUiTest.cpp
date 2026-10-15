@@ -16,6 +16,7 @@
 #include <AeroQt/navbuttons.h>
 
 #include <QActionGroup>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QAccessible>
 #include <QContextMenuEvent>
@@ -565,6 +566,38 @@ private Q_SLOTS:
         QVERIFY(search->font().italic());
     }
 
+    void searchEditorAndMagnifierRespondToActualMouseClicks()
+    {
+        auto win = window(m_folder);
+        auto *search = win->findChild<SearchBox *>();
+        auto *view = win->findChild<FileView *>();
+        QVERIFY(search && view);
+        QVERIFY(search->isEnabled());
+        view->focusView();
+        QTRY_VERIFY(!search->hasFocus());
+        const QPoint fieldPoint = search->mapTo(win.get(), QPoint(search->width() / 3, search->height() / 2));
+        QCOMPARE(win->childAt(fieldPoint), search);
+        QTest::mouseClick(win->windowHandle(), Qt::LeftButton, Qt::NoModifier, fieldPoint);
+        QTRY_VERIFY(search->hasFocus());
+        QTest::keyClicks(search, QStringLiteral("Notes"));
+        QCOMPARE(search->text(), QStringLiteral("Notes"));
+        search->clear();
+
+        auto buttons = search->findChildren<QAbstractButton *>();
+        QVERIFY(!buttons.isEmpty());
+        QAbstractButton *magnifier = nullptr;
+        for (auto *button : buttons)
+            if (button->isVisible()) magnifier = button;
+        QVERIFY(magnifier);
+        view->focusView();
+        QTRY_VERIFY(!search->hasFocus());
+        const QPoint iconPoint = magnifier->mapTo(win.get(), magnifier->rect().center());
+        QTest::mouseClick(win->windowHandle(), Qt::LeftButton, Qt::NoModifier, iconPoint);
+        QTRY_VERIFY(search->hasFocus());
+        QTest::keyClicks(search, QStringLiteral("Readme"));
+        QCOMPARE(search->text(), QStringLiteral("Readme"));
+    }
+
     void focusedSearchKeepsItsFrameInTheActualNavigationBar()
     {
         auto win = window(m_folder);
@@ -572,23 +605,22 @@ private Q_SLOTS:
         QVERIFY(search);
         search->setFocus();
         QTRY_VERIFY(search->hasFocus());
-        const auto checkFrame = [search] {
+        const QImage focused = search->grab().toImage();
+        const auto checkFrame = [search, &focused] {
             const QImage image = search->grab().toImage();
             const qreal dpr = image.devicePixelRatio();
-            const QPoint points[] = {
-                QPoint(0, search->height() / 2),
-                QPoint(search->width() - 1, search->height() / 2),
-                QPoint(search->width() / 2, 0),
-                QPoint(search->width() / 2, search->height() - 1)
-            };
-            for (const QPoint &point : points) {
-                const QColor ink = image.pixelColor(
-                    qBound(0, qRound(point.x() * dpr), image.width() - 1),
-                    qBound(0, qRound(point.y() * dpr), image.height() - 1));
-                if (ink.red() > 220 || ink.green() > 220 || ink.blue() < 180)
-                    return false;
-            }
-            return true;
+            const int frame = qFloor(4 * dpr);
+            const int center = image.width() / 2;
+            // The Aero entry has a dark inset below its translucent outer
+            // highlight, not a solid blue one-pixel custom border. It must
+            // retain the same texture when the editor paints text/selection.
+            return search->hasFrame()
+                && image.pixelColor(center, qRound(dpr)).lightness()
+                    < image.pixelColor(center, qRound(5 * dpr)).lightness()
+                && image.copy(0, 0, image.width(), frame)
+                    == focused.copy(0, 0, focused.width(), frame)
+                && image.copy(0, image.height() - frame, image.width(), frame)
+                    == focused.copy(0, focused.height() - frame, focused.width(), frame);
         };
         QVERIFY(checkFrame());
         QTest::keyClicks(search, QStringLiteral("Notes"));

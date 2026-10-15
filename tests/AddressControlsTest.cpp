@@ -191,25 +191,21 @@ private Q_SLOTS:
         window.resize(760, 30);
         expose(window);
         QCOMPARE(bar->height(), 20);
-        const auto checkEdges = [search](const QString &state) {
+        QImage focusedFrame;
+        const auto checkEdges = [search, &focusedFrame](const QString &state) {
             const QImage image = search->grab().toImage();
-            const qreal dpr = image.devicePixelRatio();
-            const QColor border = search->hasFocus() ? QColor("#7EB4EA") : QColor("#7F9DB9");
-            // Every physical edge pixel must be present, including the corners.
-            // The inner parallel scan is white: no second Kvantum/AeroQt frame.
-            for (int x = 0; x < image.width(); ++x) {
-                QCOMPARE(image.pixelColor(x, 0), border);
-                QCOMPARE(image.pixelColor(x, image.height() - 1), border);
+            const int frame = qFloor(4 * image.devicePixelRatio());
+            // Editing, selection and clear actions must not erase or replace
+            // the Aero frame. Its texture/blending is checked against the
+            // address entry below, rather than hard-coded solid border colors.
+            if (search->hasFocus()) {
+                if (focusedFrame.isNull()) focusedFrame = image;
+                QCOMPARE(image.copy(0, 0, image.width(), frame),
+                         focusedFrame.copy(0, 0, image.width(), frame));
+                QCOMPARE(image.copy(0, image.height() - frame, image.width(), frame),
+                         focusedFrame.copy(0, image.height() - frame, image.width(), frame));
             }
-            for (int y = 0; y < image.height(); ++y) {
-                QCOMPARE(image.pixelColor(0, y), border);
-                QCOMPARE(image.pixelColor(image.width() - 1, y), border);
-            }
-            const int inset = qCeil(2 * dpr);
-            for (int x = inset; x < image.width() - inset; ++x) {
-                QCOMPARE(image.pixelColor(x, inset), QColor(Qt::white));
-                QCOMPARE(image.pixelColor(x, image.height() - 1 - inset), QColor(Qt::white));
-            }
+            QVERIFY(search->hasFrame());
             snapshot(*search, QStringLiteral("integrated-search-%1").arg(state));
             QCOMPARE(search->font().pointSizeF(), 9.0);
         };
@@ -246,6 +242,101 @@ private Q_SLOTS:
         checkEdges(QStringLiteral("blurred-cleared"));
         search->setText(QStringLiteral("notes"));
         checkEdges(QStringLiteral("blurred-typed"));
+    }
+
+    void searchGlassMatchesAddressEntry_data()
+    {
+        QTest::addColumn<QColor>("background");
+        QTest::newRow("blue-glass") << QColor("#386991");
+        QTest::newRow("warm-glass") << QColor("#916438");
+    }
+
+    void searchGlassMatchesAddressEntry()
+    {
+        QFETCH(QColor, background);
+        QWidget window;
+        applyGlassTheme(window);
+        window.setObjectName(QStringLiteral("glassTestWindow"));
+        window.setStyleSheet(window.styleSheet() + QStringLiteral(
+            "\n#glassTestWindow { background-color: %1; }").arg(background.name()));
+        auto *layout = new QHBoxLayout(&window);
+        // Align both entries to the same physical-pixel phase at 100/125/150%.
+        layout->setContentsMargins(12, 12, 12, 12);
+        layout->setSpacing(8);
+        // A blank addressBox uses the same entry as MainWindow, without text
+        // obscuring the pixels we compare. Both controls share the glass parent.
+        auto *address = new QWidget;
+        address->setObjectName(QStringLiteral("addressBox"));
+        address->setFixedSize(240, 24);
+        auto *search = new SearchBox;
+        search->setFixedWidth(240);
+        auto *other = new QToolButton;
+        other->setText(QStringLiteral("Focus elsewhere"));
+        layout->addWidget(address);
+        layout->addWidget(search);
+        layout->addWidget(other);
+        expose(window);
+        const auto checkEntry = [&](const QString &asset, const QString &state) {
+            address->setStyleSheet(QStringLiteral(
+                "#addressBox { border-image: url(:/AeroQt/transpbg/entry/%1.png) 4 4 4 4 repeat; border-width: 4px; }")
+                .arg(asset));
+            // Capture the common parent: grabbing an individual transparent
+            // QLineEdit returns uncomposited alpha on some Qt styles.
+            const QImage composed = window.grab().toImage();
+            QCOMPARE(composed.pixelColor(0, 0), background);
+            const qreal scale = composed.devicePixelRatio();
+            const auto crop = [&](QWidget *control) {
+                const QPoint origin = control->mapTo(&window, QPoint());
+                return composed.copy(qRound(origin.x() * scale), qRound(origin.y() * scale),
+                                     qRound(control->width() * scale), qRound(control->height() * scale));
+            };
+            const QImage expected = crop(address);
+            const QImage actual = crop(search);
+            snapshot(window, QStringLiteral("glass-%1-%2").arg(QLatin1String(QTest::currentDataTag()), state));
+            QCOMPARE(actual.size(), expected.size());
+            const qreal dpr = actual.devicePixelRatio();
+            const int frame = qFloor(4 * dpr);
+            // All four textured frame strips, including corners, must match
+            // the real address entry, not a flat substitute or a second frame.
+            QCOMPARE(actual.copy(0, 0, actual.width(), frame),
+                     expected.copy(0, 0, expected.width(), frame));
+            QCOMPARE(actual.copy(0, actual.height() - frame, actual.width(), frame),
+                     expected.copy(0, expected.height() - frame, expected.width(), frame));
+            QCOMPARE(actual.copy(0, 0, frame, actual.height()),
+                     expected.copy(0, 0, frame, expected.height()));
+            QCOMPARE(actual.copy(actual.width() - frame, 0, frame, actual.height()),
+                     expected.copy(expected.width() - frame, 0, frame, expected.height()));
+            // This patch is clear of cue/query/selection and trailing actions.
+            // Equality on two different colored parents proves the same alpha
+            // blend as addressBox, including focused/typed and disabled states.
+            const QRect interior(qRound(120 * dpr), qRound(6 * dpr),
+                                 qRound(8 * dpr), qRound(10 * dpr));
+            QCOMPARE(actual.copy(interior), expected.copy(interior));
+            const QColor blended = actual.pixelColor(interior.center());
+            QVERIFY(blended != QColor(Qt::white));
+            QVERIFY(blended != background);
+        };
+        other->setFocus();
+        QTest::mouseMove(window.windowHandle(), other->mapTo(&window, other->rect().center()));
+        QTRY_VERIFY(!search->underMouse());
+        checkEntry(QStringLiteral("normal"), QStringLiteral("normal"));
+        QTest::mouseMove(window.windowHandle(), search->mapTo(&window, search->rect().center()));
+        QTRY_VERIFY(search->underMouse());
+        checkEntry(QStringLiteral("hover"), QStringLiteral("hover"));
+        QTest::mouseClick(window.windowHandle(), Qt::LeftButton, Qt::NoModifier,
+                          search->mapTo(&window, search->rect().center()));
+        QTRY_VERIFY(search->hasFocus());
+        QTest::mouseMove(window.windowHandle(), other->mapTo(&window, other->rect().center()));
+        QTRY_VERIFY(!search->underMouse());
+        checkEntry(QStringLiteral("hover"), QStringLiteral("focused-empty"));
+        QTest::keyClicks(search, "notes");
+        checkEntry(QStringLiteral("hover"), QStringLiteral("focused-typed"));
+        search->selectAll();
+        checkEntry(QStringLiteral("hover"), QStringLiteral("focused-selection"));
+        search->clear();
+        checkEntry(QStringLiteral("hover"), QStringLiteral("focused-cleared"));
+        search->setEnabled(false);
+        checkEntry(QStringLiteral("disabled"), QStringLiteral("disabled"));
     }
 
     void breadcrumbActivationAndKeyboard()
