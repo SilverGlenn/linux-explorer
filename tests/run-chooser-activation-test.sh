@@ -78,6 +78,17 @@ mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUN
 chmod 700 "$XDG_RUNTIME_DIR"
 prefix="$sandbox/install # % Ω"
 cmake --install "$build" --prefix "$prefix" --component Chooser > "$sandbox/install.log"
+# Desktop Exec has field codes, unlike the D-Bus activation Exec just exercised.
+python3 - "$prefix" <<'PY'
+import pathlib
+import sys
+prefix = pathlib.Path(sys.argv[1])
+desktop = (prefix / 'share/applications/linux-explorer-win7-dialog.desktop').read_text()
+assert 'Exec="' + str(prefix).replace('%', '%%') + '/bin/explorer-win7-chooser"\n' in desktop
+PY
+if command -v desktop-file-validate >/dev/null; then
+    desktop-file-validate "$prefix/share/applications/linux-explorer-win7-dialog.desktop"
+fi
 # Deliberately only this activation directory; no KDE services or desktop bus.
 config="$sandbox/session-bus.conf"
 printf '%s\n' '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">' \
@@ -87,3 +98,58 @@ printf '%s\n' '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configu
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 export QT_STYLE_OVERRIDE="${QT_STYLE_OVERRIDE:-Fusion}"
 dbus-run-session --config-file="$config" -- "$0" --inside "$prefix" "$sandbox"
+
+# Losing the entire session bus must close the service and its pending dialog.
+# Use another daemon owned by this test, never the desktop or activation-test bus.
+check_bus_disconnect() (
+    daemon_pid="" service_pid="" client_pid=""
+    cleanup_disconnect() {
+        for pid in "$client_pid" "$service_pid" "$daemon_pid"; do
+            if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
+        done
+        wait 2>/dev/null || true
+    }
+    trap cleanup_disconnect EXIT
+    dbus-daemon --config-file="$config" --nofork --print-address=1 > "$sandbox/disconnect-bus" &
+    daemon_pid=$!
+    for ((attempt=0; attempt<100; ++attempt)); do
+        [[ -s "$sandbox/disconnect-bus" ]] && break
+        sleep 0.05
+    done
+    read -r DBUS_SESSION_BUS_ADDRESS < "$sandbox/disconnect-bus"
+    export DBUS_SESSION_BUS_ADDRESS
+    "$prefix/bin/explorer-win7-chooser" > "$sandbox/disconnect-service.log" 2>&1 &
+    service_pid=$!
+    for ((attempt=0; attempt<100; ++attempt)); do
+        if busctl --address="$DBUS_SESSION_BUS_ADDRESS" call org.freedesktop.DBus \
+            /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner \
+            s org.win7explorer.FileChooser1 2>/dev/null | grep -qx 'b true'; then break; fi
+        sleep 0.05
+    done
+    "$prefix/bin/explorer-win7-chooser-client" open --start "$sandbox" \
+        > "$sandbox/disconnect-client.json" 2> "$sandbox/disconnect-client.log" &
+    client_pid=$!
+    for ((attempt=0; attempt<100; ++attempt)); do
+        grep -q '^Request: /' "$sandbox/disconnect-client.log" && break
+        sleep 0.05
+    done
+    grep -q '^Request: /' "$sandbox/disconnect-client.log"
+    # Allow queued presentation/listing to run while the owner stays connected.
+    sleep 0.1
+    kill "$daemon_pid"
+    wait "$daemon_pid" || true
+    daemon_pid=""
+    for ((attempt=0; attempt<100; ++attempt)); do
+        if ! kill -0 "$service_pid" 2>/dev/null; then break; fi
+        sleep 0.05
+    done
+    if kill -0 "$service_pid" 2>/dev/null; then
+        echo 'Chooser remained alive after its private bus disconnected.' >&2
+        cat "$sandbox/disconnect-service.log" >&2
+        exit 1
+    fi
+    wait "$service_pid"
+    service_pid=""
+    echo 'Private-bus disconnect closes the chooser service with a pending request: PASS'
+)
+check_bus_disconnect

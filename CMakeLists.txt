@@ -63,6 +63,7 @@ add_library(explorer_ui OBJECT
     src/ui/MapDriveDialog.cpp
     src/ui/MountDialog.cpp
     src/ui/OptionsDialog.cpp
+    src/ui/FileChooserDialog.cpp
     src/ui/BrowserNavigation.cpp
     src/ui/MainWindow.cpp
     src/ui/NavigationPane.cpp
@@ -99,6 +100,25 @@ target_link_libraries(explorer_ui PUBLIC
     ${EXPLORER_AERO_TARGET}
 )
 
+# Private chooser service seam, shared only with its executable and tests.
+add_library(explorer_chooser_service STATIC
+    src/data/ChooserService.h
+    src/data/ChooserService.cpp
+    src/data/ChooserDBusTypes.h
+    src/data/ChooserDBusTypes.cpp
+)
+target_link_libraries(explorer_chooser_service PUBLIC explorer_ui)
+# Forward the objects too: a static archive would otherwise discard the UI's
+# resource-only translation unit when linking the chooser or service tests.
+target_sources(explorer_chooser_service INTERFACE $<TARGET_OBJECTS:explorer_ui>)
+
+add_executable(explorer_chooser src/chooser-main.cpp)
+target_link_libraries(explorer_chooser PRIVATE explorer_chooser_service)
+set_target_properties(explorer_chooser PROPERTIES
+    OUTPUT_NAME explorer-win7-chooser
+    BUILD_RPATH "$ORIGIN"
+)
+
 add_executable(explorer src/main.cpp)
 target_link_libraries(explorer PRIVATE explorer_ui)
 
@@ -125,6 +145,8 @@ if(BUILD_TESTING)
     include(tests/list-tests.cmake)
     include(tests/navigation-tests.cmake)
     include(tests/browser-navigation-tests.cmake)
+    include(tests/file-chooser-tests.cmake)
+    include(tests/chooser-service-tests.cmake)
     include(tests/pdf-tests.cmake)
     add_executable(explorer_ui_tests tests/ExplorerUiTest.cpp)
     target_link_libraries(explorer_ui_tests PRIVATE explorer_ui Qt6::Test)
@@ -135,3 +157,6 @@ if(BUILD_TESTING)
         TIMEOUT 120
     )
 endif()
+
+include(cmake/ChooserDeployment.cmake)
+explorer_install_chooser(explorer_chooser)

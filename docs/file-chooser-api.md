@@ -5,6 +5,13 @@ This is an Explorer-owned dialog service, **not** `org.freedesktop.FileManager1`
 is intentionally unchanged. Applications keep their own file reading/writing,
 error handling, and parent-window input inhibition.
 
+Strict type, string-length, and filter-input limits below are enforced at the
+untrusted D-Bus boundary. Internal `ChooserOptions` is trusted C++ configuration,
+not an installed SDK, and does not duplicate the wire parser's bounds. It retains
+the same supported modes, local-only policy, selected-filter/default-extension
+semantics, and filesystem acceptance checks. Any future external adapter should
+reuse the boundary validator rather than pass unchecked input directly to widgets.
+
 ## Build, install, activate
 
 Use the same dependencies and user-local prefix as Explorer:
@@ -203,10 +210,12 @@ inhibition; they must not wait indefinitely for `Finished`.
 - Save returns a filename only. It does **not** create, open, truncate, lock, or
   reserve the destination. The caller performs the actual write afterwards.
 - If a typed leaf has no suffix and does not end with a dot, Save appends
-  `default_extension` when specified; otherwise it infers a literal extension
-  from a selected filter's simple `*.ext` glob. A wildcard/multi-alternative glob
-  with no unambiguous literal extension supplies no inferred extension. An explicit
-  suffix or trailing dot is retained, not replaced.
+  `default_extension` when specified; otherwise it uses the **first** simple
+  `*.ext` glob in the selected filter, in caller-supplied order. Patterns whose
+  extension still contains wildcard syntax are skipped; no simple pattern means
+  no inferred extension. A leading-dot-only name such as `.draft` is treated as
+  suffixless (`.draft.txt` with extension `txt`); `.draft.ext` keeps its suffix.
+  An explicit suffix or trailing dot is retained, not replaced.
 - Extension handling happens **before** existence/overwrite checks. Existing
   destinations require overwrite confirmation. Declining leaves the chooser
   active and the destination untouched. Directory destinations are navigation,

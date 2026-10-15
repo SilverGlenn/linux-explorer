@@ -77,7 +77,7 @@ private:
     int m_serial = 0;
     QString m_suffix;
 
-    void subscribe(const QDBusConnection &bus, const QString &path, ChooserSignalRecorder *recorder)
+    void subscribe(QDBusConnection bus, const QString &path, ChooserSignalRecorder *recorder)
     {
         QVERIFY(bus.connect(serviceName, path, requestInterface, QStringLiteral("Finished"),
                             recorder, SLOT(finished(uint,QVariantMap))));
@@ -120,6 +120,8 @@ private Q_SLOTS:
     }
     void versionAndIntrospection()
     {
+        // The service's static target must retain resource-only UI objects too.
+        QVERIFY(QFile::exists(QStringLiteral(":/win7/commandbar.png")));
         QCOMPARE(QByteArray(QDBusMetaType::typeToSignature(QMetaType::fromType<ChooserWireFilters>())), QByteArray("a(ssasas)"));
         const QDBusMessage reply = call(m_owner, servicePath, QStringLiteral("org.freedesktop.DBus.Properties"),
                                         QStringLiteral("Get"), {serviceName, QStringLiteral("Version")});

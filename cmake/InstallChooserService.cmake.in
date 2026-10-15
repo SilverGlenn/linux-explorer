@@ -20,6 +20,8 @@ if(NOT EXISTS "$ENV{DESTDIR}${dialog_executable}")
 endif()
 string(REPLACE "\\" "\\\\" dialog_executable "${dialog_executable}")
 string(REPLACE "\"" "\\\"" dialog_executable "${dialog_executable}")
+# Unlike D-Bus Exec, desktop Exec interprets percent field codes.
+string(REPLACE "%" "%%" dialog_executable "${dialog_executable}")
 file(READ "@PROJECT_SOURCE_DIR@/linux-explorer-win7-dialog.desktop" desktop)
 string(REPLACE "Exec=explorer-win7 %U"
     "Exec=\"${dialog_executable}\"${dialog_arguments}" desktop "${desktop}")

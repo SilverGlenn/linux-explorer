@@ -111,6 +111,9 @@ int main(int argc, char *argv[])
     app.setWindowIcon(Aero::themeIcon({"system-file-manager", "folder"}));
     // Activation is long-lived, independent of both browser and dialog count.
     app.setQuitOnLastWindowClosed(false);
+    // KIO jobs use QEventLoopLocker; completing the last listing must not quit
+    // this long-lived service even though it has no visible dialog left.
+    app.setQuitLockEnabled(false);
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Private Windows 7 Explorer file chooser service."));
@@ -120,7 +123,11 @@ int main(int argc, char *argv[])
     if (!parser.positionalArguments().isEmpty())
         parser.showHelp(1);
 
-    ChooserService service(QDBusConnection::sessionBus());
+    auto bus = QDBusConnection::sessionBus();
+    bus.connect(QString(), QStringLiteral("/org/freedesktop/DBus/Local"),
+                QStringLiteral("org.freedesktop.DBus.Local"), QStringLiteral("Disconnected"),
+                &app, SLOT(quit()));
+    ChooserService service(bus);
     if (!service.claim()) {
         qCritical() << "Could not claim org.win7explorer.FileChooser1";
         return 1;
