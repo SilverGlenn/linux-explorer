@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QHeaderView>
+#include <QSignalSpy>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
 #include <QTest>
@@ -98,6 +99,59 @@ private Q_SLOTS:
         QVERIFY(normal != hover);
         QVERIFY(hover != pressed);
         QCOMPARE(header->sectionSize(0), initialWidth + 24);
+    }
+
+    void headerHoverClearsWhenPointerEntersTrailingBlankSpace()
+    {
+        QTreeView tree;
+        QStandardItemModel model(1, 2);
+        model.setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Type")});
+        tree.setModel(&model);
+        Aero::configureListTree(&tree);
+        QHeaderView *header = tree.header();
+        header->setStretchLastSection(false);
+        header->setSectionsMovable(false);
+        header->resizeSection(0, 100);
+        header->resizeSection(1, 100);
+        tree.resize(420, 100);
+        tree.show();
+        QCoreApplication::processEvents();
+
+        QSignalSpy entered(header, &QHeaderView::sectionEntered);
+        const QPoint blank(header->length() + 30, header->viewport()->height() / 2);
+        const QPoint lastSection(header->sectionViewportPosition(1) + header->sectionSize(1) / 2,
+                                 blank.y());
+        QVERIFY(header->viewport()->rect().contains(blank));
+        QCOMPARE(header->logicalIndexAt(blank), -1);
+        QCOMPARE(header->logicalIndexAt(lastSection), 1);
+        const auto movePointer = [&](const QPoint &position) {
+            // QPA injection avoids the offscreen cursor conversion at fractional DPR.
+            QTest::mouseMove(tree.windowHandle(), header->viewport()->mapTo(&tree, position));
+            QCoreApplication::processEvents();
+        };
+        // Establish a clean state through a real leave before the in-header
+        // transition; the offscreen cursor may initially rest over a section.
+        movePointer(lastSection);
+        movePointer(QPoint(lastSection.x(), header->height() + 20));
+        movePointer(blank);
+        QVERIFY(header->viewport()->underMouse());
+        const QImage normal = header->grab().toImage();
+        // Qt's sectionEntered path is reached during pressed movement. Use
+        // real input to establish that state, then release before moving blank.
+        QTest::mousePress(tree.windowHandle(), Qt::LeftButton, Qt::NoModifier,
+                          header->viewport()->mapTo(&tree, QPoint(header->sectionSize(0) / 2, blank.y())));
+        movePointer(lastSection);
+        QTest::mouseRelease(tree.windowHandle(), Qt::LeftButton, Qt::NoModifier,
+                            header->viewport()->mapTo(&tree, lastSection));
+        QVERIFY(!entered.isEmpty());
+        QCOMPARE(entered.last().first().toInt(), 1);
+        header->setSortIndicator(0, Qt::AscendingOrder);
+        const QImage hovered = header->grab().toImage();
+        QVERIFY(hovered != normal);
+        movePointer(blank);
+        QVERIFY(header->viewport()->underMouse()); // No leaveEvent can clear the state.
+        const QImage returnedToBlank = header->grab().toImage();
+        QVERIFY(returnedToBlank == normal);
     }
 
     void sharedHeaderRetainsNativeStatefulPaintingAndResizing()

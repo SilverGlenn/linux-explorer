@@ -7,6 +7,7 @@
 #include <QFontMetrics>
 #include <QFrame>
 #include <QHeaderView>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
 #include <QTreeView>
@@ -44,6 +45,18 @@ public:
     }
 
 protected:
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        QHeaderView::mouseMoveEvent(event);
+        const int section = logicalIndexAt(event->position().toPoint());
+        if (m_hovered == section)
+            return;
+        const int previous = m_hovered;
+        m_hovered = section;
+        if (previous >= 0) updateSection(previous);
+        if (m_hovered >= 0) updateSection(m_hovered);
+    }
+
     void leaveEvent(QEvent *event) override
     {
         const int previous = m_hovered;
