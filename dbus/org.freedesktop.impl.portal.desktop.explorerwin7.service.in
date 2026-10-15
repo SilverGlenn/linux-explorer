@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.explorerwin7
+Exec="@CMAKE_INSTALL_PREFIX@/bin/explorer-win7-portal"

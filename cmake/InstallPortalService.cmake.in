@@ -1,0 +1,28 @@
+# Honor cmake --install --prefix and DESTDIR without baking staging paths in.
+set(service_dir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/dbus-1/services")
+file(MAKE_DIRECTORY "${service_dir}")
+set(executable "${CMAKE_INSTALL_PREFIX}/bin/explorer-win7-portal")
+string(REPLACE "\\" "\\\\" executable "${executable}")
+string(REPLACE "\"" "\\\"" executable "${executable}")
+file(WRITE "${service_dir}/org.freedesktop.impl.portal.desktop.explorerwin7.service"
+    "[D-BUS Service]\nName=org.freedesktop.impl.portal.desktop.explorerwin7\nExec=\"${executable}\"\n")
+
+# Keep the existing dialog identity usable in a Portal-only installation too.
+set(program explorer-win7-portal)
+set(arguments "")
+if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/explorer-win7")
+    set(program explorer-win7)
+    set(arguments " %U")
+elseif(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/explorer-win7-chooser")
+    set(program explorer-win7-chooser)
+endif()
+set(dialog_executable "${CMAKE_INSTALL_PREFIX}/bin/${program}")
+string(REPLACE "\\" "\\\\" dialog_executable "${dialog_executable}")
+string(REPLACE "\"" "\\\"" dialog_executable "${dialog_executable}")
+string(REPLACE "%" "%%" dialog_executable "${dialog_executable}")
+file(READ "@PROJECT_SOURCE_DIR@/linux-explorer-win7-dialog.desktop" desktop)
+string(REPLACE "Exec=explorer-win7 %U"
+    "Exec=\"${dialog_executable}\"${arguments}" desktop "${desktop}")
+file(MAKE_DIRECTORY "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications")
+file(WRITE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications/linux-explorer-win7-dialog.desktop"
+    "${desktop}")

@@ -1,16 +1,18 @@
 # Explorer Open/Save chooser — private API v1
 
 This is an Explorer-owned dialog service, **not** `org.freedesktop.FileManager1`,
-`--select`, an installed C++ widget SDK, or a system-wide portal backend. GDebi7
-is intentionally unchanged. Applications keep their own file reading/writing,
-error handling, and parent-window input inhibition.
+`--select`, an installed C++ widget SDK, or the standard portal interface. GDebi7
+is intentionally unchanged. A separate [FileChooser portal backend](file-chooser-portal.md)
+reuses the same UI. Applications keep their own file reading/writing, error
+handling, and parent-window input inhibition.
 
 Strict type, string-length, and filter-input limits below are enforced at the
 untrusted D-Bus boundary. Internal `ChooserOptions` is trusted C++ configuration,
 not an installed SDK, and does not duplicate the wire parser's bounds. It retains
-the same supported modes, local-only policy, selected-filter/default-extension
-semantics, and filesystem acceptance checks. Any future external adapter should
-reuse the boundary validator rather than pass unchecked input directly to widgets.
+the same local-only policy, selected-filter/default-extension semantics, and
+filesystem acceptance checks. Protocol adapters validate their own wire formats
+before constructing trusted options; the portal additionally uses folder/multiple,
+choice and batch-save capabilities of that same UI.
 
 ## Build, install, activate
 
@@ -122,15 +124,16 @@ Underscores in option names are significant.
 | `selected_filter` | `s` | Initially selected filter ID; first filter if omitted. |
 | `default_extension` | `s` | Save extension without a leading dot, e.g. `log`; otherwise inferred from selected filter if possible. |
 | `local_only` | `b` | `true`; `false` is explicitly unsupported in v1. |
-| `multiple` | `b` | `false`; `true` is explicitly unsupported in v1. |
-| `directory` | `b` | `false`; `true` is explicitly unsupported in v1. |
+| `multiple` | `b` | `false`; OpenFile can select multiple files/folders. SaveFile rejects `true`. |
+| `directory` | `b` | `false`; OpenFile chooses existing folders instead of files. SaveFile rejects `true`. |
 | `parent_window` | `s` | Empty, `x11:<hex-XID>`, or `wayland:<exported-xdg-foreign-handle>`. Must match the service's window-system backend. |
 | `activation_token` | `s` | Fresh user-activation token; see Wayland requirements below. |
 | `modal` | `b` | `false`; `true` requires a valid nonempty `parent_window`. |
 
-Folder/multiple selection and remote browsing can be added in a future compatible
-version without replacing the request/result model. They are **not implemented**
-by accepting those options and silently ignoring them.
+Folder and multiple selection are additive capabilities of this v1 request/result
+model; ordinary single-file calls are unchanged. Both flags may be true for multiple
+folders. Remote browsing remains unsupported. Choices and SaveFiles are available
+through the standard portal, not new keys/methods on this private interface.
 
 ### Filters
 
@@ -156,7 +159,7 @@ Exactly one terminal state transition occurs per allocated request:
 
 | `status` (`u`) | `state` (`s`) | Meaning |
 | --- | --- | --- |
-| 0 | `accepted` | User selected one validated file/destination. |
+| 0 | `accepted` | User selected validated files/folders, or one Save destination. |
 | 1 | `canceled` | Cancel, Escape, window close, explicit cancellation, or owner disconnect. |
 | 2 | `failed` | Invalid/unsupported request or service-side failure. |
 
@@ -171,7 +174,7 @@ Result dictionary fields:
 | --- | --- | --- |
 | `state` | `s` | `pending`, `accepted`, `canceled`, or `failed`. |
 | `status` | `u` | Terminal status above; absent while pending. |
-| `uris` | `as` | On acceptance, exactly one fully encoded absolute local file URI. No selection on cancellation/failure. |
+| `uris` | `as` | Fully encoded absolute local file URIs. One result unless OpenFile `multiple=true`; folder URIs when `directory=true`. No selection on cancellation/failure. |
 | `selected_filter` | `s` | Caller filter ID where applicable (empty for no filters). |
 | `error_name` | `s` | Machine-readable failure classification on failure. |
 | `error_message` | `s` | Human-readable failure detail on failure. |
@@ -345,11 +348,12 @@ cleans up only that private test service. A separate daemon-loss check verifies
 that its pending client exits with transport status 3 and the service shuts down,
 without using or terminating the desktop bus.
 
-Implemented v1 is local single-file Open/Save, glob/MIME filters, typed paths,
-validation, safe filename selection/overwrite confirmation, keyboard access,
-request ownership/isolation/cancellation and user-local activation. Not provided:
-folder/multiple/remote selection, a public installed widget SDK, descriptor/portal
-permission grants, portal registration, or GDebi7 integration.
+Implemented v1 is local Open (single/multiple files or folders) and single-file
+Save, glob/MIME filters, typed paths, validation, safe filename selection/overwrite
+confirmation, keyboard access, owner isolation/cancellation and user-local activation.
+This private interface does not provide remote selection, a public installed widget
+SDK, descriptors/permission grants, or GDebi7 integration. The separate standard
+portal backend adds choices/batch-save and leaves sandbox grants to the frontend.
 
 The automated display matrix checks Qt client layout and behavior, not native
 compositor focus delivery, physical keyboard/mouse events, screen-reader
