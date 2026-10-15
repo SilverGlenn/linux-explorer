@@ -11,6 +11,7 @@
 
 #include <KFileItem>
 
+class BrowserNavigation;
 class ComputerModel;
 class ComputerView;
 class DetailsPane;
@@ -34,19 +35,13 @@ class QTimer;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
-class QProgressBar;
-class QPropertyAnimation;
 class QModelIndex;
 class QPoint;
 class QPushButton;
 class QToolButton;
 class QWidget;
 
-// The Explorer window
-//
-// The crumb trail uses split segments rather than KDE's own
-// navigator, whose rendering is not reachable from a stylesheet, and dropping
-// that means dropping its history too, hence the stack below
+// The Explorer file-manager window; navigation/address behavior is shared.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -93,51 +88,11 @@ private:
     void updateNotification();
     void setupShortcuts();
 
-    // One segment of the address bar's trail, such as "Computer" or a folder
-    struct Crumb {
-        QString label;
-        QUrl target;
-    };
-
-    // The segments from Computer down to the folder
-    QList<Crumb> crumbsFor(const QUrl &url) const;
-
-    // The drive's label and mount point, resolved from the places model so the
-    // trail names drives as Computer and the sidebar do
-    Crumb driveFor(const QString &path) const;
-
-    void setCrumbTrail(const QUrl &url);
-    void clearPathLayout();
-
-    // Win7 turns the address bar into an editable path field when clicked
-    // anywhere that is not a crumb
-    void beginPathEdit();
-    void endPathEdit();
-
-    // On all three of Win7's keys, one of which also drops the typed addresses
-    void focusPathEdit(bool dropHistory);
-    void showPathHistoryMenu();
-
     // On all three of Win7's search keys
     void focusSearchBox();
 
     // Around the four stops, the pane, the address bar, the list and the search
     void cyclePanes(bool forward);
-
-    // The subfolders of the crumb to the arrow's left, and the leading icon's
-    // arrow lists the places instead
-    void showCrumbMenu(const QUrl &parent, const QPoint &globalPos);
-
-    // Prefers the folder's places entry, so the glyphs match the pane's
-    QIcon locationIcon(const QUrl &url) const;
-
-    // Placed by hand, the bar sitting behind the crumbs rather than beside them
-    void layoutPathProgress();
-
-    void stopPathProgress();
-
-    // The same for a folder that finished listing, running out to full first
-    void finishPathProgress();
 
     // Without touching history, where navigating also records it
     void showLocation(const QUrl &url);
@@ -147,8 +102,6 @@ private:
     void goUp();
     void refresh();
 
-    void pushHistory(const QUrl &url);
-    void updateNavButtons();
     void updateWindowTitle();
 
     // Repaints every folder name, and nothing is read again from disk
@@ -311,22 +264,8 @@ private:
     // Shown under the command bar only while search results are up
     QWidget *m_searchAgainBar = nullptr;
 
-    QWidget     *m_navBar = nullptr;
-    QWidget     *m_pathBox = nullptr;
-    QHBoxLayout *m_pathLayout = nullptr;
-    QPointer<QMenu> m_crumbMenu;
-
-    // Fills the address box while a folder is listed, on the same delay as the
-    // placeholder page
-    QProgressBar *m_pathProgress = nullptr;
-    QTimer       *m_pathProgressTimer = nullptr;
-    QPropertyAnimation *m_pathProgressFill = nullptr;
-
-    // Present only in edit mode, since rebuilding the trail destroys the editor
-    QLineEdit *m_pathEdit = nullptr;
-
-    QPushButton *m_backBtn = nullptr;
-    QPushButton *m_forwardBtn = nullptr;
+    QWidget *m_navBar = nullptr;
+    BrowserNavigation *m_navigation = nullptr;
 
     // The command bar, and the buttons rebuilt on selection change
     QWidget *m_commandBar = nullptr;
@@ -410,9 +349,6 @@ private:
 
     mutable QList<KFileItem> m_selection;
     mutable bool m_selectionValid = false;
-
-    QList<QUrl> m_history;
-    int         m_historyIndex = -1;
 
     QSoundEffect m_navSound;
 };
