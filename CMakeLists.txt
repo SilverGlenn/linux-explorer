@@ -44,6 +44,8 @@ add_library(explorer_ui OBJECT
     src/aero/strips.cpp
     src/aero/taskdialog.cpp
     src/aero/text.cpp
+    src/ui/ApplicationAppearance.cpp
+    src/ui/ChooserWindow.cpp
     src/ui/AboutDialog.cpp
     src/ui/HelpDialog.cpp
     src/ui/AccessDialogs.cpp
@@ -147,6 +149,14 @@ if(BUILD_TESTING)
     include(tests/browser-navigation-tests.cmake)
     include(tests/file-chooser-tests.cmake)
     include(tests/chooser-service-tests.cmake)
+    add_executable(chooser_presentation_tests tests/ChooserPresentationTest.cpp)
+    target_link_libraries(chooser_presentation_tests PRIVATE explorer_ui Qt6::Test)
+    add_test(NAME chooser_presentation_tests COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-ui-tests.sh $<TARGET_FILE:chooser_presentation_tests>)
+    set_tests_properties(chooser_presentation_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=Fusion"
+        TIMEOUT 120
+    )
     include(tests/pdf-tests.cmake)
     add_executable(explorer_ui_tests tests/ExplorerUiTest.cpp)
     target_link_libraries(explorer_ui_tests PRIVATE explorer_ui Qt6::Test)

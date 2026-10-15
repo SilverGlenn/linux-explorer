@@ -2,21 +2,19 @@
 #include "ChooserDBusTypes.h"
 #include "ChooserOptions.h"
 #include "FileChooserDialog.h"
+#include "ChooserWindow.h"
 
-#include <KStartupInfo>
-#include <KWindowSystem>
 #include <QDBusConnectionInterface>
 #include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusServiceWatcher>
 #include <QDir>
-#include <QGuiApplication>
+#include <QFileInfo>
 #include <QMimeDatabase>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTimer>
-#include <QWindow>
 #include <utility>
 
 namespace {
@@ -26,15 +24,9 @@ const QString requestInterface = QStringLiteral("org.win7explorer.FileChooser1.R
 constexpr int maxRequests = 64;
 constexpr int maxOwnerRequests = 8;
 
-struct Presentation {
-    QString parentWindow;
-    QString activationToken;
-    bool modal = false;
-};
-
 struct Configuration {
     ChooserOptions chooser;
-    Presentation presentation;
+    Explorer::ChooserWindowOptions presentation;
     QString errorName;
     QString errorMessage;
 };
@@ -118,8 +110,8 @@ Configuration configuration(const QVariantMap &wire, bool save)
     config.presentation = {string("parent_window"), string("activation_token"), boolean("modal")};
     if (!config.chooser.localOnly)
         return invalid(QStringLiteral("Only local files are supported."), true);
-    if (config.chooser.multiple || config.chooser.directory)
-        return invalid(QStringLiteral("Version 1 does not support multiple or directory selection."), true);
+    if (save && (config.chooser.multiple || config.chooser.directory))
+        return invalid(QStringLiteral("SaveFile does not support multiple or directory selection."), true);
     if (wire.contains(QStringLiteral("starting_location"))
         && !localUri(string("starting_location"), &config.chooser.startingLocation))
         return invalid(QStringLiteral("starting_location must be an encoded absolute local file URI."));
@@ -205,28 +197,9 @@ Configuration configuration(const QVariantMap &wire, bool save)
     if (!config.chooser.selectedFilter.isEmpty() && !ids.contains(config.chooser.selectedFilter))
         return invalid(QStringLiteral("selected_filter must name a supplied filter id."));
 
-    const QString parent = config.presentation.parentWindow;
-    if (config.presentation.modal && parent.isEmpty())
-        return invalid(QStringLiteral("modal requires parent_window."));
-    if (!parent.isEmpty()) {
-        static const QRegularExpression x11(QStringLiteral("^x11:([0-9a-fA-F]{1,16})$"));
-        const auto match = x11.match(parent);
-        if (match.hasMatch()) {
-            bool ok = false;
-            const qulonglong id = match.captured(1).toULongLong(&ok, 16);
-            if (!ok || id == 0 || id > 0xffffffffULL || !KWindowSystem::isPlatformX11())
-                return invalid(QStringLiteral("X11 parent is invalid or incompatible with this backend."));
-        } else if (parent.startsWith(QLatin1String("wayland:"))) {
-            const QString handle = parent.mid(8);
-            if (handle.isEmpty() || hasControl(handle) || handle.contains(QLatin1Char(' '))
-                || !KWindowSystem::isPlatformWayland())
-                return invalid(QStringLiteral("Wayland parent is invalid or incompatible with this backend."));
-        } else {
-            return invalid(QStringLiteral("parent_window must be x11:<hexid> or wayland:<exported-handle>."));
-        }
-    }
-    if (hasControl(config.presentation.activationToken))
-        return invalid(QStringLiteral("activation_token contains control characters."));
+    const QString presentationError = Explorer::validateChooserWindowOptions(config.presentation);
+    if (!presentationError.isEmpty())
+        return invalid(presentationError);
     return config;
 }
 } // namespace
@@ -259,7 +232,6 @@ public:
             return;
         }
         m_dialog->setAttribute(Qt::WA_DeleteOnClose, false);
-        m_dialog->setWindowModality(m_config.presentation.modal ? Qt::WindowModal : Qt::NonModal);
         connect(m_dialog, &QDialog::finished, this, [this](int result) {
             if (m_terminal)
                 return;
@@ -269,7 +241,8 @@ public:
             }
             const QList<QUrl> urls = m_dialog->selectedUrls();
             if (urls.isEmpty() || urls.size() > 4096
-                || (!m_config.chooser.multiple && urls.size() != 1)) {
+                || ((m_config.chooser.mode == ChooserMode::SaveFile || !m_config.chooser.multiple)
+                    && urls.size() != 1)) {
                 fail(serviceName + QStringLiteral(".Error.InvalidResult"), QStringLiteral("Chooser returned an invalid selection count."));
                 return;
             }
@@ -278,6 +251,13 @@ public:
                 QUrl local;
                 if (!localUri(url.toString(QUrl::FullyEncoded), &local)) {
                     fail(serviceName + QStringLiteral(".Error.InvalidResult"), QStringLiteral("Chooser returned a nonlocal URL."));
+                    return;
+                }
+                const QFileInfo info(local.toLocalFile());
+                const bool open = m_config.chooser.mode == ChooserMode::OpenFile;
+                if ((open && (m_config.chooser.directory ? !info.isDir() : !info.isFile()))
+                    || (!open && info.isDir())) {
+                    fail(serviceName + QStringLiteral(".Error.InvalidResult"), QStringLiteral("Chooser returned an invalid file or directory selection."));
                     return;
                 }
                 uris.append(local.toString(QUrl::FullyEncoded));
@@ -297,22 +277,7 @@ public:
             if (!m_terminal)
                 fail(serviceName + QStringLiteral(".Error.PresentationFailed"), QStringLiteral("Chooser was destroyed."));
         });
-        m_dialog->winId();
-        QWindow *window = m_dialog->windowHandle();
-        const Presentation &presentation = m_config.presentation;
-        if (presentation.parentWindow.startsWith(QLatin1String("x11:"))) {
-            KWindowSystem::setMainWindow(window, WId(presentation.parentWindow.mid(4).toULongLong(nullptr, 16)));
-        } else if (presentation.parentWindow.startsWith(QLatin1String("wayland:"))) {
-            KWindowSystem::setMainWindow(window, presentation.parentWindow.mid(8));
-        }
-        if (!presentation.activationToken.isEmpty() && KWindowSystem::isPlatformX11())
-            KStartupInfo::setNewStartupId(window, presentation.activationToken.toUtf8());
-        m_dialog->show();
-        if (!presentation.activationToken.isEmpty()) {
-            if (KWindowSystem::isPlatformWayland())
-                KWindowSystem::setCurrentXdgActivationToken(presentation.activationToken);
-            KWindowSystem::activateWindow(window);
-        }
+        Explorer::showChooserWindow(m_dialog, m_config.presentation);
     }
 
     void cancel()

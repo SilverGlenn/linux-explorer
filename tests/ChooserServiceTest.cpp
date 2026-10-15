@@ -172,8 +172,6 @@ private Q_SLOTS:
         QTest::newRow("wrong-parent") << QVariantMap{{QStringLiteral("parent_window"), QStringLiteral("invalid:123")}} << false;
         QTest::newRow("zero-x11-parent") << QVariantMap{{QStringLiteral("parent_window"), QStringLiteral("x11:0")}} << false;
         QTest::newRow("empty-wayland-parent") << QVariantMap{{QStringLiteral("parent_window"), QStringLiteral("wayland:")}} << false;
-        QTest::newRow("open-multiple") << QVariantMap{{QStringLiteral("multiple"), true}} << false;
-        QTest::newRow("open-directory") << QVariantMap{{QStringLiteral("directory"), true}} << false;
         QTest::newRow("save-multiple") << QVariantMap{{QStringLiteral("multiple"), true}} << true;
         QTest::newRow("save-directory") << QVariantMap{{QStringLiteral("directory"), true}} << true;
         QTest::newRow("leading-dot-extension") << QVariantMap{{QStringLiteral("default_extension"), QStringLiteral(".txt")}} << true;
@@ -194,6 +192,33 @@ private Q_SLOTS:
         QVERIFY(!path.isEmpty());
         QTRY_COMPARE(result(m_owner, path).value(QStringLiteral("status")).toUInt(), 2u);
         QVERIFY(!m_service->dialogForRequest(path));
+    }
+    void openSelectionFlagsAreSupported_data()
+    {
+        QTest::addColumn<bool>("multiple");
+        QTest::addColumn<bool>("directory");
+        QTest::newRow("multiple-files") << true << false;
+        QTest::newRow("directory") << false << true;
+        QTest::newRow("multiple-directories") << true << true;
+    }
+    void openSelectionFlagsAreSupported()
+    {
+        QFETCH(bool, multiple);
+        QFETCH(bool, directory);
+        ChooserOptions actual;
+        m_service->setDialogFactory([&](const ChooserOptions &options) {
+            actual = options;
+            return new FileChooserDialog(options);
+        });
+        const QString path = request(m_owner, {
+            {QStringLiteral("multiple"), multiple},
+            {QStringLiteral("directory"), directory}});
+        QTRY_VERIFY(m_service->dialogForRequest(path));
+        QCOMPARE(actual.mode, ChooserMode::OpenFile);
+        QCOMPARE(actual.multiple, multiple);
+        QCOMPARE(actual.directory, directory);
+        QCOMPARE(result(m_owner, path).value(QStringLiteral("state")).toString(), QStringLiteral("pending"));
+        close(m_owner, path);
     }
     void backendMismatch()
     {
