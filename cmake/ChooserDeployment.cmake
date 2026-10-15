@@ -1,6 +1,9 @@
 # The chooser is a private executable/D-Bus API, not an installed widget SDK.
 # Keep its install component separate so an update need not replace Explorer.
 function(explorer_install_chooser service_target)
+    set_target_properties(${service_target} PROPERTIES
+        INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
+        INSTALL_RPATH_USE_LINK_PATH TRUE)
     add_executable(explorer_chooser_client "${PROJECT_SOURCE_DIR}/tools/chooser-client.cpp")
     target_link_libraries(explorer_chooser_client PRIVATE Qt6::Core Qt6::DBus)
     set_target_properties(explorer_chooser_client PROPERTIES
@@ -27,6 +30,16 @@ function(explorer_install_chooser service_target)
         DESTINATION share/licenses/linux-explorer-win7 COMPONENT Chooser)
 
     if(BUILD_TESTING)
+        add_executable(chooser_wayland_tests "${PROJECT_SOURCE_DIR}/tests/ChooserWaylandTest.cpp")
+        target_link_libraries(chooser_wayland_tests PRIVATE Qt6::Widgets Qt6::DBus
+            Qt6::Test KF6::WindowSystem)
+        find_program(EXPLORER_TEST_KWIN_WAYLAND kwin_wayland)
+        if(EXPLORER_TEST_KWIN_WAYLAND)
+            add_test(NAME chooser_wayland_tests COMMAND bash
+                "${PROJECT_SOURCE_DIR}/tests/run-chooser-wayland-test.sh"
+                "${PROJECT_BINARY_DIR}" "${EXPLORER_TEST_KWIN_WAYLAND}")
+            set_tests_properties(chooser_wayland_tests PROPERTIES TIMEOUT 90)
+        endif()
         add_test(NAME chooser_activation_tests COMMAND bash
             "${PROJECT_SOURCE_DIR}/tests/run-chooser-activation-test.sh" "${PROJECT_BINARY_DIR}")
         set_tests_properties(chooser_activation_tests PROPERTIES

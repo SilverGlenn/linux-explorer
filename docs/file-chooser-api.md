@@ -86,6 +86,20 @@ allocating a request at all (for example, a service resource limit) can instead
 be ordinary D-Bus method errors. A D-Bus disconnect/service crash is a transport
 failure, not a fabricated successful selection.
 
+V1 bounds retained requests to **64 per service / 8 per owner**, including terminal
+objects. Call `Close` to release them promptly. Exceeding either limit returns
+`org.freedesktop.DBus.Error.LimitsExceeded`. Filter input is bounded to 64 filters
+and 256 combined glob/MIME entries (256 characters per pattern). IDs are limited
+to 256 characters, filter labels to 1024, other option strings to 4096, and
+`starting_location` to 16384 encoded ASCII characters. Suggested filenames and
+default extensions are additionally limited and validated as filesystem names;
+control characters and path separators are not accepted there.
+
+Failed-request `error_name` values use the interface prefix plus
+`.Error.InvalidOptions`, `.Error.UnsupportedOptions`, `.Error.PresentationFailed`,
+or `.Error.InvalidResult`. Clients should handle an unknown failure name as a
+failure too, rather than assuming this list can never grow.
+
 ### Options (`a{sv}`)
 
 Each value is a D-Bus variant containing **exactly** the indicated type. Unknown
@@ -299,7 +313,17 @@ ctest --test-dir build --output-on-failure
 tests/run-display-matrix.sh build
 # Installation + actual automatic service activation on a private bus:
 tests/run-chooser-activation-test.sh build
+# Optional real Wayland export/import and modality/decorations smoke check:
+# requires kwin_wayland and Qt's Wayland platform plugin.
+tests/run-chooser-wayland-test.sh build
 ```
+
+When `kwin_wayland` is available at configure time, CTest also registers the
+native Wayland smoke check. It launches a **virtual KWin compositor** with its own
+temporary settings/runtime and private bus, not the desktop compositor. The test
+exports a real parent surface and observes the separate service's xdg-foreign
+import/parent, dialog app ID, decoration and modality protocol requests. The
+service protocol trace is retained at `build/chooser-wayland-client.log`.
 
 D-Bus/widget tests use temporary HOME/config/data/runtime directories and an
 isolated session bus, never the user's active Explorer/chooser service. The
@@ -315,8 +339,9 @@ permission grants, portal registration, or GDebi7 integration.
 
 The automated display matrix checks Qt client layout and behavior, not native
 compositor focus delivery, physical keyboard/mouse events, screen-reader
-certification, or exact Windows frame artwork. Wayland foreign-parent stacking,
-activation-token focus policy, client-side input inhibition, and decorated active/
-inactive dialogs still require a live compositor integration check with the
-consumer's exported parent. No claim of that manual acceptance is made by the
-offscreen tests.
+certification, or exact Windows frame artwork. The optional virtual-Wayland test
+checks real parent/decorations/modality protocol delivery, not physical input or
+focus. Activation-token focus policy, client-side input inhibition, and decorated
+active/inactive dialog appearance still require a live compositor integration
+check with the consumer's exported parent. No claim of that manual acceptance is
+made by these automated tests.
