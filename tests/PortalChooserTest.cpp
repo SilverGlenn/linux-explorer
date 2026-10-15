@@ -83,11 +83,20 @@ QPushButton *acceptButton(FileChooserDialog *dialog)
 // has arrived. No production scheduling hook or fabricated authorization.
 class AuthorizationBarrier : public QObject {
 public:
-    explicit AuthorizationBarrier(QObject *service) : m_service(service) { service->installEventFilter(this); }
-    ~AuthorizationBarrier() override { m_service->removeEventFilter(this); releaseAll(); }
-    QList<QDBusPendingCallWatcher *> watchers() const
+    explicit AuthorizationBarrier(QObject *service, bool includeExisting = false) : m_service(service)
     {
-        QList<QDBusPendingCallWatcher *> result;
+        if (includeExisting) {
+            for (auto *watcher : service->findChildren<QDBusPendingCallWatcher *>()) {
+                watcher->blockSignals(true);
+                m_children.append(watcher);
+            }
+        }
+        service->installEventFilter(this);
+    }
+    ~AuthorizationBarrier() override { m_service->removeEventFilter(this); releaseAll(); }
+    QList<QPointer<QDBusPendingCallWatcher>> watchers() const
+    {
+        QList<QPointer<QDBusPendingCallWatcher>> result;
         for (const auto &child : m_children) {
             if (auto *watcher = qobject_cast<QDBusPendingCallWatcher *>(child.data()))
                 result.append(watcher);
@@ -99,7 +108,7 @@ public:
         const auto pending = watchers();
         if (pending.size() != count)
             return false;
-        for (const auto *watcher : pending) {
+        for (const auto &watcher : pending) {
             if (!watcher->isFinished())
                 return false;
         }
@@ -107,6 +116,9 @@ public:
     }
     void release(QDBusPendingCallWatcher *watcher)
     {
+        // Owner/disconnect cleanup can cancel and delete a held watcher.
+        if (!watcher || !m_children.contains(watcher))
+            return;
         m_children.removeAll(watcher);
         watcher->blockSignals(false);
         if (watcher->isFinished()) {
@@ -118,7 +130,7 @@ public:
     }
     void releaseAll()
     {
-        for (auto *watcher : watchers())
+        for (const auto &watcher : watchers())
             release(watcher);
         for (const auto &child : std::as_const(m_children)) {
             if (child)
@@ -299,6 +311,212 @@ private Q_SLOTS:
         QCOMPARE(m_service->requestCount(), 0);
         QCOMPARE(call(m_frontend, pending.path, requestInterface, QStringLiteral("Close")).type(), QDBusMessage::ErrorMessage);
     }
+    void unvalidatedSenderCannotReserveFrontendHandle_data()
+    {
+        QTest::addColumn<bool>("frontendFirst");
+        QTest::newRow("denial-first") << false;
+        QTest::newRow("frontend-first") << true;
+    }
+    void unvalidatedSenderCannotReserveFrontendHandle()
+    {
+        QFETCH(bool, frontendFirst);
+        AuthorizationBarrier barrier(m_service);
+        const Pending denied = begin("OpenFile", {}, {}, {}, {}, false);
+        const Pending current = begin("OpenFile", {}, {}, {}, denied.path);
+        QSignalSpy deniedReplies(denied.watcher, &QDBusPendingCallWatcher::finished);
+        QSignalSpy currentReplies(current.watcher, &QDBusPendingCallWatcher::finished);
+        QTRY_VERIFY(barrier.ready(2));
+        const auto queries = barrier.watchers();
+        barrier.release(queries.at(frontendFirst ? 1 : 0));
+        if (!frontendFirst)
+            QTRY_VERIFY(denied.watcher->isFinished());
+        barrier.release(queries.at(frontendFirst ? 0 : 1));
+        QTRY_VERIFY(denied.watcher->isFinished());
+        QCOMPARE(denied.watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        QTRY_VERIFY_WITH_TIMEOUT(m_service->dialogForRequest(current.path), 1000);
+        QVERIFY(!current.watcher->isFinished());
+        QCOMPARE(m_service->requestCount(), 1);
+        auto *closed = beginClose(current);
+        QTRY_VERIFY(barrier.ready(1)); barrier.releaseAll();
+        QTRY_VERIFY(closed->isFinished()); QTRY_VERIFY(current.watcher->isFinished());
+        QCOMPARE(current.status(), 1u);
+        QTRY_COMPARE(deniedReplies.count(), 1); QTRY_COMPARE(currentReplies.count(), 1);
+    }
+    void unvalidatedSenderCannotBlockQueuedFrontendClose_data()
+    {
+        QTest::addColumn<bool>("samePath");
+        QTest::addColumn<bool>("openFirst");
+        QTest::newRow("same-path-open-first") << true << true;
+        QTest::newRow("same-path-close-first") << true << false;
+        QTest::newRow("different-path-open-first") << false << true;
+        QTest::newRow("different-path-close-first") << false << false;
+    }
+    void unvalidatedSenderCannotBlockQueuedFrontendClose()
+    {
+        QFETCH(bool, samePath);
+        QFETCH(bool, openFirst);
+        AuthorizationBarrier barrier(m_service);
+        DialogShows shows;
+        const Pending denied = begin("OpenFile", {}, {}, {}, {}, false);
+        auto *deniedClose = beginClose(denied, false);
+        QTRY_VERIFY(barrier.ready(2));
+        const auto stale = barrier.watchers();
+        const Pending current = begin("OpenFile", {}, {}, {}, samePath ? denied.path : QString());
+        auto *closed = beginClose(current);
+        QSignalSpy replied(current.watcher, &QDBusPendingCallWatcher::finished);
+        QTRY_VERIFY_WITH_TIMEOUT(barrier.ready(4), 1000);
+        const auto queries = barrier.watchers();
+        barrier.release(queries.at(openFirst ? 2 : 3));
+        if (openFirst)
+            QTest::qWait(20);
+        QCOMPARE(shows.count, 0);
+        // Close-first releases Open immediately, before DeferredDelete can
+        // clear its guard. A terminal pending request must not be reinserted.
+        barrier.release(queries.at(openFirst ? 3 : 2));
+        QCOMPARE(m_service->requestCount(), 0);
+        QTRY_VERIFY(closed->isFinished()); QTRY_VERIFY(current.watcher->isFinished());
+        QCOMPARE(closed->reply().type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(current.status(), 1u); QTRY_COMPARE(replied.count(), 1);
+        QCOMPARE(m_service->requestCount(), 0); QCOMPARE(shows.count, 0);
+        QVERIFY(!denied.watcher->isFinished()); QVERIFY(!deniedClose->isFinished());
+        // Reuse the legitimate handle before either foreign callback runs.
+        const Pending replacement = begin("OpenFile", {}, {}, {}, current.path);
+        QTRY_VERIFY(barrier.ready(3));
+        barrier.release(barrier.watchers().last());
+        QTRY_VERIFY(m_service->dialogForRequest(replacement.path));
+        barrier.release(stale.at(0)); barrier.release(stale.at(1));
+        QTRY_VERIFY(denied.watcher->isFinished()); QTRY_VERIFY(deniedClose->isFinished());
+        QCOMPARE(denied.watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        QCOMPARE(deniedClose->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        QVERIFY(!replacement.watcher->isFinished());
+        QVERIFY(m_service->dialogForRequest(replacement.path)->isVisible());
+        QCOMPARE(m_service->requestCount(), 1);
+        QTRY_COMPARE(replied.count(), 1);
+        auto *replacementClose = beginClose(replacement);
+        QTRY_VERIFY(barrier.ready(1)); barrier.releaseAll();
+        QTRY_VERIFY(replacementClose->isFinished()); QTRY_VERIFY(replacement.watcher->isFinished());
+    }
+    void unvalidatedSenderCannotConsumeFrontendRequestCapacity()
+    {
+        AuthorizationBarrier barrier(m_service);
+        QList<Pending> denied;
+        for (int i = 0; i < 64; ++i)
+            denied.append(begin("OpenFile", {}, {}, {}, {}, false));
+        QTRY_VERIFY(barrier.ready(64));
+        const Pending current = begin();
+        QTRY_VERIFY(barrier.ready(65));
+        barrier.release(barrier.watchers().last());
+        QTRY_VERIFY_WITH_TIMEOUT(m_service->dialogForRequest(current.path), 1000);
+        QVERIFY(!current.watcher->isFinished());
+        auto *closed = beginClose(current);
+        QTRY_VERIFY(barrier.ready(65));
+        barrier.release(barrier.watchers().last());
+        QTRY_VERIFY(closed->isFinished()); QTRY_VERIFY(current.watcher->isFinished());
+        QCOMPARE(current.status(), 1u);
+        barrier.releaseAll();
+        for (const auto &request : denied) {
+            QTRY_VERIFY(request.watcher->isFinished());
+            QCOMPARE(request.watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        }
+        QCOMPARE(m_service->requestCount(), 0);
+    }
+    void unrelatedAuthorizationSaturationLeavesFrontendOpenAndCloseCapacity()
+    {
+        AuthorizationBarrier barrier(m_service);
+        DialogShows shows;
+        QList<Pending> denied;
+        for (int i = 0; i < 128; ++i)
+            denied.append(begin("OpenFile", {}, {}, {}, "/", false));
+        QTRY_VERIFY(barrier.ready(128));
+        // Use a distinct connection so this tests the backend's quota rather
+        // than the daemon's per-sender 128 unanswered-method limit.
+        const QString overflowName = QStringLiteral("portal-auth-overflow-") + m_suffix;
+        auto overflowBus = QDBusConnection::connectToBus(QDBusConnection::SessionBus, overflowName);
+        auto disconnectOverflow = qScopeGuard([&] {
+            overflowBus = QDBusConnection(QStringLiteral("invalid"));
+            QDBusConnection::disconnectFromBus(overflowName);
+        });
+        QVERIFY(overflowBus.isConnected());
+        auto message = QDBusMessage::createMethodCall(backend, rootPath, chooserInterface, "OpenFile");
+        message.setArguments({QVariant::fromValue(QDBusObjectPath("/")), QString(), QString(), QString(), QVariantMap()});
+        QDBusPendingCallWatcher overflow(overflowBus.asyncCall(message, 10000));
+        QTRY_VERIFY(overflow.isFinished());
+        QCOMPARE(overflow.reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        QVERIFY(barrier.ready(128));
+        const Pending current = begin();
+        auto *closed = beginClose(current);
+        QTRY_VERIFY_WITH_TIMEOUT(barrier.ready(130), 1000);
+        const auto queries = barrier.watchers();
+        barrier.release(queries.at(128)); barrier.release(queries.at(129));
+        QTRY_VERIFY(closed->isFinished()); QTRY_VERIFY(current.watcher->isFinished());
+        QCOMPARE(closed->reply().type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(current.status(), 1u); QCOMPARE(shows.count, 0);
+        barrier.releaseAll();
+        for (const auto &request : denied) {
+            QTRY_VERIFY(request.watcher->isFinished());
+            QCOMPARE(request.watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        }
+    }
+    void startupOwnerCacheDoesNotNeedFinishedDelivery_data()
+    {
+        QTest::addColumn<bool>("replaceOwner");
+        QTest::newRow("initial-owner") << false;
+        QTest::newRow("replacement-before-initial-delivery") << true;
+    }
+    void duplicateActiveHandleCannotStealClose()
+    {
+        const Pending current = begin();
+        QTRY_VERIFY(m_service->dialogForRequest(current.path));
+        QPointer<FileChooserDialog> dialog = m_service->dialogForRequest(current.path);
+        AuthorizationBarrier barrier(m_service);
+        const Pending duplicate = begin("OpenFile", {}, {}, {}, current.path);
+        auto *closed = beginClose(current);
+        QTRY_VERIFY(barrier.ready(2));
+        const auto queries = barrier.watchers();
+        barrier.release(queries.at(1)); barrier.release(queries.at(0));
+        QTRY_VERIFY(closed->isFinished()); QTRY_VERIFY(current.watcher->isFinished());
+        QTRY_VERIFY(duplicate.watcher->isFinished());
+        QCOMPARE(closed->reply().type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(current.status(), 1u); QCOMPARE(duplicate.status(), 2u);
+        QTRY_VERIFY(dialog.isNull());
+        QCOMPARE(m_service->requestCount(), 0);
+    }
+    void startupOwnerCacheDoesNotNeedFinishedDelivery()
+    {
+        QFETCH(bool, replaceOwner);
+        delete m_service;
+        m_service = new PortalChooserService(m_bus);
+        AuthorizationBarrier barrier(m_service, true);
+        QVERIFY(m_service->claim());
+        QTRY_VERIFY(barrier.ready(1));
+        const auto initial = barrier.watchers().first();
+        if (replaceOwner) {
+            QVERIFY(m_frontend.unregisterService(frontend));
+            QVERIFY(m_app.registerService(frontend));
+            // Peer round trip processes the queued real owner-change signals.
+            QCOMPARE(call(m_app, rootPath, "org.freedesktop.DBus.Peer", "Ping").type(), QDBusMessage::ReplyMessage);
+            barrier.release(initial); // the stale initial reply cannot reset owner
+        }
+        const int initialCount = replaceOwner ? 0 : 1;
+        QList<Pending> denied;
+        for (int i = 0; i < 128; ++i)
+            denied.append(begin("OpenFile", {}, {}, {}, "/", replaceOwner));
+        QTRY_VERIFY(barrier.ready(initialCount + 128));
+        const Pending current = begin("OpenFile", {}, {}, {}, {}, !replaceOwner);
+        auto *closed = beginClose(current, !replaceOwner);
+        QTRY_VERIFY(barrier.ready(initialCount + 130));
+        const auto queries = barrier.watchers();
+        barrier.release(queries.at(initialCount + 128));
+        barrier.release(queries.at(initialCount + 129));
+        QTRY_VERIFY(closed->isFinished()); QTRY_VERIFY(current.watcher->isFinished());
+        QCOMPARE(closed->reply().type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(current.status(), 1u);
+        barrier.releaseAll();
+        for (const auto &request : denied) {
+            QTRY_VERIFY(request.watcher->isFinished());
+            QCOMPARE(request.watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
+        }
+    }
     void pendingCloseBlocksUiAndLateCloseCannotDeleteReusedHandle_data()
     {
         QTest::addColumn<bool>("openAuthFirst");
@@ -317,7 +535,7 @@ private Q_SLOTS:
         QSignalSpy close1Replied(close1, &QDBusPendingCallWatcher::finished);
         QSignalSpy close2Replied(close2, &QDBusPendingCallWatcher::finished);
         QTRY_VERIFY(barrier.ready(3));
-        QCOMPARE(m_service->requestCount(), 1);
+        QCOMPARE(m_service->requestCount(), 0);
         QVERIFY(!m_service->dialogForRequest(first.path));
         QVERIFY(!close1->isFinished()); QVERIFY(!close2->isFinished());
         const auto queries = barrier.watchers();
@@ -363,7 +581,7 @@ private Q_SLOTS:
         QSignalSpy replied(denied.watcher, &QDBusPendingCallWatcher::finished);
         auto *deniedClose = beginClose(denied, false);
         QTRY_VERIFY(barrier.ready(2));
-        QCOMPARE(m_service->requestCount(), 1);
+        QCOMPARE(m_service->requestCount(), 0);
         QCOMPARE(shows.count, 0);
         const auto queries = barrier.watchers();
         barrier.release(queries.at(0));
@@ -400,7 +618,7 @@ private Q_SLOTS:
         QCOMPARE(shows.count, 0);
         QVERIFY(m_app.registerService(frontend));
         const Pending current = begin("OpenFile", {}, {}, {}, old.path, false);
-        QTRY_VERIFY(barrier.ready(3));
+        QTRY_VERIFY(barrier.ready(1)); // stale validations were canceled too
         // Current owner alone is insufficient: Close must also match origin.
         auto *wrongOrigin = beginClose(current);
         QTRY_VERIFY(wrongOrigin->isFinished());
@@ -420,10 +638,11 @@ private Q_SLOTS:
         QVERIFY(m_frontend.registerService(frontend));
         const Pending disconnected = begin("OpenFile", {}, {}, {}, {}, false);
         QTRY_VERIFY(barrier.ready(1));
-        QCOMPARE(m_service->requestCount(), 1);
+        QCOMPARE(m_service->requestCount(), 0);
         m_app = QDBusConnection(QStringLiteral("invalid"));
         QDBusConnection::disconnectFromBus(QStringLiteral("portal-app-") + m_suffix);
-        QTRY_COMPARE(m_service->requestCount(), 0); // don't wait for auth timeout
+        QTRY_VERIFY(barrier.ready(0)); // don't wait for auth timeout
+        QCOMPARE(m_service->requestCount(), 0);
         barrier.releaseAll();
         QTest::qWait(20);
         QCOMPARE(m_service->requestCount(), 0);
@@ -444,30 +663,43 @@ private Q_SLOTS:
             countReply(requests.last().watcher);
         }
         QTRY_VERIFY(barrier.ready(64));
-        QCOMPARE(m_service->requestCount(), 64);
-        // Resolve overflow before reaching the daemon's 128 pending-reply
-        // limit: this must be the authorized frontend's backend rejection.
-        const Pending overflow = begin();
+        QCOMPARE(m_service->requestCount(), 0);
+        const Pending pendingOverflow = begin();
         QTRY_VERIFY(barrier.ready(65));
         barrier.release(barrier.watchers().last());
-        QTRY_VERIFY(overflow.watcher->isFinished());
-        QCOMPARE(overflow.watcher->reply().type(), QDBusMessage::ReplyMessage);
-        QCOMPARE(overflow.status(), 2u);
+        QTRY_VERIFY(pendingOverflow.watcher->isFinished());
+        QCOMPARE(pendingOverflow.status(), 2u); // bounded frontend pending state
         // Capacity must leave room for a legitimate early Close per Open.
         for (const auto &request : requests) {
             closes.append(beginClose(request));
             countReply(closes.last());
         }
         QTRY_VERIFY(barrier.ready(128));
-        const Pending authOverflow = begin("OpenFile", {}, {}, {}, {}, false);
-        QTRY_VERIFY(authOverflow.watcher->isFinished());
-        QCOMPARE(authOverflow.watcher->reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.AccessDenied"));
         const auto queries = barrier.watchers();
         for (int i = 0; i < 64; ++i)
             barrier.release(queries.at(i));
         QTest::qWait(20);
         QCOMPARE(m_service->requestCount(), 64);
         QCOMPARE(shows.count, 0); // even when all Open authorizations win
+        // Free one caller reply slot while leaving 64 validated requests for
+        // the capacity check; each authorized Open still has its held Close.
+        barrier.release(queries.at(64));
+        QTRY_VERIFY(requests.first().watcher->isFinished());
+        QTRY_VERIFY(closes.first()->isFinished());
+        QCOMPARE(m_service->requestCount(), 63);
+        const Pending replacement = begin();
+        QTRY_VERIFY(barrier.ready(64));
+        barrier.release(barrier.watchers().at(63));
+        QTRY_VERIFY(m_service->dialogForRequest(replacement.path));
+        QCOMPARE(m_service->requestCount(), 64); // capacity counts validated UI
+        const Pending overflow = begin();
+        QTRY_VERIFY(barrier.ready(64));
+        barrier.release(barrier.watchers().last());
+        QTRY_VERIFY(overflow.watcher->isFinished());
+        QCOMPARE(overflow.watcher->reply().type(), QDBusMessage::ReplyMessage);
+        QCOMPARE(overflow.status(), 2u);
+        auto *replacementClose = beginClose(replacement);
+        QTRY_VERIFY(barrier.ready(64));
         barrier.releaseAll();
         QTRY_VERIFY(([&] {
             for (const auto &spy : replies) {
@@ -482,11 +714,13 @@ private Q_SLOTS:
         }
         for (const auto *closed : std::as_const(closes))
             QCOMPARE(closed->reply().type(), QDBusMessage::ReplyMessage);
+        QTRY_VERIFY(replacementClose->isFinished()); QTRY_VERIFY(replacement.watcher->isFinished());
+        QCOMPARE(replacement.status(), 1u);
         QCOMPARE(m_service->requestCount(), 0);
         QVERIFY(m_frontend.isConnected());
         QTest::qWait(20);
         QCOMPARE(m_service->requestCount(), 0);
-        QCOMPARE(shows.count, 0);
+        QCOMPARE(shows.count, 1); // only the intentionally displayed replacement
     }
     void virtualRoutingPreservesWireValidationAndOccupiedObjects()
     {

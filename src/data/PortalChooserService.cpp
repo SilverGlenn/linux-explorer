@@ -27,17 +27,20 @@ const QString frontendName = QStringLiteral("org.freedesktop.portal.Desktop");
 const QString chooserInterface = QStringLiteral("org.freedesktop.impl.portal.FileChooser");
 const QString requestInterface = QStringLiteral("org.freedesktop.impl.portal.Request");
 constexpr int maxRequests = 64;
-// Leave room for one in-flight Close per pending Open, even at capacity.
+// Each admission class leaves room for one Close per pending Open. Untrusted
+// callers cannot consume the current frontend's pending or validation budget.
 constexpr int maxAuthorizations = 2 * maxRequests;
 } // namespace
 
 class PortalChooserRequest : public QObject {
 public:
-    PortalChooserRequest(PortalChooserService *service, QDBusMessage call, QString path)
-        : QObject(service), m_service(service), m_call(std::move(call)), m_path(std::move(path)) {}
+    PortalChooserRequest(PortalChooserService *service, QDBusMessage call, QString path, bool frontendBudget)
+        : QObject(service), m_service(service), m_call(std::move(call)), m_path(std::move(path)),
+          m_frontendBudget(frontendBudget) {}
     ~PortalChooserRequest() override { dismiss(); }
     FileChooserDialog *dialog() const { return m_dialog; }
     QString owner() const { return m_call.service(); }
+    bool frontendBudget() const { return m_frontendBudget; }
 
     void authorized(PortalChooserOptions config)
     {
@@ -212,6 +215,7 @@ private:
     int m_pendingCloses = 0;
     bool m_authorized = false;
     bool m_terminal = false;
+    const bool m_frontendBudget;
 };
 
 // Qt resolves ordinary QObject paths on its D-Bus thread, before queued Open
@@ -242,7 +246,7 @@ public:
     bool handleMessage(const QDBusMessage &call, const QDBusConnection &connection) override
     {
         const QString path = call.path();
-        const auto *request = m_service->m_requests.value(path);
+        auto *request = m_service->requestForCaller(call.service(), path);
         QSet<QString> children;
         const QString prefix = path == QLatin1String("/") ? path : path + QLatin1Char('/');
         auto addChild = [&](const QString &candidate) {
@@ -252,6 +256,10 @@ public:
         addChild(backendPath);
         for (auto it = m_service->m_requests.cbegin(); it != m_service->m_requests.cend(); ++it)
             addChild(it.key());
+        for (const auto &pending : std::as_const(m_service->m_pendingRequests)) {
+            for (auto it = pending.cbegin(); it != pending.cend(); ++it)
+                addChild(it.key());
+        }
         auto error = [&](QDBusError::ErrorType type, const QString &text) {
             connection.send(call.createErrorReply(type, text));
             return true;
@@ -322,7 +330,7 @@ public:
         if (request && matches(requestInterface) && method == QLatin1String("Close")) {
             if (!call.signature().isEmpty())
                 return error(QDBusError::InvalidArgs, QStringLiteral("Close takes no arguments."));
-            m_service->m_requests.value(path)->close(call);
+            request->close(call);
             return true;
         }
         return error(QDBusError::UnknownMethod, QStringLiteral("No such method on this portal object."));
@@ -340,22 +348,43 @@ PortalChooserService::PortalChooserService(const QDBusConnection &connection, QO
             [this](const QString &name, const QString &, const QString &newOwner) {
         if (name == frontendName) {
             ++m_frontendGeneration;
+            m_frontendOwner = newOwner;
+            m_ownerReady = true;
             cancelRequests();
+            cancelAuthorizations();
         } else if (newOwner.isEmpty()) {
             const auto requests = m_requests;
             for (auto *request : requests) {
                 if (request->owner() == name)
                     request->cancel();
             }
+            const auto pending = m_pendingRequests.value(name);
+            for (auto *request : pending)
+                request->cancel();
+            cancelAuthorizations(name);
         }
     });
     m_connection.connect(QString(), QStringLiteral("/org/freedesktop/DBus/Local"),
         QStringLiteral("org.freedesktop.DBus.Local"), QStringLiteral("Disconnected"), this, SLOT(busDisconnected()));
+    // This asynchronous lookup precedes claim's existing RegisterService call
+    // on the same connection. Its reply is available before backend discovery;
+    // claim reads only an already-finished reply, never waits for an owner.
+    auto query = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetNameOwner"));
+    query.setArguments({frontendName});
+    m_initialOwnerGeneration = m_frontendGeneration;
+    m_initialOwner = new QDBusPendingCallWatcher(m_connection.asyncCall(query, 5000), this);
+    connect(m_initialOwner, &QDBusPendingCallWatcher::finished, this, [this] {
+        readInitialOwner();
+        m_initialOwner->deleteLater();
+        m_initialOwner = nullptr;
+    });
 }
 
 PortalChooserService::~PortalChooserService()
 {
     cancelRequests();
+    cancelAuthorizations();
     if (m_claimed) {
         m_connection.unregisterObject(QStringLiteral("/"), QDBusConnection::UnregisterTree);
         m_connection.unregisterService(backendName);
@@ -372,6 +401,12 @@ bool PortalChooserService::claim()
         QDBusConnectionInterface::DontQueueService, QDBusConnectionInterface::DontAllowReplacement);
     if (!reply.isValid() || reply.value() != QDBusConnectionInterface::ServiceRegistered)
         return false;
+    // Do not admit calls into an uncertain budget at startup, including when
+    // delivery of the lookup's finished signal has not reached the GUI yet.
+    if (!readInitialOwner()) {
+        m_connection.unregisterService(backendName);
+        return false;
+    }
     // Supplied handles may be outside backendPath. A virtual root also fails
     // safely if this connection already exports an object; never clobber it.
     if (!m_connection.registerVirtualObject(QStringLiteral("/"), m_router, QDBusConnection::SubPath)) {
@@ -380,6 +415,20 @@ bool PortalChooserService::claim()
     }
     m_claimed = true;
     return true;
+}
+
+bool PortalChooserService::readInitialOwner()
+{
+    if (m_ownerReady)
+        return true;
+    if (!m_initialOwner || !m_initialOwner->isFinished())
+        return false;
+    const QDBusPendingReply<QString> owner = *m_initialOwner;
+    if (m_initialOwnerGeneration == m_frontendGeneration) {
+        m_frontendOwner = owner.isError() ? QString() : owner.value();
+        m_ownerReady = true;
+    }
+    return m_ownerReady;
 }
 
 FileChooserDialog *PortalChooserService::dialogForRequest(const QString &path) const
@@ -396,21 +445,32 @@ void PortalChooserService::deny(const QDBusMessage &call)
 
 void PortalChooserService::authorize(const QDBusMessage &call, std::function<void(bool)> completed)
 {
-    if (m_authorizations >= maxAuthorizations || !call.service().startsWith(QLatin1Char(':'))) {
+    const bool frontendBudget = call.service() == m_frontendOwner;
+    int &count = frontendBudget ? m_frontendAuthorizations : m_otherAuthorizations;
+    if (count >= maxAuthorizations || !call.service().startsWith(QLatin1Char(':'))) {
         completed(false);
         return;
     }
-    ++m_authorizations;
+    ++count;
     const quint64 generation = m_frontendGeneration;
     auto query = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
         QStringLiteral("org.freedesktop.DBus"), QStringLiteral("GetNameOwner"));
     query.setArguments({frontendName});
     auto *watcher = new QDBusPendingCallWatcher(m_connection.asyncCall(query, 5000), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, call, generation, completed = std::move(completed)] {
-        --m_authorizations;
-        const QDBusPendingReply<QString> owner = *watcher;
-        watcher->deleteLater();
-        completed(!owner.isError() && owner.value() == call.service() && generation == m_frontendGeneration);
+    m_watcher->addWatchedService(call.service());
+    m_authorizations.insert(watcher, {call.service(), [this, call, frontendBudget, completed = std::move(completed)](bool authorized) {
+        --(frontendBudget ? m_frontendAuthorizations : m_otherAuthorizations);
+        completed(authorized);
+        unwatchUnusedSender(call.service());
+    }});
+    QPointer<QDBusPendingCallWatcher> guard(watcher);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, guard, call, generation] {
+        if (!guard || !m_authorizations.contains(guard.data()))
+            return;
+        const auto authorization = m_authorizations.take(guard.data());
+        const QDBusPendingReply<QString> owner = *guard;
+        guard->deleteLater();
+        authorization.completed(!owner.isError() && owner.value() == call.service() && generation == m_frontendGeneration);
     });
 }
 
@@ -426,29 +486,43 @@ void PortalChooserService::createRequest(const QDBusMessage &call, ChooserMode m
         else
             deny(call);
     };
-    if (path.size() > 1024 || !requestPath.match(path).hasMatch() || path == backendPath || m_requests.contains(path)
-        || m_requests.size() >= maxRequests || appId.size() > 4096 || appId.contains(QChar::Null)) {
+    const bool frontendBudget = call.service() == m_frontendOwner;
+    const int pendingCount = frontendBudget ? m_frontendPending : m_otherPending;
+    if (path.size() > 1024 || !requestPath.match(path).hasMatch() || path == backendPath
+        || appId.size() > 4096 || appId.contains(QChar::Null)
+        || m_pendingRequests.value(call.service()).contains(path) || pendingCount >= maxRequests
+        || (m_requests.contains(path) && m_requests.value(path)->owner() == call.service())) {
         authorize(call, invalid);
         return;
     }
-    // Reserve a bounded, UI-less request before the first async authorization
-    // yield. The router serializes even already-queued Open and Close calls.
-    auto *request = new PortalChooserRequest(this, call, path);
-    m_requests.insert(path, request);
+    // Only sender-scoped pending state exists before authorization. It routes
+    // an already-queued Close without reserving a global handle or UI slot.
+    auto *request = new PortalChooserRequest(this, call, path, frontendBudget);
+    m_pendingRequests[call.service()].insert(path, request);
+    ++(frontendBudget ? m_frontendPending : m_otherPending);
     m_watcher->addWatchedService(call.service());
     QPointer<PortalChooserRequest> guard(request);
-    authorize(call, [guard, mode, parentWindow, title, options](bool authorized) {
-        if (!guard)
+    authorize(call, [this, guard, path, mode, parentWindow, title, options](bool authorized) {
+        if (!guard || m_pendingRequests.value(guard->owner()).value(path) != guard)
             return;
         if (!authorized) {
             guard->rejectAuthorization();
             return;
         }
+        // Another sender's unvalidated call must never latch this decision.
+        // Capacity and handle ownership become authoritative only now.
+        if (m_requests.contains(path) || m_requests.size() >= maxRequests) {
+            guard->finish(2);
+            return;
+        }
         auto config = portalChooserOptions(mode, parentWindow, title, options);
         if (!config.error.isEmpty())
             guard->finish(2);
-        else
+        else {
+            removePendingRequest(path, guard);
+            m_requests.insert(path, guard);
             guard->authorized(std::move(config));
+        }
     });
 }
 
@@ -458,32 +532,93 @@ void PortalChooserService::reply(const QDBusMessage &call, uint response, const 
     m_connection.send(call.createReply({QVariant::fromValue(response), results}));
 }
 
+PortalChooserRequest *PortalChooserService::requestForCaller(const QString &sender, const QString &path) const
+{
+    if (auto *pending = m_pendingRequests.value(sender).value(path))
+        return pending;
+    if (auto *request = m_requests.value(path))
+        return request;
+    // Preserve existence/origin errors for other callers, without allowing a
+    // foreign pending handle to shadow this sender's own pending or active UI.
+    for (const auto &pending : m_pendingRequests) {
+        if (auto *request = pending.value(path))
+            return request;
+    }
+    return nullptr;
+}
+
+void PortalChooserService::removePendingRequest(const QString &path, PortalChooserRequest *request)
+{
+    auto sender = m_pendingRequests.find(request->owner());
+    if (sender == m_pendingRequests.end() || sender->value(path) != request)
+        return;
+    sender->remove(path);
+    if (sender->isEmpty())
+        m_pendingRequests.erase(sender);
+    --(request->frontendBudget() ? m_frontendPending : m_otherPending);
+}
+
 void PortalChooserService::removeRequest(const QString &path, PortalChooserRequest *request)
 {
     // A delayed Close/authentication callback can outlive an old request. Never
     // remove a newer request which has reused the same frontend handle.
-    if (m_requests.value(path) != request)
+    if (m_requests.value(path) != request && m_pendingRequests.value(request->owner()).value(path) != request)
         return;
-    m_requests.remove(path);
-    const QString owner = request->owner();
-    bool ownerInUse = false;
-    for (auto *remaining : std::as_const(m_requests))
-        ownerInUse = ownerInUse || remaining->owner() == owner;
-    if (!ownerInUse)
-        m_watcher->removeWatchedService(owner);
+    if (m_requests.value(path) == request)
+        m_requests.remove(path);
+    removePendingRequest(path, request);
+    unwatchUnusedSender(request->owner());
     request->dismiss();
     request->deleteLater();
+}
+
+void PortalChooserService::unwatchUnusedSender(const QString &sender)
+{
+    if (m_pendingRequests.contains(sender))
+        return;
+    for (auto *remaining : std::as_const(m_requests))
+        if (remaining->owner() == sender)
+            return;
+    for (const auto &authorization : std::as_const(m_authorizations))
+        if (authorization.sender == sender)
+            return;
+    m_watcher->removeWatchedService(sender);
 }
 
 void PortalChooserService::cancelRequests()
 {
     const auto requests = m_requests;
+    const auto pending = m_pendingRequests;
     for (auto *request : requests)
         request->cancel();
+    for (const auto &sender : pending)
+        for (auto *request : sender)
+            request->cancel();
+}
+
+void PortalChooserService::cancelAuthorizations(const QString &sender)
+{
+    QHash<QDBusPendingCallWatcher *, Authorization> canceled;
+    for (auto it = m_authorizations.begin(); it != m_authorizations.end();) {
+        if (sender.isEmpty() || it->sender == sender) {
+            canceled.insert(it.key(), std::move(it.value()));
+            it = m_authorizations.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Completions can remove requests and watched services. Detach the whole
+    // batch first so none can settle a watcher twice or mutate this traversal.
+    for (auto it = canceled.begin(); it != canceled.end(); ++it) {
+        disconnect(it.key(), nullptr, this, nullptr);
+        it.key()->deleteLater();
+        it->completed(false);
+    }
 }
 
 void PortalChooserService::busDisconnected()
 {
     ++m_frontendGeneration;
     cancelRequests();
+    cancelAuthorizations();
 }
