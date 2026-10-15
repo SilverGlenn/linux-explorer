@@ -14,6 +14,7 @@
 #include <QDialogButtonBox>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -21,6 +22,8 @@
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
+#include <QScopeGuard>
+#include <csignal>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -275,6 +278,74 @@ private Q_SLOTS:
         QVERIFY(client.waitForStarted()); QTRY_COMPARE(client.state(), QProcess::NotRunning); QCOMPARE(client.exitCode(), 1);
         output = QJsonDocument::fromJson(client.readAllStandardOutput()).object();
         QVERIFY(output.value("canceled_by_client").toBool()); QVERIFY(!QFile::exists(dir.filePath("never-written.txt")));
+    }
+    void queuedCloseWithLiveClientAndSeparateBackend()
+    {
+        // Queue both real frontend calls while ONLY our verified child is
+        // stopped. A monitor is the barrier: no timing-dependent sleep/retry.
+        constexpr auto backend = "org.freedesktop.impl.portal.desktop.explorerwin7";
+        delete m_service;
+        m_service = nullptr;
+        QProcess process, monitor;
+        qint64 pid = 0;
+        auto restore = qScopeGuard([&] {
+            if (pid && process.state() == QProcess::Running && process.processId() == pid)
+                ::kill(pid, SIGCONT); // also on any assertion failure; never a stale PID
+            process.terminate();
+            if (!process.waitForFinished(5000)) { process.kill(); process.waitForFinished(); }
+            monitor.terminate();
+            if (!monitor.waitForFinished(5000)) { monitor.kill(); monitor.waitForFinished(); }
+            m_service = new PortalChooserService(m_backend);
+            QVERIFY(m_service->claim());
+        });
+        process.setStandardOutputFile(QStringLiteral(PORTAL_FRONTEND_LOG) + ".queued-backend");
+        process.setStandardErrorFile(QStringLiteral(PORTAL_FRONTEND_LOG) + ".queued-backend", QIODevice::Append);
+        process.start(QStringLiteral(PORTAL_BACKEND));
+        QVERIFY(process.waitForStarted(5000));
+        QTRY_VERIFY(m_backend.interface()->isServiceRegistered(backend).value());
+        const QDBusReply<uint> ownerPid = m_backend.interface()->servicePid(backend);
+        QVERIFY(ownerPid.isValid());
+        QCOMPARE(qint64(ownerPid.value()), process.processId());
+        QCOMPARE(QFileInfo(QStringLiteral("/proc/%1/exe").arg(ownerPid.value())).symLinkTarget(),
+                 QFileInfo(QStringLiteral(PORTAL_BACKEND)).canonicalFilePath());
+        pid = process.processId();
+        QCOMPARE(::kill(pid, SIGSTOP), 0);
+        QTRY_VERIFY(([&] {
+            QFile status(QStringLiteral("/proc/%1/status").arg(pid));
+            return status.open(QIODevice::ReadOnly) && status.readAll().contains("State:\tT");
+        })());
+        monitor.start(QStringLiteral(PORTAL_DBUS_MONITOR), {"--session", "type='method_call',interface='org.freedesktop.impl.portal.FileChooser'",
+                                      "type='method_call',interface='org.freedesktop.impl.portal.Request'"});
+        QVERIFY(monitor.waitForStarted(5000));
+        QTRY_VERIFY(monitor.bytesAvailable() > 0); // monitor has acquired its match rules
+        monitor.readAllStandardOutput();
+        PublicRequest request(m_client);
+        QVERIFY(request.begin("OpenFile"));
+        auto close = QDBusMessage::createMethodCall(frontend, request.path, requestIface, "Close");
+        QDBusPendingCallWatcher closed(m_client.asyncCall(close, 10000));
+        QByteArray traffic;
+        QTRY_VERIFY(([&] {
+            traffic += monitor.readAllStandardOutput();
+            return traffic.contains("member=OpenFile") && traffic.contains("member=Close")
+                && traffic.contains(request.path.toUtf8());
+        })());
+        QVERIFY(traffic.indexOf("member=OpenFile") < traffic.indexOf("member=Close"));
+        QVERIFY(!closed.isFinished());
+        QCOMPARE(::kill(pid, SIGCONT), 0);
+        QTRY_VERIFY(closed.isFinished());
+        QCOMPARE(closed.reply().errorName(), QString());
+        QCOMPARE(closed.reply().type(), QDBusMessage::ReplyMessage);
+        QVERIFY(m_client.isConnected()); // do NOT let disconnect cleanup hide a late request
+        QVERIFY(m_backend.interface()->isServiceRegistered(m_client.baseService()).value());
+        for (int i = 0; i < 2; ++i) {
+            QTest::qWait(150);
+            auto introspect = QDBusMessage::createMethodCall(backend, request.path,
+                "org.freedesktop.DBus.Introspectable", "Introspect");
+            QDBusPendingCallWatcher pending(m_backend.asyncCall(introspect, 5000));
+            QTRY_VERIFY(pending.isFinished());
+            QCOMPARE(pending.reply().errorName(), QStringLiteral("org.freedesktop.DBus.Error.UnknownObject"));
+            QCOMPARE(request.responses, 0); // successful public Close has no Response
+        }
     }
     void cleanupTestCase()
     {
