@@ -268,12 +268,17 @@ standalone control fixtures:
   pixels; labels, icons, hit targets and split-menu keyboard behavior stay put.
   Raster tests compare visible arrow/label bounds at the real 20 px breadcrumb
   height and at 100%, 125%, and 150%.
-- AeroQt's glass-ancestor QSS supplies a line-edit border-image. The focused
-  SearchBox now suppresses that inherited/native frame and paints one continuous
-  widget-local frame after native line editing. Integration fixtures include the
-  actual glass stylesheet and check focused-empty, typed, selected, cleared and
-  blurred states without changing 9 pt text. Disabled frames use the disabled
-  palette's Mid colour.
+- AeroQt's glass-ancestor QSS supplies a line-edit border-image. An intermediate
+  flat-border workaround made SearchBox opaque white; direct user feedback
+  rejected that appearance. SearchBox now keeps the native QLineEdit frame and
+  explicitly uses the address-entry normal/hover/disabled resources, with a
+  transparent base even while focused and typing. Composed fixtures compare the
+  frame and interior exactly against an address field on blue and warm parents
+  at 100/125/150%, retaining 9 pt text and native editing/clear/action behavior.
+  QWindow mouse-click tests pass in offscreen and Wayland-created MainWindows.
+  These injected events do not establish compositor delivery of physical clicks
+  in an already-running desktop window; a reported native click failure remains
+  subject to live validation rather than speculative event overrides.
 - Sidebar selection ends three logical pixels before the content divider. Both
   Qt's row/branch background and the item delegate are bounded; geometry-only
   delegate checks are insufficient. This small gutter follows the user's stated
