@@ -340,7 +340,9 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     if (!m_optionsSupported)
         showError(tr("These file chooser options are not supported."));
     for (auto *button : findChildren<QPushButton *>()) {
-        button->setAutoDefault(button == choose);
+        // Navigation never becomes the default. Cancel must still activate
+        // with Enter when explicitly focused, using Qt's native button policy.
+        button->setAutoDefault(button == choose || button == m_buttons->button(QDialogButtonBox::Cancel));
         button->setDefault(button == choose);
     }
     m_name->selectAll();
@@ -461,8 +463,11 @@ QUrl FileChooserDialog::typedUrl() const
     const QString text = m_name->text();
     if (text.isEmpty() || text.contains(QChar::Null))
         return {};
-    // Only explicitly typed URIs are decoded. Relative filename %, # and spaces stay literal.
-    if (QRegularExpression(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]*:")).match(text).hasMatch())
+    // A colon alone is legal in a local filename (report:2026.txt). Decode
+    // only explicit file: URIs or hierarchical scheme:/ URLs; the latter still
+    // go through local-only validation rather than becoming relative paths.
+    if (text.startsWith(QLatin1String("file:"), Qt::CaseInsensitive)
+        || QRegularExpression(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]*:/")).match(text).hasMatch())
         return QUrl::fromEncoded(text.toUtf8(), QUrl::StrictMode);
     if (QDir::isAbsolutePath(text))
         return QUrl::fromLocalFile(text);

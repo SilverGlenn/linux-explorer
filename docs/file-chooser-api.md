@@ -206,7 +206,10 @@ inhibition; they must not wait indefinitely for `Finished`.
   locations produce a visible error, never an elevation/authentication offer.
 - File name accepts relative filenames against the current directory, absolute
   local paths, and explicitly encoded file URIs. Literal paths preserve spaces,
-  Unicode, `#` and `%`; results are always `QUrl::FullyEncoded` URIs.
+  Unicode, `#`, `%` and ordinary colons (`report:2026.log`); results are always
+  `QUrl::FullyEncoded` URIs. Only `file:` or hierarchical `scheme:/…` text is
+  interpreted as an explicit URI, with nonlocal schemes rejected. Use a `./`
+  prefix for a literal filename beginning with the reserved `file:` syntax.
 - Save returns a filename only. It does **not** create, open, truncate, lock, or
   reserve the destination. The caller performs the actual write afterwards.
 - If a typed leaf has no suffix and does not end with a dot, Save appends
@@ -338,7 +341,9 @@ D-Bus/widget tests use temporary HOME/config/data/runtime directories and an
 isolated session bus, never the user's active Explorer/chooser service. The
 activation test installs into a temporary prefix with spaces, `%`, `#` and Unicode,
 activates the real executable, runs Open/Save/cancel/concurrent requests, and
-cleans up only that private test service.
+cleans up only that private test service. A separate daemon-loss check verifies
+that its pending client exits with transport status 3 and the service shuts down,
+without using or terminating the desktop bus.
 
 Implemented v1 is local single-file Open/Save, glob/MIME filters, typed paths,
 validation, safe filename selection/overwrite confirmation, keyboard access,

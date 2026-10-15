@@ -369,7 +369,7 @@ private Q_SLOTS:
     {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
-        const QString filename = QStringLiteral("a space #% é.txt");
+        const QString filename = QStringLiteral("report:2026 a space #% é.txt");
         const QString filePath = directory.filePath(filename);
         QFile file(filePath);
         QVERIFY(file.open(QIODevice::WriteOnly));

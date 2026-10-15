@@ -25,6 +25,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -60,6 +61,18 @@ private:
         QTest::qWait(30);
     }
 
+    static auto watchForLaunch(const QString &script, const QString &marker)
+    {
+        const QByteArray previousMarker = qgetenv("EXPLORER_CHOOSER_LAUNCH_MARKER");
+        qputenv("EXPLORER_CHOOSER_LAUNCH_MARKER", QFile::encodeName(marker));
+        // Fixed script; even special characters in the marker path remain data.
+        writeFile(script, "#!/bin/sh\n: > \"${EXPLORER_CHOOSER_LAUNCH_MARKER:?}\"\n");
+        return qScopeGuard([previousMarker] {
+            if (previousMarker.isNull()) qunsetenv("EXPLORER_CHOOSER_LAUNCH_MARKER");
+            else qputenv("EXPLORER_CHOOSER_LAUNCH_MARKER", previousMarker);
+        });
+    }
+
 private slots:
     void initTestCase()
     {
@@ -72,7 +85,7 @@ private slots:
         QVERIFY(dir.isValid());
         const QString script = dir.filePath(QStringLiteral("run me.sh"));
         const QString marker = dir.filePath(QStringLiteral("launched"));
-        writeFile(script, QStringLiteral("#!/bin/sh\ntouch '%1'\n").arg(marker).toUtf8());
+        const auto restoreMarker = watchForLaunch(script, marker);
         QVERIFY(QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         FileChooserDialog dialog(optionsFor(dir.path()));
         QSignalSpy accepted(&dialog, &QDialog::accepted);
@@ -215,20 +228,27 @@ private slots:
     {
         QTest::addColumn<QString>("leaf");
         QTest::addColumn<bool>("encoded");
-        QTest::newRow("literal") << QStringLiteral("sp ace # 100% 日本語.txt") << false;
-        QTest::newRow("uri") << QStringLiteral("sp ace # 100% 日本語.txt") << true;
-        QTest::newRow("literal-percent-escape") << QStringLiteral("a%20b.txt") << false;
-        QTest::newRow("leading-spaces") << QStringLiteral("  real name  ") << false;
+        QTest::addColumn<bool>("save");
+        for (const bool save : {false, true}) {
+            const char *mode = save ? "save" : "open";
+            QTest::addRow("%s-literal", mode) << QStringLiteral("sp ace # 100% 日本語.txt") << false << save;
+            QTest::addRow("%s-uri", mode) << QStringLiteral("sp ace # 100% 日本語.txt") << true << save;
+            QTest::addRow("%s-literal-percent-escape", mode) << QStringLiteral("a%20b.txt") << false << save;
+            QTest::addRow("%s-leading-spaces", mode) << QStringLiteral("  real name  ") << false << save;
+            QTest::addRow("%s-literal-colon", mode) << QStringLiteral("report:2026.txt") << false << save;
+            QTest::addRow("%s-uri-colon", mode) << QStringLiteral("report:2026.txt") << true << save;
+        }
     }
 
     void typedAndEncodedNamesRoundTrip()
     {
         QFETCH(QString, leaf);
         QFETCH(bool, encoded);
+        QFETCH(bool, save);
         QTemporaryDir dir;
         const QString path = dir.filePath(leaf);
-        writeFile(path);
-        auto options = optionsFor(dir.path());
+        if (!save) writeFile(path);
+        auto options = optionsFor(dir.path(), save ? ChooserMode::SaveFile : ChooserMode::OpenFile);
         options.suggestedName = encoded ? QString::fromUtf8(QUrl::fromLocalFile(path).toEncoded()) : leaf;
         FileChooserDialog dialog(options);
         show(dialog);
@@ -240,6 +260,7 @@ private slots:
         QCOMPARE(QUrl::fromEncoded(wire, QUrl::StrictMode).toLocalFile(), path);
         if (leaf.contains('#')) QVERIFY(wire.contains("%23"));
         if (leaf.contains('%')) QVERIFY(wire.contains("%25"));
+        if (save) QVERIFY(!QFileInfo::exists(path));
     }
 
     void saveExtensionsAndNoWrites_data()
@@ -250,6 +271,8 @@ private slots:
         QTest::newRow("infer") << "draft" << "" << "draft.txt";
         QTest::newRow("explicit-default") << "draft" << "md" << "draft.md";
         QTest::newRow("keep-suffix") << "draft.bin" << "txt" << "draft.bin";
+        QTest::newRow("literal-colon") << "report:2026.txt" << "txt" << "report:2026.txt";
+        QTest::newRow("colon-with-default-extension") << "report:2026" << "txt" << "report:2026.txt";
         QTest::newRow("trailing-dot") << "draft." << "txt" << "draft.";
         QTest::newRow("hidden-name") << ".draft" << "txt" << ".draft.txt";
         QTest::newRow("space-and-unicode-extension") << "draft" << "a 日本語" << "draft.a 日本語";
@@ -378,6 +401,29 @@ private slots:
         dialog.navigateTo(Locations::computer());
         QCOMPARE(dialog.currentUrl(), Locations::computer());
         QCOMPARE(accepted.count(), 0);
+    }
+
+    void saveRejectsRemoteUriText()
+    {
+        QTemporaryDir dir;
+        // If URLs were misread as relative paths, these would be writable parents.
+        for (const QString &folder : {QStringLiteral("admin:"), QStringLiteral("trash:"),
+                                      QStringLiteral("sftp:/host")})
+            QVERIFY(QDir(dir.path()).mkpath(folder));
+        FileChooserDialog dialog(optionsFor(dir.path(), ChooserMode::SaveFile));
+        show(dialog);
+        QSignalSpy accepted(&dialog, &QDialog::accepted);
+        for (const QString &text : {QStringLiteral("sftp://host/output.log"),
+                                    QStringLiteral("admin:/output.log"),
+                                    QStringLiteral("trash:/output.log"),
+                                    QStringLiteral("file://remote/tmp/output.log")}) {
+            name(dialog)->setText(text);
+            dialog.accept();
+            QCOMPARE(accepted.count(), 0);
+            QVERIFY(dialog.isVisible());
+            QVERIFY(!dialog.errorMessage().isEmpty());
+            QVERIFY(dialog.selectedUrls().isEmpty());
+        }
     }
 
     void unreadablePermissionsAndSymlinks()
@@ -531,12 +577,44 @@ private slots:
         QCOMPARE(dialog.currentUrl(), options.startingLocation);
     }
 
+    void cancelButtonEnterCancels_data()
+    {
+        QTest::addColumn<bool>("save");
+        QTest::addColumn<int>("key");
+        QTest::newRow("open-return") << false << int(Qt::Key_Return);
+        QTest::newRow("open-enter") << false << int(Qt::Key_Enter);
+        QTest::newRow("save-return") << true << int(Qt::Key_Return);
+        QTest::newRow("save-enter") << true << int(Qt::Key_Enter);
+    }
+
+    void cancelButtonEnterCancels()
+    {
+        QFETCH(bool, save);
+        QFETCH(int, key);
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path(), save ? ChooserMode::SaveFile : ChooserMode::OpenFile);
+        options.suggestedName = QStringLiteral("valid.txt");
+        if (!save) writeFile(dir.filePath(options.suggestedName));
+        FileChooserDialog dialog(options);
+        show(dialog);
+        QSignalSpy accepted(&dialog, &QDialog::accepted);
+        QSignalSpy rejected(&dialog, &QDialog::rejected);
+        auto *cancel = dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel);
+        QVERIFY(cancel);
+        cancel->setFocus();
+        QTRY_VERIFY(cancel->hasFocus());
+        QTest::keyClick(cancel, Qt::Key(key));
+        QCOMPARE(rejected.count(), 1);
+        QCOMPARE(accepted.count(), 0);
+        QVERIFY(dialog.selectedUrls().isEmpty());
+    }
+
     void addressTypedFileAcceptsExactlyOnceWithoutLaunching()
     {
         QTemporaryDir dir;
         const QString script = dir.filePath(QStringLiteral("file # 100% 日本語.sh"));
         const QString marker = dir.filePath(QStringLiteral("launched"));
-        writeFile(script, QStringLiteral("#!/bin/sh\ntouch '%1'\n").arg(marker).toUtf8());
+        const auto restoreMarker = watchForLaunch(script, marker);
         QVERIFY(QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         auto options = optionsFor(dir.path());
         options.suggestedName = QStringLiteral("stale-and-missing");

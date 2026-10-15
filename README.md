@@ -123,7 +123,8 @@ explorer-win7 --register-file-manager
 
 That opts into claiming `org.freedesktop.FileManager1` for the session, if
 available. It does not forcefully replace another manager holding the name.
-No system-wide D-Bus activation file is installed.
+No `org.freedesktop.FileManager1` activation file is installed by this fork.
+The private chooser has its own independent activation entry, described below.
 
 The original `aur/`, desktop, and D-Bus files are retained as upstream references;
 they are not this fork's installation instructions or publishing targets.
@@ -178,7 +179,7 @@ EXPLORER_SNAPSHOTS="$PWD/build/screenshots" \
   ctest --test-dir build --output-on-failure
 ```
 
-CTest uses Qt's offscreen/Fusion renderer for portable checks. These images verify
+Widget regressions use Qt's offscreen/Fusion renderer for portable checks. These images verify
 the client layout; they are not a screenshot of your compositor's Aero frame.
 Headless multimedia/window-system warnings are expected, not test failures.
 
@@ -190,7 +191,7 @@ QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=kvantum EXPLORER_NATIVE_THEME=1 \
   tests/run-ui-tests.sh "$PWD/build/explorer_ui_tests"
 ```
 
-For all seven suites with the native widget theme, use this runner loop
+For the original seven browser suites with the native widget theme, use this runner loop
 (CTest intentionally pins Fusion):
 
 ```bash
@@ -214,9 +215,12 @@ offscreen backend (tested on Qt 6.10):
 tests/run-display-matrix.sh build
 ```
 
-This runs **all seven suites** at 800×600/100%, 1024×768/125%, and 1200×900/150%,
-including full-UI assertions of the actual screen geometry and scale. Each suite
-retains its temporary HOME and private bus. Logs/images stay under `build/`.
+This runs **all ten widget/service suites** at 800×600/100%, 1024×768/125%, and
+1200×900/150%, including chooser keyboard behavior and full-UI assertions of actual
+screen geometry and scale. Each suite retains its temporary HOME and private bus.
+Logs/images stay under `build/`. CTest additionally checks installed chooser
+activation and, when `kwin_wayland` is available, native parent/decorations/modality
+protocols on a separate virtual compositor; neither uses the desktop service.
 
 End-to-end checks cover stable 9 pt search and its visible focused frame, blocked
 navigation restore, real breadcrumb popup lifetime, navigation/inset agreement,

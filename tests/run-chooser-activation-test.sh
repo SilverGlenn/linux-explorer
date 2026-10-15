@@ -150,6 +150,26 @@ check_bus_disconnect() (
     fi
     wait "$service_pid"
     service_pid=""
-    echo 'Private-bus disconnect closes the chooser service with a pending request: PASS'
+    for ((attempt=0; attempt<100; ++attempt)); do
+        if ! kill -0 "$client_pid" 2>/dev/null; then break; fi
+        sleep 0.05
+    done
+    if kill -0 "$client_pid" 2>/dev/null; then
+        echo 'Pending chooser client remained alive after its private bus disconnected.' >&2
+        exit 1
+    fi
+    result=0
+    wait "$client_pid" || result=$?
+    client_pid=""
+    [[ "$result" == 3 ]]
+    python3 - "$sandbox/disconnect-client.json" <<'PY'
+import json
+import pathlib
+import sys
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert result['state'] == 'failed', result
+assert result.get('error_name'), result  # The first transport callback can vary by Qt version.
+PY
+    echo 'Private-bus disconnect closes service and pending client with transport error: PASS'
 )
 check_bus_disconnect
