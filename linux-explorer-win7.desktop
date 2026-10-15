@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=File Explorer (Windows 7 preview)
+Name=File Explorer
 GenericName=File Manager
 Comment=Windows 7–style Explorer, installed separately from your default file manager
 Exec=explorer-win7 %U

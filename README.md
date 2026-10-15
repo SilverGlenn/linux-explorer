@@ -91,7 +91,7 @@ new Microsoft resources extracted from the Windows disc.
 cmake --install build
 ```
 
-This installs `explorer-win7` and a separate **File Explorer (Windows 7 preview)**
+This installs `explorer-win7` and a separate **File Explorer**
 launcher. It does not replace `explorer`, Dolphin, your Meta+E shortcut, your
 directory MIME association, or your existing file-manager D-Bus service.
 Preferences and the single-instance bus name are separate from upstream.
