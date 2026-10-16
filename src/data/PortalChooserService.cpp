@@ -1,6 +1,7 @@
 #include "PortalChooserService.h"
 #include "PortalChooserOptions.h"
 #include "PortalDBusTypes.h"
+#include "ChooserPresenter.h"
 #include "FileChooserDialog.h"
 
 #include <QDBusConnectionInterface>
@@ -75,8 +76,20 @@ public:
 
     void start()
     {
-        if (m_terminal || !m_authorized || m_pendingCloses || m_dialog)
+        if (m_terminal || !m_authorized || m_pendingCloses || m_dialog || m_presenter)
             return;
+        if (!ChooserPresenter::requiredPlatform(m_config.window).isEmpty()) {
+            m_presenter = new ChooserPresenter(this);
+            m_presenter->start(m_config.chooser, m_config.window, [this](uint response, const ChooserSelection &selected) {
+                if (m_terminal)
+                    return;
+                QVariantMap results;
+                if (response == 0 && !selection(selected, &results))
+                    response = 2;
+                finish(response, response == 0 ? results : QVariantMap());
+            });
+            return;
+        }
         m_dialog = new FileChooserDialog(m_config.chooser);
         m_dialog->setAttribute(Qt::WA_DeleteOnClose, false);
         connect(m_dialog, &QDialog::finished, this, [this](int status) {
@@ -87,7 +100,8 @@ public:
                 return;
             }
             QVariantMap results;
-            if (!selection(&results)) {
+            const ChooserSelection selected{m_dialog->selectedUrls(), m_dialog->selectedFilter(), m_dialog->selectedChoices()};
+            if (!selection(selected, &results)) {
                 finish(2);
                 return;
             }
@@ -112,6 +126,8 @@ public:
 
     void dismiss()
     {
+        if (m_presenter)
+            m_presenter->cancel();
         if (!m_dialog)
             return;
         QPointer<FileChooserDialog> dialog = m_dialog;
@@ -159,10 +175,10 @@ public:
     }
 
 private:
-    bool selection(QVariantMap *results)
+    bool selection(const ChooserSelection &selected, QVariantMap *results)
     {
         const auto &options = m_config.chooser;
-        const QList<QUrl> urls = m_dialog->selectedUrls();
+        const QList<QUrl> &urls = selected.urls;
         if (urls.isEmpty() || urls.size() > 4096
             || (options.mode == ChooserMode::SaveFiles && urls.size() != options.saveNames.size())
             || (options.mode != ChooserMode::SaveFiles && !options.multiple && urls.size() != 1))
@@ -184,16 +200,15 @@ private:
         results->insert(QStringLiteral("uris"), uris);
         if (!m_config.filters.isEmpty()) {
             bool ok = false;
-            const int selected = m_dialog->selectedFilter().toInt(&ok);
-            if (!ok || selected < 0 || selected >= m_config.filters.size())
+            const int filter = selected.filter.toInt(&ok);
+            if (!ok || filter < 0 || filter >= m_config.filters.size())
                 return false;
-            results->insert(QStringLiteral("current_filter"), QVariant::fromValue(m_config.filters.at(selected)));
+            results->insert(QStringLiteral("current_filter"), QVariant::fromValue(m_config.filters.at(filter)));
         }
         if (!options.choices.isEmpty()) {
-            const auto selected = m_dialog->selectedChoices();
             PortalChoiceResults choices;
             for (const ChooserChoice &choice : options.choices) {
-                const QString value = selected.value(choice.id);
+                const QString value = selected.choices.value(choice.id);
                 bool valid = choice.options.isEmpty()
                     && (value == QLatin1String("true") || value == QLatin1String("false"));
                 for (const ChooserChoiceOption &option : choice.options)
@@ -212,6 +227,7 @@ private:
     QString m_path;
     PortalChooserOptions m_config;
     QPointer<FileChooserDialog> m_dialog;
+    QPointer<ChooserPresenter> m_presenter;
     int m_pendingCloses = 0;
     bool m_authorized = false;
     bool m_terminal = false;

@@ -188,7 +188,9 @@ PortalChooserOptions portalChooserOptions(ChooserMode mode, const QString &paren
         return invalid(QStringLiteral("Save methods do not accept multiple/directory flags."));
     config.window = {parentWindow, wire.value(QStringLiteral("activation_token")).toString(),
                      wire.value(QStringLiteral("modal"), true).toBool() && !parentWindow.isEmpty()};
-    config.error = Explorer::validateChooserWindowOptions(config.window);
+    // A different native display backend is handled by a presenter process;
+    // malformed parents remain errors rather than silently losing parenting.
+    config.error = Explorer::validateChooserWindowOptions(config.window, true);
     if (!config.error.isEmpty())
         return config;
 

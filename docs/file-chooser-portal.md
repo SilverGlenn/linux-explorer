@@ -233,8 +233,12 @@ is not a working interactive chooser client.
 
 Real consumers should export their top-level Wayland surface and pass
 `wayland:<xdg-foreign handle>`, keeping it exported until completion. On X11 use
-`x11:<hex-XID>`. A pointer or Wayland `winId()` is not an exported handle. Backend
-and caller must use the same compositor/backend. Native dialog decorations are
+`x11:<hex-XID>` (including Chromium's `x11:0x...` form). A pointer or Wayland
+`winId()` is not an exported handle. Caller and picker must use the same desktop
+session. When their native display backends differ, the portal starts a presenter
+on the caller's backend so the real parent and modality are retained. Its private
+pipe closes with the request or backend; it does not claim another portal service
+or expose an application API. Native dialog decorations are
 retained under the `linux-explorer-win7-chooser-dialog` identity; no
 topmost/borderless workaround is used. This separate identity allows an opt-in
 SMOD inner-border exception while preserving the picker title and other dialogs'
@@ -259,10 +263,11 @@ not certify physical-input/focus behavior on the user's desktop.
 - No authentication, root execution, new Microsoft artwork or GDebi7 source change.
 
 Tests use isolated buses and temporary settings, including real frontend/backend
-and optional virtual-compositor checks. See CTest/test logs for the exact executed
-matrix. True sandbox/document-grant tests, native X11 parenting and physical focus
-must be reported separately from backend protocol/widget evidence; do not infer
-their success from a host-client frontend test.
+and optional virtual-compositor checks. Mixed-display tests use a private KWin
+and Xwayland to check native X11 parenting, modality and request cleanup. See
+CTest/test logs for the exact executed matrix. True sandbox/document-grant tests
+and physical focus must be reported separately from backend protocol/widget
+evidence; do not infer their success from a host-client frontend test.
 
 Official contracts: [FileChooser frontend](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html),
 [backend](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.impl.portal.FileChooser.html),

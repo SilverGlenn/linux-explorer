@@ -12,8 +12,10 @@ struct ChooserWindowOptions {
     bool modal = false;
 };
 
-// Empty on success. Modal private requests require a compatible foreign parent.
-QString validateChooserWindowOptions(const ChooserWindowOptions &options);
+// Empty on success. A portal may dispatch to a matching native presenter;
+// private requests require a parent compatible with this process.
+QString validateChooserWindowOptions(const ChooserWindowOptions &options,
+                                    bool allowDifferentBackend = false);
 // Call after building the contents, before native window creation. Navigation
 // belongs to the glass inset, not to the opaque contents' layout.
 void configureChooserGlass(QDialog *dialog, QWidget *contents, QWidget *navigation);

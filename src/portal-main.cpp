@@ -1,4 +1,5 @@
 #include "PortalChooserService.h"
+#include "ChooserPresenter.h"
 #include "ApplicationAppearance.h"
 #include "aero/icons.h"
 
@@ -22,9 +23,17 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription(QStringLiteral("Explorer FileChooser portal backend."));
     parser.addHelpOption();
     parser.addVersionOption();
+    QCommandLineOption presenterOption(QStringLiteral("present-chooser"));
+    presenterOption.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(presenterOption);
     parser.process(app);
     if (!parser.positionalArguments().isEmpty())
         parser.showHelp(1);
+
+    if (parser.isSet(presenterOption)) {
+        Explorer::configureApplicationAppearance(&app);
+        return ChooserPresenter::runChild();
+    }
 
     auto bus = QDBusConnection::sessionBus();
     bus.connect(QString(), QStringLiteral("/org/freedesktop/DBus/Local"),

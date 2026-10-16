@@ -30,7 +30,8 @@ void Explorer::configureChooserGlass(QDialog *dialog, QWidget *contents, QWidget
     Aero::makeInsetWindow(dialog, contents, navigation, nullptr);
 }
 
-QString Explorer::validateChooserWindowOptions(const ChooserWindowOptions &options)
+QString Explorer::validateChooserWindowOptions(const ChooserWindowOptions &options,
+                                              bool allowDifferentBackend)
 {
     const QString parent = options.parentWindow;
     if (parent.size() > 4096 || options.activationToken.size() > 4096)
@@ -38,17 +39,20 @@ QString Explorer::validateChooserWindowOptions(const ChooserWindowOptions &optio
     if (options.modal && parent.isEmpty())
         return QStringLiteral("modal requires parent_window.");
     if (!parent.isEmpty()) {
-        static const QRegularExpression x11(QStringLiteral("^x11:([0-9a-fA-F]{1,16})$"));
+        static const QRegularExpression x11(QStringLiteral("^x11:(?:0[xX])?([0-9a-fA-F]{1,16})$"));
         const auto match = x11.match(parent);
         if (match.hasMatch()) {
             bool ok = false;
             const qulonglong id = match.captured(1).toULongLong(&ok, 16);
-            if (!ok || id == 0 || id > 0xffffffffULL || !KWindowSystem::isPlatformX11())
+            if (!ok || id == 0 || id > 0xffffffffULL
+                || (!KWindowSystem::isPlatformX11()
+                    && !(allowDifferentBackend && KWindowSystem::isPlatformWayland())))
                 return QStringLiteral("X11 parent is invalid or incompatible with this backend.");
         } else if (parent.startsWith(QLatin1String("wayland:"))) {
             const QString handle = parent.mid(8);
             if (handle.isEmpty() || hasControl(handle) || handle.contains(QLatin1Char(' '))
-                || !KWindowSystem::isPlatformWayland())
+                || (!KWindowSystem::isPlatformWayland()
+                    && !(allowDifferentBackend && KWindowSystem::isPlatformX11())))
                 return QStringLiteral("Wayland parent is invalid or incompatible with this backend.");
         } else {
             return QStringLiteral("parent_window must be x11:<hexid> or wayland:<exported-handle>.");
@@ -68,7 +72,10 @@ void Explorer::showChooserWindow(QDialog *dialog, const ChooserWindowOptions &op
     QWindow *window = dialog->windowHandle();
     const ChooserWindowOptions &presentation = options;
     if (presentation.parentWindow.startsWith(QLatin1String("x11:"))) {
-        KWindowSystem::setMainWindow(window, WId(presentation.parentWindow.mid(4).toULongLong(nullptr, 16)));
+        QString xid = presentation.parentWindow.mid(4);
+        if (xid.startsWith(QLatin1String("0x"), Qt::CaseInsensitive))
+            xid.remove(0, 2);
+        KWindowSystem::setMainWindow(window, WId(xid.toULongLong(nullptr, 16)));
     } else if (presentation.parentWindow.startsWith(QLatin1String("wayland:"))) {
         KWindowSystem::setMainWindow(window, presentation.parentWindow.mid(8));
     }
