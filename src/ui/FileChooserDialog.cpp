@@ -527,9 +527,9 @@ void FileChooserDialog::setVisible(bool visible)
         QDialog::setVisible(false);
         return;
     }
-    // Scope the id to native window creation; never match the browser-only caption exception.
+    // Scope the picker identity to native window creation, preserving other dialogs' identity.
     const QString previous = QGuiApplication::desktopFileName();
-    QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-chooser-dialog"));
     QDialog::setVisible(true);
     QGuiApplication::setDesktopFileName(previous);
     updatePreview();

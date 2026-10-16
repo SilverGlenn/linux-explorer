@@ -106,9 +106,13 @@ import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 service = (p / 'share/dbus-1/services/org.freedesktop.impl.portal.desktop.explorerwin7.service').read_text()
 assert 'Exec="' + str(p) + '/bin/explorer-win7-portal"\n' in service
-text = (p / 'share/applications/linux-explorer-win7-dialog.desktop').read_text()
-assert 'Exec="' + str(p).replace('%', '%%') + '/bin/explorer-win7-portal"\n' in text
+for identity in ('linux-explorer-win7-dialog', 'linux-explorer-win7-chooser-dialog'):
+    text = (p / ('share/applications/' + identity + '.desktop')).read_text()
+    assert 'Exec="' + str(p).replace('%', '%%') + '/bin/explorer-win7-portal"\n' in text
+    assert 'NoDisplay=true\n' in text
+    assert 'StartupWMClass=' + identity + '\n' in text
 PY
 if command -v desktop-file-validate >/dev/null; then
-    desktop-file-validate "$prefix/share/applications/linux-explorer-win7-dialog.desktop"
+    desktop-file-validate "$prefix/share/applications/linux-explorer-win7-dialog.desktop" \
+        "$prefix/share/applications/linux-explorer-win7-chooser-dialog.desktop"
 fi

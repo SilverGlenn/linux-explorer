@@ -43,8 +43,8 @@ Installed paths with that prefix:
 - `~/.local/bin/explorer-win7-chooser-client` — small asynchronous CLI/wire example.
 - `~/.local/share/dbus-1/services/org.win7explorer.FileChooser1.service` — session
   bus activation entry with an absolute, quoted executable path.
-- `~/.local/share/applications/linux-explorer-win7-dialog.desktop` — dialog identity,
-  shared with Explorer's other dialogs.
+- `~/.local/share/applications/linux-explorer-win7-chooser-dialog.desktop` — picker
+  identity; the generic `linux-explorer-win7-dialog.desktop` is also retained.
 
 The first method call activates the service. The installer reloads D-Bus's
 activation-file discovery if a session bus is available; it does not launch the
@@ -308,7 +308,7 @@ application integration should send a parent and fresh activation information:
    the chooser terminates and then unexport it. Parent and service must be on the
    same compositor/backend; mismatched X11/Wayland parent types fail explicitly.
 3. Obtain a fresh **xdg-activation token from the user action which opened the
-   chooser**, targeted at `linux-explorer-win7-dialog` where the toolkit asks for an
+   chooser**, targeted at `linux-explorer-win7-chooser-dialog` where the toolkit asks for an
    app ID. Pass it as `activation_token`. Do not recycle another request's token
    or rely on a token inherited at login. The compositor ultimately decides focus;
    without a valid token, the service does not force focus or bypass policy.
@@ -323,8 +323,10 @@ application integration should send a parent and fresh activation information:
 On X11 use `x11:<hex-XID>` of the real parent and an appropriate fresh startup ID
 in `activation_token`. On Wayland the service uses KF6's foreign-parent support,
 not an always-on-top flag or borderless pseudo-dialog. Native dialog titlebars
-and decorations remain, under `linux-explorer-win7-dialog`; the browser-only
-SMOD caption-removal exception must not match this app ID.
+and decorations remain, under `linux-explorer-win7-chooser-dialog`; the browser-only
+SMOD caption-removal exception must not match this app ID. A separate opt-in
+inner-border exception can join the picker's Aero navigation to its native frame
+while retaining its title and controls.
 
 ## Validation and limits
 

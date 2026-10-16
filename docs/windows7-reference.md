@@ -259,6 +259,19 @@ not proof of Windows Aero Glass parity. The identified application captures are
 compositor pixels can appear black in a black-backed viewer. No Microsoft frame
 resources were imported and no installed theme code was patched.
 
+The file picker uses the separate desktop identity
+`linux-explorer-win7-chooser-dialog`. To let its transparent navigation row meet
+the native titlebar without a second inner frame, its approved SMOD exception
+matches `(^|\s)linux-explorer-win7-chooser-dialog($|\s)` and sets
+`HideInnerBorder=true`, `HideCaption=false`, `HideIcon=false`, and
+`HideTitleBar=false` (`ExceptionType=0`, `Enabled=true`, `Mask=0`). This keeps the
+picker's title, icon, and native window controls. Back up `smodrc`, preserve the
+existing exception order, and reload the decoration deliberately as above; the
+application and installers do not change SMOD settings. Ordinary Explorer
+dialogs retain `linux-explorer-win7-dialog`, so the picker rule does not alter
+their frame or inherit the browser's hidden caption. Native before/after picker
+captures are `build/picker-border-before.png` and `build/picker-border-after.png`.
+
 ## Follow-up: controls, navigation, and PDF
 
 Further direct user feedback identified problems not exposed by the old

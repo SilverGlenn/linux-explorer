@@ -63,7 +63,7 @@ void Explorer::showChooserWindow(QDialog *dialog, const ChooserWindowOptions &op
 {
     dialog->setWindowModality(options.modal ? Qt::WindowModal : Qt::NonModal);
     const QString previous = QGuiApplication::desktopFileName();
-    QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-chooser-dialog"));
     dialog->winId();
     QWindow *window = dialog->windowHandle();
     const ChooserWindowOptions &presentation = options;

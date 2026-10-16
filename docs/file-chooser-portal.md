@@ -29,8 +29,9 @@ The independent `Portal` install component provides:
 - `~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.explorerwin7.service`.
 - `~/.local/share/xdg-desktop-portal/portals/explorer-win7.portal` — advertises
   **only** `org.freedesktop.impl.portal.FileChooser`.
-- The project's existing `linux-explorer-win7-dialog` desktop identity, and this
-  document under `~/.local/share/doc/linux-explorer-win7/`.
+- The picker-specific `linux-explorer-win7-chooser-dialog` desktop identity,
+  the existing generic dialog identity, and this document under
+  `~/.local/share/doc/linux-explorer-win7/`.
 
 No public widget SDK is installed. The private chooser service remains separate;
 its client/API is documented in [file-chooser-api.md](file-chooser-api.md).
@@ -233,9 +234,11 @@ is not a working interactive chooser client.
 Real consumers should export their top-level Wayland surface and pass
 `wayland:<xdg-foreign handle>`, keeping it exported until completion. On X11 use
 `x11:<hex-XID>`. A pointer or Wayland `winId()` is not an exported handle. Backend
-and caller must use the same compositor/backend. Native dialog decorations and
-`linux-explorer-win7-dialog` identity are retained; no topmost/borderless workaround
-is used. Empty-parent requests remain usable as standalone nonmodal dialogs.
+and caller must use the same compositor/backend. Native dialog decorations are
+retained under the `linux-explorer-win7-chooser-dialog` identity; no
+topmost/borderless workaround is used. This separate identity allows an opt-in
+SMOD inner-border exception while preserving the picker title and other dialogs'
+frames. Empty-parent requests remain usable as standalone nonmodal dialogs.
 
 Activation-token forwarding depends on frontend/toolkit version. A valid forwarded
 fresh token is honored, but it is not required to make a standard request. The

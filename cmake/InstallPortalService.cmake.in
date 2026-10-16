@@ -20,9 +20,11 @@ set(dialog_executable "${CMAKE_INSTALL_PREFIX}/bin/${program}")
 string(REPLACE "\\" "\\\\" dialog_executable "${dialog_executable}")
 string(REPLACE "\"" "\\\"" dialog_executable "${dialog_executable}")
 string(REPLACE "%" "%%" dialog_executable "${dialog_executable}")
-file(READ "@PROJECT_SOURCE_DIR@/linux-explorer-win7-dialog.desktop" desktop)
-string(REPLACE "Exec=explorer-win7 %U"
-    "Exec=\"${dialog_executable}\"${arguments}" desktop "${desktop}")
 file(MAKE_DIRECTORY "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications")
-file(WRITE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications/linux-explorer-win7-dialog.desktop"
-    "${desktop}")
+foreach(identity linux-explorer-win7-dialog linux-explorer-win7-chooser-dialog)
+    file(READ "@PROJECT_SOURCE_DIR@/${identity}.desktop" desktop)
+    string(REPLACE "Exec=explorer-win7 %U"
+        "Exec=\"${dialog_executable}\"${arguments}" desktop "${desktop}")
+    file(WRITE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications/${identity}.desktop"
+        "${desktop}")
+endforeach()

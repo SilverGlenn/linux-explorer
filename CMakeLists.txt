@@ -147,6 +147,7 @@ set_target_properties(explorer PROPERTIES
 
 install(TARGETS explorer RUNTIME DESTINATION bin)
 install(FILES linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
+        linux-explorer-win7-chooser-dialog.desktop
         DESTINATION share/applications)
 configure_file(cmake/InstallDesktopEntries.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/InstallDesktopEntries.cmake @ONLY)

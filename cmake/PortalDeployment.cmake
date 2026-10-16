@@ -17,6 +17,7 @@ function(explorer_install_portal service_target)
     install(FILES "${PROJECT_SOURCE_DIR}/portal/explorer-win7.portal"
         DESTINATION share/xdg-desktop-portal/portals COMPONENT Portal)
     install(FILES "${PROJECT_SOURCE_DIR}/linux-explorer-win7-dialog.desktop"
+        "${PROJECT_SOURCE_DIR}/linux-explorer-win7-chooser-dialog.desktop"
         DESTINATION share/applications COMPONENT Portal)
     configure_file("${PROJECT_SOURCE_DIR}/cmake/InstallPortalService.cmake.in"
         "${PROJECT_BINARY_DIR}/InstallPortalService.cmake" @ONLY)
@@ -27,6 +28,9 @@ function(explorer_install_portal service_target)
         DESTINATION share/licenses/linux-explorer-win7 COMPONENT Portal)
     if(BUILD_TESTING)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME desktop_identity_install_tests COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/DesktopIdentityInstallTest.py")
+        set_tests_properties(desktop_identity_install_tests PROPERTIES TIMEOUT 30)
         add_test(NAME portal_preferences_tests COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/PortalPreferencesTest.py")
         set_tests_properties(portal_preferences_tests PROPERTIES TIMEOUT 30)

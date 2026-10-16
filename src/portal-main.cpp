@@ -13,7 +13,7 @@ int main(int argc, char *argv[])
     app.setOrganizationName(QStringLiteral("linux-explorer-win7"));
     app.setApplicationName(QStringLiteral("explorer-win7-portal"));
     app.setApplicationVersion(QStringLiteral("1"));
-    app.setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
+    app.setDesktopFileName(QStringLiteral("linux-explorer-win7-chooser-dialog"));
     app.setWindowIcon(Aero::themeIcon({"system-file-manager", "folder"}));
     app.setQuitOnLastWindowClosed(false);
     app.setQuitLockEnabled(false);

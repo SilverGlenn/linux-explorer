@@ -1,8 +1,13 @@
 # Resolve Exec at install time, including --prefix and DESTDIR packaging.
 # GDesktopAppInfo rejects bare commands missing from the desktop session PATH.
-foreach(desktop linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop)
+set(executable "${CMAKE_INSTALL_PREFIX}/bin/explorer-win7")
+string(REPLACE "\\" "\\\\" executable "${executable}")
+string(REPLACE "\"" "\\\"" executable "${executable}")
+string(REPLACE "%" "%%" executable "${executable}")
+foreach(desktop linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
+        linux-explorer-win7-chooser-dialog.desktop)
     file(READ "@CMAKE_CURRENT_SOURCE_DIR@/${desktop}" content)
     string(REPLACE "Exec=explorer-win7"
-        "Exec=\"${CMAKE_INSTALL_PREFIX}/bin/explorer-win7\"" content "${content}")
+        "Exec=\"${executable}\"" content "${content}")
     file(WRITE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications/${desktop}" "${content}")
 endforeach()

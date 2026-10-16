@@ -106,9 +106,10 @@ launcher. It does not replace `explorer`, Dolphin, your Meta+E shortcut, your
 directory MIME association, or your existing file-manager D-Bus service.
 Preferences and the single-instance bus name are separate from upstream.
 
-The browser app ID is `linux-explorer-win7`; dialogs use
-`linux-explorer-win7-dialog`. Continuous caption/navigation glass depends on an
-**opt-in browser-only SMOD decoration exception**, not just the client layout.
+The browser app ID is `linux-explorer-win7`; ordinary dialogs use
+`linux-explorer-win7-dialog`, and file pickers use `linux-explorer-win7-chooser-dialog`.
+Continuous caption/navigation glass depends on **opt-in SMOD decoration
+exceptions** for the browser and picker, not just the client layout.
 This fork does not alter KWin/SMOD settings. See the [decoration integration
 notes](docs/windows7-reference.md#native-decoration-dependency) for the exact
 match and retained native controls. Apply live decoration changes only with

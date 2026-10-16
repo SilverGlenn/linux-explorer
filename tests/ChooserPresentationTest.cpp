@@ -1,23 +1,28 @@
 #include "ApplicationAppearance.h"
 #include "ChooserWindow.h"
+#include "FileChooserDialog.h"
 
 #include <QApplication>
 #include <QDialog>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QScopeGuard>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QWindow>
 
-class NativeCreationDialog : public QDialog {
+template<typename Dialog>
+class NativeCreationDialog : public Dialog {
 public:
+    using Dialog::Dialog;
     QString nativeCreationAppId;
 protected:
     bool event(QEvent *event) override
     {
-        if (event->type() == QEvent::WinIdChange && windowHandle())
+        if (event->type() == QEvent::WinIdChange && this->windowHandle())
             nativeCreationAppId = QGuiApplication::desktopFileName();
-        return QDialog::event(event);
+        return Dialog::event(event);
     }
 };
 
@@ -60,8 +65,9 @@ private Q_SLOTS:
     void showChooserWindowScopesNativeAppIdAndRetainsDecorations()
     {
         const QString previous = QGuiApplication::desktopFileName();
-        QGuiApplication::setDesktopFileName(QStringLiteral("test-browser-id"));
-        NativeCreationDialog dialog;
+        const auto restoreId = qScopeGuard([previous] { QGuiApplication::setDesktopFileName(previous); });
+        QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
+        NativeCreationDialog<QDialog> dialog;
         dialog.setWindowTitle(QStringLiteral("Choose a file"));
         dialog.resize(640, 420);
         const QSize size = dialog.size();
@@ -79,7 +85,7 @@ private Q_SLOTS:
         QCOMPARE(dialog.windowFlags(), flags);
         QCOMPARE(dialog.size(), size);
         QCOMPARE(dialog.windowTitle(), QStringLiteral("Choose a file"));
-        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("test-browser-id"));
+        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("linux-explorer-win7-dialog"));
         QCOMPARE(navigation->parentWidget(), &dialog);
         QCOMPARE(dialog.layout()->indexOf(contents), 0);
         QCOMPARE(dialog.layout()->indexOf(navigation), -1);
@@ -87,8 +93,8 @@ private Q_SLOTS:
         QCoreApplication::processEvents();
         QVERIFY(dialog.isVisible());
         QVERIFY(dialog.windowHandle());
-        QCOMPARE(dialog.nativeCreationAppId, QStringLiteral("linux-explorer-win7-dialog"));
-        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("test-browser-id"));
+        QCOMPARE(dialog.nativeCreationAppId, QStringLiteral("linux-explorer-win7-chooser-dialog"));
+        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("linux-explorer-win7-dialog"));
         QCOMPARE(dialog.windowModality(), Qt::NonModal);
         QCOMPARE(dialog.windowFlags(), flags);
         QVERIFY(!dialog.windowFlags().testFlag(Qt::FramelessWindowHint));
@@ -111,7 +117,39 @@ private Q_SLOTS:
         QTRY_COMPARE(navigation->width(), dialog.width());
         QTRY_VERIFY(contents->geometry().top() >= navigation->geometry().bottom() + 1);
         QCOMPARE(dialog.windowFlags(), flags);
-        QGuiApplication::setDesktopFileName(previous);
+
+        // Showing a picker must not move ordinary application dialogs into its
+        // compositor exception, even while that picker remains visible.
+        NativeCreationDialog<QDialog> ordinary;
+        ordinary.setWindowTitle(QStringLiteral("Ordinary application dialog"));
+        const Qt::WindowFlags ordinaryFlags = ordinary.windowFlags();
+        ordinary.show();
+        QCOMPARE(ordinary.nativeCreationAppId, QStringLiteral("linux-explorer-win7-dialog"));
+        QCOMPARE(ordinary.windowFlags(), ordinaryFlags);
+        QCOMPARE(ordinary.windowTitle(), QStringLiteral("Ordinary application dialog"));
+    }
+    void directFileChooserShowScopesNativeAppIdAndRetainsDecorations()
+    {
+        const QString previous = QGuiApplication::desktopFileName();
+        const auto restoreId = qScopeGuard([previous] { QGuiApplication::setDesktopFileName(previous); });
+        QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        ChooserOptions options;
+        options.startingLocation = QUrl::fromLocalFile(directory.path());
+        NativeCreationDialog<FileChooserDialog> dialog(options);
+        dialog.setWindowTitle(QStringLiteral("Embedded file chooser"));
+        const Qt::WindowFlags flags = dialog.windowFlags();
+        dialog.show();
+        QVERIFY(dialog.windowHandle());
+        QCOMPARE(dialog.nativeCreationAppId, QStringLiteral("linux-explorer-win7-chooser-dialog"));
+        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("linux-explorer-win7-dialog"));
+        QCOMPARE(dialog.windowFlags(), flags);
+        QVERIFY(!dialog.windowFlags().testFlag(Qt::FramelessWindowHint));
+        QVERIFY(!dialog.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+        QCOMPARE(dialog.windowTitle(), QStringLiteral("Embedded file chooser"));
+        dialog.hide();
+        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("linux-explorer-win7-dialog"));
     }
     void configureApplicationAppearancePreservesLifecycleAndFiltersScrollBars()
     {

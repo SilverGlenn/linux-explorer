@@ -15,9 +15,10 @@ function(explorer_install_chooser service_target)
         "${PROJECT_BINARY_DIR}/org.win7explorer.FileChooser1.service" @ONLY)
     install(FILES "${PROJECT_BINARY_DIR}/org.win7explorer.FileChooser1.service"
         DESTINATION share/dbus-1/services COMPONENT Chooser)
-    # The same dialog identity as normal Explorer dialogs, not the captionless
-    # browser class. Installing it does not register a file-manager association.
+    # Install the dedicated picker identity and retain the generic dialog launcher.
+    # Neither registers a file-manager association.
     install(FILES "${PROJECT_SOURCE_DIR}/linux-explorer-win7-dialog.desktop"
+        "${PROJECT_SOURCE_DIR}/linux-explorer-win7-chooser-dialog.desktop"
         DESTINATION share/applications COMPONENT Chooser)
     configure_file("${PROJECT_SOURCE_DIR}/cmake/InstallChooserService.cmake.in"
         "${PROJECT_BINARY_DIR}/InstallChooserService.cmake" @ONLY)

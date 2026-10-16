@@ -83,11 +83,15 @@ python3 - "$prefix" <<'PY'
 import pathlib
 import sys
 prefix = pathlib.Path(sys.argv[1])
-desktop = (prefix / 'share/applications/linux-explorer-win7-dialog.desktop').read_text()
-assert 'Exec="' + str(prefix).replace('%', '%%') + '/bin/explorer-win7-chooser"\n' in desktop
+for identity in ('linux-explorer-win7-dialog', 'linux-explorer-win7-chooser-dialog'):
+    desktop = (prefix / ('share/applications/' + identity + '.desktop')).read_text()
+    assert 'Exec="' + str(prefix).replace('%', '%%') + '/bin/explorer-win7-chooser"\n' in desktop
+    assert 'NoDisplay=true\n' in desktop
+    assert 'StartupWMClass=' + identity + '\n' in desktop
 PY
 if command -v desktop-file-validate >/dev/null; then
-    desktop-file-validate "$prefix/share/applications/linux-explorer-win7-dialog.desktop"
+    desktop-file-validate "$prefix/share/applications/linux-explorer-win7-dialog.desktop" \
+        "$prefix/share/applications/linux-explorer-win7-chooser-dialog.desktop"
 fi
 # Deliberately only this activation directory; no KDE services or desktop bus.
 config="$sandbox/session-bus.conf"
