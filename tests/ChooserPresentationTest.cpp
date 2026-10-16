@@ -4,6 +4,8 @@
 #include <QApplication>
 #include <QDialog>
 #include <QEvent>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QTest>
 #include <QWindow>
 
@@ -61,8 +63,28 @@ private Q_SLOTS:
         QGuiApplication::setDesktopFileName(QStringLiteral("test-browser-id"));
         NativeCreationDialog dialog;
         dialog.setWindowTitle(QStringLiteral("Choose a file"));
+        dialog.resize(640, 420);
+        const QSize size = dialog.size();
         const Qt::WindowFlags flags = dialog.windowFlags();
+        auto *contents = new QWidget;
+        auto *navigation = new QWidget;
+        auto *navigationLayout = new QHBoxLayout(navigation);
+        navigationLayout->setContentsMargins(4, 3, 6, 3);
+        auto *navigationLabel = new QLabel(QStringLiteral("Navigation"));
+        navigationLayout->addWidget(navigationLabel);
+        QVERIFY(!dialog.testAttribute(Qt::WA_WState_Created));
+        Explorer::configureChooserGlass(&dialog, contents, navigation);
+        QVERIFY(!dialog.testAttribute(Qt::WA_WState_Created));
+        QVERIFY(!dialog.windowHandle());
+        QCOMPARE(dialog.windowFlags(), flags);
+        QCOMPARE(dialog.size(), size);
+        QCOMPARE(dialog.windowTitle(), QStringLiteral("Choose a file"));
+        QCOMPARE(QGuiApplication::desktopFileName(), QStringLiteral("test-browser-id"));
+        QCOMPARE(navigation->parentWidget(), &dialog);
+        QCOMPARE(dialog.layout()->indexOf(contents), 0);
+        QCOMPARE(dialog.layout()->indexOf(navigation), -1);
         Explorer::showChooserWindow(&dialog, {});
+        QCoreApplication::processEvents();
         QVERIFY(dialog.isVisible());
         QVERIFY(dialog.windowHandle());
         QCOMPARE(dialog.nativeCreationAppId, QStringLiteral("linux-explorer-win7-dialog"));
@@ -72,6 +94,23 @@ private Q_SLOTS:
         QVERIFY(!dialog.windowFlags().testFlag(Qt::FramelessWindowHint));
         QVERIFY(!dialog.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
         QCOMPARE(dialog.windowTitle(), QStringLiteral("Choose a file"));
+        QCOMPARE(dialog.size(), size);
+        QCOMPARE(navigation->geometry().top(), 0);
+        QCOMPARE(navigation->width(), dialog.width());
+        QCOMPARE(navigation->height(), navigation->sizeHint().height());
+        QVERIFY(contents->geometry().top() >= navigation->geometry().bottom() + 1);
+        QVERIFY(dialog.testAttribute(Qt::WA_TranslucentBackground));
+        QVERIFY(dialog.testAttribute(Qt::WA_NoSystemBackground));
+
+        // Inset allocation follows the navigation's real size hint, including
+        // taller artwork/fonts, rather than clipping it to a fixed strip.
+        navigationLabel->setFixedHeight(navigationLabel->height() + 12);
+        QTRY_COMPARE(navigation->height(), navigation->sizeHint().height());
+        QTRY_VERIFY(contents->geometry().top() >= navigation->geometry().bottom() + 1);
+        dialog.resize(720, 480);
+        QTRY_COMPARE(navigation->width(), dialog.width());
+        QTRY_VERIFY(contents->geometry().top() >= navigation->geometry().bottom() + 1);
+        QCOMPARE(dialog.windowFlags(), flags);
         QGuiApplication::setDesktopFileName(previous);
     }
     void configureApplicationAppearancePreservesLifecycleAndFiltersScrollBars()

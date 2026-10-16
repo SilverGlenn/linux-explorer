@@ -5,10 +5,13 @@
 #include "Libraries.h"
 #include "Locations.h"
 #include "NavigationPane.h"
+#include "PreviewPane.h"
 #include "SearchBox.h"
+#include "ViewModeMenu.h"
 
 #include <AeroQt/stylesheet.h>
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
@@ -29,14 +32,19 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScreen>
 #include <QScopeGuard>
 #include <QSignalSpy>
+#include <QSplitter>
+#include <QStackedWidget>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QtMath>
 
@@ -756,6 +764,273 @@ private slots:
         QCOMPARE(accepted.count(), 0);
         QVERIFY(dialog.isVisible());
         QVERIFY(dialog.errorMessage().isEmpty());
+    }
+
+    void searchCaptionFollowsFriendlyLocationAndHistory()
+    {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkdir(QStringLiteral("Folder with spaces")));
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *search = dialog.findChild<SearchBox *>();
+        auto *navigation = dialog.findChild<BrowserNavigation *>();
+        QVERIFY(search && navigation);
+        QCOMPARE(search->placeholderText(), QStringLiteral("Search %1").arg(QFileInfo(dir.path()).fileName()));
+        QCOMPARE(search->accessibleName(), search->placeholderText());
+        const QUrl folder = QUrl::fromLocalFile(dir.filePath(QStringLiteral("Folder with spaces")));
+        dialog.navigateTo(folder);
+        QCOMPARE(search->placeholderText(), QStringLiteral("Search Folder with spaces"));
+        search->setText(QStringLiteral("nothing"));
+        QTest::keyClick(&dialog, Qt::Key_Left, Qt::AltModifier);
+        QTRY_COMPARE(dialog.currentUrl(), QUrl::fromLocalFile(dir.path()));
+        QVERIFY(search->text().isEmpty());
+        QCOMPARE(search->accessibleName(), search->placeholderText());
+        QTest::keyClick(&dialog, Qt::Key_Right, Qt::AltModifier);
+        QTRY_COMPARE(dialog.currentUrl(), folder);
+        QCOMPARE(search->placeholderText(), QStringLiteral("Search Folder with spaces"));
+        for (const auto &location : {Locations::computer(), Locations::libraries(), QUrl::fromLocalFile(QStringLiteral("/"))}) {
+            dialog.navigateTo(location);
+            const auto crumbs = navigation->crumbsFor(location);
+            QVERIFY(!crumbs.isEmpty());
+            QCOMPARE(search->placeholderText(), QStringLiteral("Search %1").arg(crumbs.last().label));
+            QCOMPARE(search->accessibleName(), search->placeholderText());
+            QVERIFY(!search->placeholderText().contains(QStringLiteral(":///")));
+            QCOMPARE(search->isEnabled(), location.isLocalFile());
+        }
+    }
+
+    void viewButtonCyclesAndArrowOpensSharedFlyout()
+    {
+        QTemporaryDir dir;
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *button = dialog.findChild<QToolButton *>(QStringLiteral("chooserViewButton"));
+        auto *files = dialog.findChild<FileView *>();
+        QVERIFY(button && files);
+        QCOMPARE(button->popupMode(), QToolButton::MenuButtonPopup);
+        QCOMPARE(button->size(), QSize(44, 24));
+        QVERIFY(qobject_cast<ViewModeMenu *>(button->menu()));
+        QTest::mouseMove(&dialog, QPoint(1, 1));
+        QTest::qWait(10);
+        const QImage rendered = button->grab().toImage();
+        const qreal dpr = rendered.devicePixelRatio();
+        const QRect glyphArea(qRound(31 * dpr), qRound(8 * dpr), qRound(10 * dpr), qRound(8 * dpr));
+        int arrowPixels = 0;
+        for (int y = glyphArea.top(); y <= glyphArea.bottom(); ++y)
+            for (int x = glyphArea.left(); x <= glyphArea.right(); ++x) {
+                const QColor color = rendered.pixelColor(x, y);
+                if (qMax(color.red(), qMax(color.green(), color.blue())) < 100) ++arrowPixels;
+            }
+        QVERIFY(arrowPixels >= qRound(5 * dpr * dpr));
+        const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        if (!snapshots.isEmpty()) {
+            QVERIFY(QDir().mkpath(snapshots));
+            QVERIFY(rendered.save(snapshots + QStringLiteral("/chooser-view-button-idle.png")));
+        }
+        QTest::mouseClick(button, Qt::LeftButton, Qt::NoModifier, QPoint(10, 12));
+        QCOMPARE(files->viewMode(), Settings::ViewMode::Tiles);
+        QVERIFY(!button->menu()->isVisible());
+        bool popupVisible = false;
+        QTimer::singleShot(0, button->menu(), [&] {
+            popupVisible = button->menu()->isVisible();
+            auto *choice = button->menu()->findChild<QToolButton *>(QStringLiteral("viewMode7"));
+            if (choice) choice->click();
+            else button->menu()->close();
+        });
+        QTest::mouseClick(button, Qt::LeftButton, Qt::NoModifier, QPoint(38, 12));
+        QTRY_COMPARE(files->viewMode(), Settings::ViewMode::Content);
+        QVERIFY(popupVisible);
+        QVERIFY(!button->menu()->isVisible());
+        QVERIFY(button->menu()->findChild<QToolButton *>(QStringLiteral("viewMode7"))->isChecked());
+        QCOMPARE(button->icon().cacheKey(), ViewModeMenu::iconForMode(Settings::ViewMode::Content).cacheKey());
+    }
+
+    void previewDefaultsAndToggleRemainUsableAtMinimumWidth_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<bool>("directory");
+        QTest::newRow("open") << int(ChooserMode::OpenFile) << false;
+        QTest::newRow("save") << int(ChooserMode::SaveFile) << false;
+        QTest::newRow("folder") << int(ChooserMode::OpenFile) << true;
+        QTest::newRow("batch-save") << int(ChooserMode::SaveFiles) << false;
+    }
+
+    void previewDefaultsAndToggleRemainUsableAtMinimumWidth()
+    {
+        QFETCH(int, mode);
+        QFETCH(bool, directory);
+        QTemporaryDir dir;
+        auto options = optionsFor(dir.path(), ChooserMode(mode));
+        options.directory = directory;
+        if (options.mode == ChooserMode::SaveFiles) options.saveNames = {QStringLiteral("new.txt")};
+        FileChooserDialog dialog(options);
+        show(dialog);
+        auto *preview = dialog.findChild<PreviewPane *>();
+        auto *button = dialog.findChild<QToolButton *>(QStringLiteral("chooserPreviewButton"));
+        auto *splitter = dialog.findChild<QSplitter *>(QStringLiteral("chooserSplitter"));
+        auto *files = dialog.findChild<FileView *>();
+        auto *buttons = dialog.findChild<QDialogButtonBox *>();
+        QVERIFY(preview && button && splitter && files && buttons);
+        QVERIFY(preview->isVisible());
+        QVERIFY(button->isChecked());
+        QVERIFY(button->toolTip().startsWith(QStringLiteral("Hide")));
+        QVERIFY(!dialog.findChild<QToolButton *>(QStringLiteral("helpButton")));
+        QCOMPARE(splitter->count(), 3);
+        dialog.resize(480, 340);
+        QTest::qWait(20);
+        QCOMPARE(dialog.width(), 480);
+        QVERIFY(files->width() >= 160);
+        QVERIFY(preview->width() >= 160);
+        QVERIFY(dialog.rect().contains(QRect(buttons->mapTo(&dialog, QPoint()), buttons->size())));
+        QVERIFY(name(dialog)->width() >= 100);
+        QTest::mouseClick(button, Qt::LeftButton);
+        QVERIFY(!preview->isVisible());
+        QVERIFY(!button->isChecked());
+        QVERIFY(button->toolTip().startsWith(QStringLiteral("Show")));
+        QTest::keyClick(&dialog, Qt::Key_P, Qt::AltModifier);
+        QTRY_VERIFY(preview->isVisible());
+        QVERIFY(button->isChecked());
+        QVERIFY(button->toolTip().startsWith(QStringLiteral("Hide")));
+    }
+
+    void previewTracksSelectedTextImagesAndClearsOnNavigation()
+    {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkdir(QStringLiteral("sub")));
+        const QUrl first = QUrl::fromLocalFile(dir.filePath(QStringLiteral("first.txt")));
+        const QUrl second = QUrl::fromLocalFile(dir.filePath(QStringLiteral("second.txt")));
+        const QUrl picture = QUrl::fromLocalFile(dir.filePath(QStringLiteral("picture.png")));
+        writeFile(first.toLocalFile(), "First selected contents\n");
+        writeFile(second.toLocalFile(), "Second selected contents\n");
+        QImage fixture(120, 80, QImage::Format_RGB32);
+        fixture.fill(Qt::green);
+        QVERIFY(fixture.save(picture.toLocalFile()));
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *model = dialog.findChild<DirectoryModel *>();
+        auto *files = dialog.findChild<FileView *>();
+        auto *preview = dialog.findChild<PreviewPane *>();
+        auto *text = preview->findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+        auto *image = preview->findChild<QLabel *>(QStringLiteral("previewImage"));
+        auto *placeholder = preview->findChild<QLabel *>(QStringLiteral("previewPlaceholder"));
+        auto *stack = preview->findChild<QStackedWidget *>();
+        QTRY_COMPARE(model->rowCount(), 4);
+        auto *view = files->currentView();
+        const QModelIndex firstIndex = model->indexForUrl(first);
+        view->scrollTo(firstIndex);
+        QTRY_VERIFY(!view->visualRect(firstIndex).isEmpty());
+        QTest::mouseClick(view->viewport(), Qt::LeftButton, Qt::NoModifier, view->visualRect(firstIndex).center());
+        QTRY_COMPARE(text->toPlainText(), QStringLiteral("First selected contents\n"));
+        QCOMPARE(stack->currentWidget(), text);
+        QVERIFY(text->isReadOnly());
+        QVERIFY(files->selectUrl(picture));
+        QVERIFY(files->selectUrl(second));
+        QTRY_COMPARE(text->toPlainText(), QStringLiteral("Second selected contents\n"));
+        QTest::qWait(100);
+        QCOMPARE(stack->currentWidget(), text);
+        QVERIFY(image->pixmap().isNull());
+        QVERIFY(files->selectUrl(picture));
+        QTRY_COMPARE(stack->currentWidget(), image);
+        QVERIFY(!image->pixmap().isNull());
+        const QImage actual = image->pixmap().toImage();
+        const QColor center = actual.pixelColor(actual.width() / 2, actual.height() / 2);
+        QVERIFY(center.green() > 200 && center.red() < 80 && center.blue() < 80);
+        const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        if (!snapshots.isEmpty()) {
+            QVERIFY(QDir().mkpath(snapshots));
+            QVERIFY(dialog.grab().save(snapshots + QStringLiteral("/chooser-preview-image.png")));
+        }
+        files->selectionModel()->clearSelection();
+        QCOMPARE(stack->currentWidget(), placeholder);
+        QVERIFY(text->toPlainText().isEmpty());
+        QVERIFY(image->pixmap().isNull());
+        QVERIFY(files->selectUrl(first));
+        dialog.navigateTo(QUrl::fromLocalFile(dir.filePath(QStringLiteral("sub"))));
+        QTest::qWait(100);
+        QCOMPARE(stack->currentWidget(), placeholder);
+        QVERIFY(text->toPlainText().isEmpty());
+        QVERIFY(image->pixmap().isNull());
+        for (const auto &location : {Locations::libraries(), Locations::computer()}) {
+            dialog.navigateTo(location);
+            QCOMPARE(stack->currentWidget(), placeholder);
+        }
+    }
+
+    void previewHideCloseCancelPendingContentAndShowResumesSelection()
+    {
+        QTemporaryDir dir;
+        const QUrl first = QUrl::fromLocalFile(dir.filePath(QStringLiteral("first.txt")));
+        const QUrl second = QUrl::fromLocalFile(dir.filePath(QStringLiteral("second.txt")));
+        writeFile(first.toLocalFile(), "Old text\n");
+        writeFile(second.toLocalFile(), "Current text\n");
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *files = dialog.findChild<FileView *>();
+        auto *preview = dialog.findChild<PreviewPane *>();
+        auto *text = preview->findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+        auto *placeholder = preview->findChild<QLabel *>(QStringLiteral("previewPlaceholder"));
+        auto *stack = preview->findChild<QStackedWidget *>();
+        QTRY_COMPARE(dialog.findChild<DirectoryModel *>()->rowCount(), 2);
+        QVERIFY(files->selectUrl(first));
+        dialog.hide();
+        QTest::qWait(100);
+        QCOMPARE(stack->currentWidget(), placeholder);
+        QVERIFY(text->toPlainText().isEmpty());
+        QVERIFY(files->selectUrl(second));
+        QTest::qWait(50);
+        QVERIFY(text->toPlainText().isEmpty());
+        show(dialog);
+        QTRY_COMPARE(text->toPlainText(), QStringLiteral("Current text\n"));
+        auto *button = dialog.findChild<QToolButton *>(QStringLiteral("chooserPreviewButton"));
+        QTest::mouseClick(button, Qt::LeftButton);
+        QVERIFY(!preview->isVisible());
+        QVERIFY(files->selectUrl(first));
+        QTest::qWait(50);
+        QVERIFY(text->toPlainText().isEmpty());
+        QTest::keyClick(&dialog, Qt::Key_P, Qt::AltModifier);
+        QTRY_COMPARE(text->toPlainText(), QStringLiteral("Old text\n"));
+        QVERIFY(files->selectUrl(second));
+        dialog.close();
+        QTRY_VERIFY(!dialog.isVisible());
+        QTest::qWait(100);
+        QCOMPARE(stack->currentWidget(), placeholder);
+        QVERIFY(text->toPlainText().isEmpty());
+        QVERIFY(dialog.selectedUrls().isEmpty());
+    }
+
+    void focusCycleIncludesVisibleReadOnlyPreviewAndSkipsHiddenPane()
+    {
+        QTemporaryDir dir;
+        const QUrl item = QUrl::fromLocalFile(dir.filePath(QStringLiteral("note.txt")));
+        writeFile(item.toLocalFile(), "Preview keyboard contents\n");
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *files = dialog.findChild<FileView *>();
+        auto *text = dialog.findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+        QTRY_COMPARE(dialog.findChild<DirectoryModel *>()->rowCount(), 1);
+        QVERIFY(files->selectUrl(item));
+        QTRY_VERIFY(text->isVisible());
+        files->focusView();
+        QTest::keyClick(files->currentView(), Qt::Key_F6);
+        QTRY_VERIFY(text->hasFocus());
+        QSignalSpy accepted(&dialog, &QDialog::accepted);
+        QTest::keyClick(text, Qt::Key_Return);
+        QCOMPARE(accepted.count(), 0);
+        QVERIFY(dialog.isVisible());
+        QTest::keyClick(text, Qt::Key_F6);
+        QTRY_VERIFY(name(dialog)->hasFocus());
+        QTest::keyClick(name(dialog), Qt::Key_F6, Qt::ShiftModifier);
+        QTRY_VERIFY(text->hasFocus());
+        QTest::keyClick(text, Qt::Key_P, Qt::AltModifier);
+        QTRY_VERIFY(files->currentView()->hasFocus());
+        name(dialog)->setFocus();
+        QTest::keyClick(name(dialog), Qt::Key_F6, Qt::ShiftModifier);
+        QTRY_VERIFY(files->currentView()->hasFocus());
+        QTest::keyClick(&dialog, Qt::Key_P, Qt::AltModifier);
+        QTRY_VERIFY(text->isVisible());
+        files->focusView();
+        QTest::keyClick(files->currentView(), Qt::Key_F6);
+        QTRY_VERIFY(text->hasFocus());
     }
 
     void multipleFileSelectionNeverParsesWhitespaceAndTypedIntentWins()

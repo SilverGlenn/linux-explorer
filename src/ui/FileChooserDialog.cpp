@@ -2,20 +2,24 @@
 #include "BrowserNavigation.h"
 #include "ComputerModel.h"
 #include "ComputerView.h"
+#include "ChooserWindow.h"
 #include "DirectoryModel.h"
 #include "FileView.h"
 #include "Libraries.h"
 #include "LibrariesView.h"
 #include "Locations.h"
 #include "NavigationPane.h"
+#include "PreviewPane.h"
 #include "SearchBox.h"
 #include "ViewModeMenu.h"
 #include "Assets.h"
 #include "aero/icons.h"
 #include "aero/artwork.h"
+#include "aero/arrows.h"
 #include "aero/palette.h"
 #include "aero/text.h"
 #include "aero/strips.h"
+#include "aero/splitter.h"
 
 #include <QAbstractItemView>
 #include <QActionGroup>
@@ -37,10 +41,14 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QPlainTextEdit>
+#include <QPainter>
 #include <QRegularExpression>
 #include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStyle>
+#include <QStyleOptionToolButton>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -49,6 +57,34 @@
 #include <unistd.h>
 
 namespace {
+// Keep the split-button's native menu hit target and keyboard behavior, while
+// drawing the same Aero arrow as the other command buttons. Some widget themes
+// hide the native menu glyph until hover.
+class ChooserViewButton : public QToolButton {
+public:
+    explicit ChooserViewButton(QWidget *parent = nullptr) : QToolButton(parent)
+    {
+        setStyleSheet(QStringLiteral(
+            "QToolButton::menu-button { width: 14px; }"
+            "QToolButton::menu-arrow { image: none; }"));
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QToolButton::paintEvent(event);
+        QStyleOptionToolButton option;
+        initStyleOption(&option);
+        const QRect menuRect = style()->subControlRect(QStyle::CC_ToolButton, &option,
+                                                       QStyle::SC_ToolButtonMenu, this);
+        const QPixmap arrow = Aero::arrowPixmap(Qt::DownArrow, Aero::Palette::rgb(Aero::Palette::ArrowFill), 6);
+        const QSizeF size = arrow.deviceIndependentSize();
+        QPainter painter(this);
+        painter.drawPixmap(QPointF(menuRect.center().x() + 0.5 - size.width() / 2,
+                                  menuRect.center().y() + 0.5 - size.height() / 2), arrow);
+    }
+};
+
 bool readableDirectory(const QFileInfo &info)
 {
     const auto permissions = info.permissions();
@@ -112,7 +148,7 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     // Shared panes already paint white surfaces. Keep their text readable even
     // when the application's installed widget theme supplies dark text roles.
     setStyleSheet(QStringLiteral(
-        "QDialog#fileChooserDialog { background: #F0F0F0; color: black; }"
+        "QDialog#fileChooserDialog { color: black; }"
         "QDialog#fileChooserDialog QLabel, QDialog#fileChooserDialog QToolButton,"
         "QDialog#fileChooserDialog QCheckBox { color: black; }"
         "QDialog#fileChooserDialog QAbstractItemView { background: white; color: black;"
@@ -142,7 +178,10 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     resize(760, 510);
     setMinimumSize(480, 340);
 
-    auto *layout = new QVBoxLayout(this);
+    auto *contents = new QWidget;
+    contents->setObjectName(QStringLiteral("chooserContents"));
+    contents->setStyleSheet(Aero::panelSheet(contents->objectName(), Aero::Palette::Surface));
+    auto *layout = new QVBoxLayout(contents);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     m_places = new NavigationPane;
@@ -159,7 +198,6 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
 
     auto *navBar = new QWidget;
     navBar->setObjectName(QStringLiteral("chooserNavigation"));
-    navBar->setStyleSheet(Aero::panelSheet(navBar->objectName(), Aero::Palette::StripSurface));
     auto *navRow = new QHBoxLayout(navBar);
     navRow->setContentsMargins(4, 3, 6, 3);
     navRow->setSpacing(2);
@@ -175,7 +213,6 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     m_search->setMinimumWidth(90);
     m_search->setMaximumWidth(220);
     navRow->addWidget(m_search);
-    layout->addWidget(navBar);
 
     auto *commandBar = Aero::commandBar(Explorer::Art::CommandBar);
     commandBar->row()->addWidget(Aero::bodyLabel(folderMode() ? tr("Select a folder") : tr("Select a file")));
@@ -204,29 +241,69 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
             restrictViews(m_computer);
         });
     }
-    auto *viewButton = new QToolButton;
+    auto *viewButton = new ChooserViewButton;
     viewButton->setObjectName(QStringLiteral("chooserViewButton"));
     viewButton->setText(tr("Change your view"));
     viewButton->setAccessibleName(viewButton->text());
     viewButton->setIcon(ViewModeMenu::iconForMode(Settings::ViewMode::Details));
-    viewButton->setPopupMode(QToolButton::InstantPopup);
+    viewButton->setPopupMode(QToolButton::MenuButtonPopup);
+    viewButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    viewButton->setToolTip(viewButton->text());
+    viewButton->setAutoRaise(true);
+    viewButton->setFixedSize(44, 24);
     viewButton->setMenu(new ViewModeMenu(modes, viewButton));
-    connect(m_files, &FileView::viewModeChanged, viewButton, [viewButton](Settings::ViewMode mode) {
+    connect(viewButton, &QToolButton::clicked, this, [this, modes] {
+        const auto next = ViewModeMenu::nextMode(m_files->viewMode());
+        for (auto *action : modes->actions())
+            if (action->data().toInt() == static_cast<int>(next)) {
+                action->trigger();
+                break;
+            }
+    });
+    connect(m_files, &FileView::viewModeChanged, viewButton, [viewButton, modes](Settings::ViewMode mode) {
         viewButton->setIcon(ViewModeMenu::iconForMode(mode));
+        for (auto *action : modes->actions())
+            action->setChecked(action->data().toInt() == static_cast<int>(mode));
     });
     commandBar->row()->addWidget(viewButton);
+    m_previewAction = new QAction(Aero::previewPaneIcon(), tr("Preview pane"), this);
+    m_previewAction->setObjectName(QStringLiteral("chooserPreviewAction"));
+    m_previewAction->setCheckable(true);
+    m_previewAction->setChecked(true);
+    m_previewAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_P));
+    m_previewAction->setToolTip(tr("Hide the preview pane (Alt+P)"));
+    addAction(m_previewAction);
+    auto *previewButton = new QToolButton(commandBar);
+    previewButton->setObjectName(QStringLiteral("chooserPreviewButton"));
+    previewButton->setDefaultAction(m_previewAction);
+    previewButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    previewButton->setAutoRaise(true);
+    previewButton->setFixedSize(24, 24);
+    previewButton->setAccessibleName(tr("Preview pane"));
+    commandBar->row()->addWidget(previewButton);
     layout->addWidget(commandBar);
 
-    auto *splitter = new QSplitter;
+    auto *splitter = new Aero::PaneSplitter(Qt::Horizontal);
     splitter->setChildrenCollapsible(false);
+    splitter->setObjectName(QStringLiteral("chooserSplitter"));
+    m_places->setMinimumWidth(100);
     splitter->addWidget(m_places);
     m_stack = new QStackedWidget;
+    m_stack->setObjectName(QStringLiteral("chooserContent"));
+    m_stack->setMinimumWidth(160);
     m_stack->addWidget(m_files);
     m_stack->addWidget(m_libraries);
     m_stack->addWidget(m_computer);
     splitter->addWidget(m_stack);
+    m_preview = new PreviewPane;
+    // The splitter supplies the rule, so this pane has no second border.
+    m_preview->setStyleSheet(Aero::panelSheet(m_preview->objectName(), Aero::Palette::Surface));
+    splitter->addWidget(m_preview);
+    splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({170, 590});
+    splitter->setStretchFactor(2, 0);
+    splitter->setSizes({158, 350, 250});
+    connect(m_previewAction, &QAction::toggled, this, &FileChooserDialog::setPreviewVisible);
     layout->addWidget(splitter, 1);
 
     auto *bottom = new QWidget;
@@ -323,6 +400,7 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
         grid->addWidget(scroll, 3, 0, 1, 3);
     }
     layout->addWidget(bottom);
+    Explorer::configureChooserGlass(this, contents, navBar);
 
     m_loadingDelay = new QTimer(this);
     m_loadingDelay->setSingleShot(true);
@@ -371,6 +449,7 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
             m_name->clear();
         }
         m_selectionIntent = !items.isEmpty();
+        updatePreview();
     });
     connect(m_name, &QLineEdit::textChanged, this, [this] {
         m_selectionIntent = false;
@@ -443,12 +522,35 @@ FileChooserDialog::~FileChooserDialog()
 
 void FileChooserDialog::setVisible(bool visible)
 {
-    if (!visible) { QDialog::setVisible(false); return; }
+    if (!visible) {
+        m_preview->setItems({});
+        QDialog::setVisible(false);
+        return;
+    }
     // Scope the id to native window creation; never match the browser-only caption exception.
     const QString previous = QGuiApplication::desktopFileName();
     QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
     QDialog::setVisible(true);
     QGuiApplication::setDesktopFileName(previous);
+    updatePreview();
+}
+
+void FileChooserDialog::updatePreview()
+{
+    m_preview->setItems(isVisible() && m_preview->isVisible()
+        && m_stack->currentWidget() == m_files
+        ? m_model->itemsForIndexes(m_files->selectedIndexes()) : QList<KFileItem>{});
+}
+
+void FileChooserDialog::setPreviewVisible(bool visible)
+{
+    const bool hadFocus = m_preview->isAncestorOf(QApplication::focusWidget());
+    m_previewAction->setToolTip(visible ? tr("Hide the preview pane (Alt+P)")
+                                      : tr("Show the preview pane (Alt+P)"));
+    m_preview->setVisible(visible);
+    updatePreview();
+    if (!visible && hadFocus)
+        m_files->focusView();
 }
 
 QString FileChooserDialog::selectedFilter() const
@@ -496,9 +598,14 @@ void FileChooserDialog::navigateTo(const QUrl &url)
 void FileChooserDialog::showLocation(const QUrl &url)
 {
     showError({});
+    m_preview->setItems({});
     m_selectionIntent = false;
     m_places->setCurrentUrl(url);
     m_search->clear();
+    const auto crumbs = m_navigation->crumbsFor(url);
+    const QString caption = tr("Search %1").arg(crumbs.isEmpty() ? tr("Computer") : crumbs.last().label);
+    m_search->setPlaceholderText(caption);
+    m_search->setAccessibleName(caption);
     if (url == Locations::libraries() || url == Locations::computer()) {
         m_loadingDelay->stop();
         m_navigation->stopPathProgress();
@@ -774,6 +881,7 @@ void FileChooserDialog::done(int result)
     if (result == QDialog::Accepted && !m_validated) { accept(); return; }
     m_validated = false;
     dismissOverwrite();
+    m_preview->setItems({});
     if (result != QDialog::Accepted) m_selectedUrls.clear();
     QDialog::done(result);
 }
@@ -811,6 +919,7 @@ bool FileChooserDialog::eventFilter(QObject *watched, QEvent *event)
         const auto *key = static_cast<QKeyEvent *>(event);
         if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
             if (watched == m_search) return true;
+            if (m_preview->isAncestorOf(widget)) return true;
             auto *editor = m_navigation->pathEditor();
             if (editor && watched == editor) {
                 // A live completer must handle candidate selection itself.
@@ -833,8 +942,11 @@ bool FileChooserDialog::eventFilter(QObject *watched, QEvent *event)
 void FileChooserDialog::cycleFocus(bool backwards)
 {
     QWidget *focused = QApplication::focusWidget();
+    auto *previewText = m_preview->findChild<QPlainTextEdit *>(QStringLiteral("textPreview"));
+    QWidget *previewStop = m_preview->isVisible() && previewText && previewText->isVisible()
+        && previewText->focusPolicy() != Qt::NoFocus ? previewText : nullptr;
     QList<QWidget *> stops = {m_navigation->pathEditor(), m_search,
-        m_places->findChild<QAbstractItemView *>(), m_stack->currentWidget(), m_name, m_filters};
+        m_places->findChild<QAbstractItemView *>(), m_stack->currentWidget(), previewStop, m_name, m_filters};
     for (const auto &choice : m_options.choices)
         stops.append(m_choiceControls.value(choice.id));
     stops.append(m_buttons);

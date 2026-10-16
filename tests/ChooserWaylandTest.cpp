@@ -99,6 +99,7 @@ private Q_SLOTS:
         QTRY_VERIFY_WITH_TIMEOUT(trace().contains(".set_parent_of("), 5000);
         QVERIFY(trace().contains(m_handle.toUtf8()));
         QTRY_VERIFY_WITH_TIMEOUT(trace().contains(".set_app_id(\"linux-explorer-win7-dialog\")"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(trace().contains(".set_title(\"Open\")"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(trace().contains(".get_toplevel_decoration("), 5000);
         // KWin/Qt use xdg-dialog for real modal metadata on this native backend.
         QTRY_VERIFY_WITH_TIMEOUT(trace().contains(".set_modal("), 5000);
@@ -144,6 +145,7 @@ private Q_SLOTS:
         QTRY_VERIFY_WITH_TIMEOUT(portalTrace().contains(".set_parent_of("), 5000);
         QVERIFY(portalTrace().contains(m_handle.toUtf8()));
         QTRY_VERIFY(portalTrace().contains(".set_app_id(\"linux-explorer-win7-dialog\")"));
+        QTRY_VERIFY(portalTrace().contains(".set_title(\"Virtual portal chooser\")"));
         QTRY_VERIFY(portalTrace().contains(".get_toplevel_decoration("));
         QTRY_VERIFY(portalTrace().contains(".set_modal("));
         QVERIFY(!pending.isFinished());

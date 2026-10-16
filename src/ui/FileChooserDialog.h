@@ -12,7 +12,9 @@ class DirectoryModel;
 class FileView;
 class LibrariesView;
 class NavigationPane;
+class PreviewPane;
 class SearchBox;
+class QAction;
 class QComboBox;
 class QDialogButtonBox;
 class QLabel;
@@ -59,6 +61,8 @@ private:
     void cycleFocus(bool backwards);
     void dismissOverwrite();
     void restrictViews(QWidget *container);
+    void updatePreview();
+    void setPreviewVisible(bool visible);
 
     ChooserOptions m_options;
     QList<QUrl> m_selectedUrls;
@@ -72,6 +76,8 @@ private:
     LibrariesView *m_libraries;
     ComputerView *m_computer;
     QStackedWidget *m_stack;
+    PreviewPane *m_preview;
+    QAction *m_previewAction;
     SearchBox *m_search;
     QLineEdit *m_name;
     QComboBox *m_filters;

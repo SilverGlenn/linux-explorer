@@ -1,5 +1,7 @@
 #include "ChooserWindow.h"
 
+#include <AeroQt/insetwindow.h>
+
 #include <KStartupInfo>
 #include <KWindowSystem>
 #include <QDialog>
@@ -17,6 +19,16 @@ bool hasControl(const QString &value)
     return false;
 }
 } // namespace
+
+void Explorer::configureChooserGlass(QDialog *dialog, QWidget *contents, QWidget *navigation)
+{
+    // Use the same frame inset as the browser. AeroQt owns the top geometry,
+    // contents margins, transparency and blur lifecycle; the QDialog continues
+    // to own its native decoration and presentation metadata.
+    dialog->setAttribute(Qt::WA_TranslucentBackground, true);
+    dialog->setAttribute(Qt::WA_NoSystemBackground, true);
+    Aero::makeInsetWindow(dialog, contents, navigation, nullptr);
+}
 
 QString Explorer::validateChooserWindowOptions(const ChooserWindowOptions &options)
 {

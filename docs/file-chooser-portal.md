@@ -4,6 +4,10 @@ This backend reuses the real Explorer chooser, navigation, models and file views
 It does not contain another browser, replace KDE's other portal services, or make
 all applications use portals. GDebi7 source is unchanged.
 
+The shared chooser retains its titled native frame, Aero navigation, folder-named
+search and split view control. Its preview pane is on by default; the preview
+button or Alt+P toggles it. It has no adjacent Help button.
+
 ## Build and user-local installation
 
 The normal Explorer dependencies still apply. The frontend runtime is

@@ -14,6 +14,12 @@ filesystem acceptance checks. Protocol adapters validate their own wire formats
 before constructing trusted options; the portal additionally uses folder/multiple,
 choice and batch-save capabilities of that same UI.
 
+The chooser keeps its native titled dialog frame and uses Explorer's Aero
+navigation strip. Search names the current folder. The split view button cycles
+views or opens the view menu; the preview pane starts visible and can be toggled
+with its toolbar button or Alt+P. Preview uses the existing read-only text, PDF,
+and thumbnail handlers. Pane dividers remain draggable without a visible grip.
+
 ## Build, install, activate
 
 Use the same dependencies and user-local prefix as Explorer:

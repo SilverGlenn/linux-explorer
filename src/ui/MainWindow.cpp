@@ -26,6 +26,7 @@
 #include "Settings.h"
 #include "aero/arrows.h"
 #include "aero/buttons.h"
+#include "aero/splitter.h"
 #include "aero/strips.h"
 #include "aero/text.h"
 #include "aero/artwork.h"
@@ -1273,9 +1274,8 @@ QString MainWindow::unmountedDrivesNotice(int hidden)
 
 QWidget *MainWindow::buildBody()
 {
-    m_splitter = new QSplitter(Qt::Horizontal);
+    m_splitter = new Aero::PaneSplitter(Qt::Horizontal);
     m_splitter->setChildrenCollapsible(false);
-    m_splitter->setHandleWidth(1);
 
     m_splitter->addWidget(m_places);
 
@@ -1380,6 +1380,9 @@ QWidget *MainWindow::buildBody()
     // In the splitter rather than floating over the list, so its edge resizes
     // the file list as the navigation pane's does
     m_previewPane = new PreviewPane;
+    // The splitter supplies the pane rule; avoid doubling it with the
+    // preview's standalone left border.
+    m_previewPane->setStyleSheet(Aero::panelSheet(m_previewPane->objectName(), Aero::Palette::Surface));
     m_previewPane->hide();
     m_splitter->addWidget(m_previewPane);
 
