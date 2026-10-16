@@ -5,12 +5,16 @@
 #include <QTextStream>
 #include <QStringList>
 #include <QUrl>
+#include <utility>
 #include "FileManagerService.h"
 #include "MainWindow.h"
 #include "ApplicationAppearance.h"
 #include "aero/icons.h"
 #include "Locations.h"
 #include "GoogleDriveService.h"
+#include "GoogleDriveConnection.h"
+#include "GoogleDriveSyncController.h"
+#include <QTimer>
 #include <KFilePlacesModel>
 
 // Bare paths are accepted alongside locations, an argument from a shell being
@@ -124,6 +128,38 @@ int main(int argc, char *argv[]) {
     // window, which would be a process the user cannot see or quit
     if (MainWindow::openWindowCount() == 0)
         MainWindow::openWindow(Locations::libraries(), {}, startupId);
+
+    // Ordinary Explorer startup only: chooser/portal observers remain passive.
+    // Local windows paint before any asynchronous saved-account work begins.
+    QTimer::singleShot(0, &app, [&app] {
+        auto *connection = GoogleDriveConnection::sharedConnection();
+        auto *sync = GoogleDriveSyncController::sharedController();
+        connection->setSyncLifecycleHooks(
+            [sync](bool signOut, GoogleDriveConnection::LifecycleCompletion completion) {
+                sync->prepareDisconnect(signOut, std::move(completion));
+            },
+            [sync](GoogleDriveConnection::LifecycleCompletion completion) {
+                sync->clearLocalAccount(std::move(completion));
+            });
+        QObject::connect(connection, &GoogleDriveConnection::stateChanged, &app,
+            [connection, sync](GoogleDriveConnection::ConnectionState state) {
+                if (state == GoogleDriveConnection::ConnectionState::Connected
+                    && connection->autoReconnectEnabled()
+                    && !connection->autoReconnectSuppressed())
+                    sync->restoreWorker();
+            });
+        QObject::connect(connection, &GoogleDriveConnection::connected, &app,
+            [connection, sync](const QUrl &) {
+                // Explicit Connect clears suspension after mount observation.
+                // It should resume saved sync even if startup reconnect is off.
+                if (!connection->autoReconnectSuppressed())
+                    sync->restoreWorker(true);
+            });
+        connection->reconnectSavedDrive();
+        if (connection->isConnected() && connection->autoReconnectEnabled()
+            && !connection->autoReconnectSuppressed())
+            sync->restoreWorker();
+    });
 
     return app.exec();
 }

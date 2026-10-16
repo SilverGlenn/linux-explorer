@@ -26,11 +26,25 @@ approved the application.
   entered in the system browser; Explorer never asks for the Google password.
 - The desktop credential wallet remembers the account. It may request its normal
   unlock/permission confirmation. There is no separate Drive encryption password.
+- **Reconnect Google Drive when Explorer opens** is enabled by default. Ordinary
+  Explorer startup schedules a saved-account-only connection after its windows
+  paint. It reuses a verified existing mount without reading credentials, never
+  opens OAuth or a wallet unlock prompt, and retries temporary mount failures at
+  most three times. Missing/locked credentials are reported in the connection
+  dialog. **Disconnect** suspends automatic reconnection until a successful
+  explicit Connect or the reconnect setting is enabled again. Sign out also
+  suspends it. Chooser and portal processes remain passive.
 - A successful read-only mount appears as **Google Drive (G:)** under Computer's
-  Hard Disk Drives and in the Computer sidebar, using the existing drive artwork
-  with Google's official Drive logo in the corner. The entry tracks verified mount
+  Hard Disk Drives and in the Computer sidebar, using the supplied Windows 7 silver-drive artwork
+  with Google's official Drive logo in the corner, independent of the system icon theme. The entry tracks verified mount
   state without reading the remote filesystem or opening the credential wallet.
-  Remote capacity stays unknown rather than displaying host-disk capacity.
+  The storage bar and free-space text use the connected rclone filesystem’s
+  remote quota, matching the Local Disk tile. A bounded background helper checks
+  the kernel mount ID before and after querying the opened mount descriptor; it
+  never reads credentials or files. Unavailable quota and rclone’s fabricated
+  1 PiB defaults leave capacity unknown rather than displaying host-disk figures.
+  Refresh updates the figures, and mount replacement discards stale results.
+  Local Disk (C:) stays first on Computer for every sort order and in the sidebar.
   **Show in Network** is an optional additional shortcut; a saved shortcut is reused
   when reconnecting. Old `gdrive:/` and account-root Network entry points open the
   current managed Drive. Provider descendant URLs and opaque file IDs are never
@@ -50,11 +64,104 @@ approved the application.
   browser may survive cancellation; an in-flight secure wallet write is allowed
   to finish without mounting or bookmarking. Other Explorer windows remain usable.
 
-The initial integration requests only `drive.readonly` and mounts read-only.
+Browsing requests only `drive.readonly` and mounts read-only.
 Browsing, downloading, and copying to a local folder are supported. Upload,
 rename, deletion, and saving into Drive are disabled. Google-native documents use
 rclone export formats and need separate live compatibility checks; some applications
-can see their size as zero. There is no offline synchronization or login autostart.
+can see their size as zero. Content caching on the streamed mount remains disabled.
+There is no Linux-login autostart. Selected-folder synchronization is a separate,
+explicitly authorized feature described below.
+
+## Selected-folder two-way synchronization
+
+Choose **Tools → Google Drive synchronization... → Add folder**. First choose
+**Allow changes in Google Drive...**, and authorize the same Google account used
+for G: in the system browser. Select one ordinary folder inside My Drive and an
+existing empty folder inside your home directory. **Preview initial copy** shows
+the remote file count and space required; **Start synchronization** establishes
+the first cloud-to-local copy and then enables updates in both directions. The
+first version supports up to eight non-overlapping pairs and 20,000 items per
+selected folder. The whole My Drive root, shared drives, Google-native documents,
+shortcuts, duplicate names, symbolic/hard links and special files are rejected
+with an explanation. Office documents, photos and other ordinary files are
+supported. The local folder remains an ordinary directory, available offline.
+
+Folder previews and recovery reviews share a two-minute inspection deadline,
+including ancestry, listing pages, network retries and local review hashing.
+Explorer waits beyond the worker's response deadline, shows a useful error if a
+check fails, and permits a fresh preview. Back or Close cancels an owned read-only
+setup check without stopping established sync jobs. A busy status poll preserves
+the last verified worker state rather than claiming sync support disappeared.
+
+The initial destination must be empty to avoid guessing which existing version
+is authoritative. A reviewed inventory is bound to the initial operation. If the
+cloud folder changes after preview, Explorer stops before downloading and asks
+for a fresh preview. If initial preparation is interrupted, downloaded files are
+kept and the pair requires attention; remove the pair and use a new empty folder
+to restart. Removing a pair never deletes its local or cloud files.
+
+A single private worker per Linux user runs independently of Explorer windows.
+It checks established pairs every two minutes, and **Sync now** requests an
+earlier check. It resumes saved active pairs when ordinary Explorer reconnects;
+opening a chooser does not start it. Closing Explorer does not stop ongoing sync.
+**Pause**, **Resume**, **Open local folder**, and **Remove from sync** are available
+for each pair. Resume uses saved credentials; **Sign in again...** is the explicit
+recovery action for missing/expired authorization. Automatic recovery never
+launches a browser or unlocks the wallet.
+
+Conflicting edits preserve both versions using `explorer-conflict` suffixes and
+stop that pair for review. Local replacements/deletions are backed up under the
+pair's private state directory; cloud backups use a reserved `.explorer-sync-`
+folder inside the selected remote folder, with Drive trash enabled. Backup
+retention is conservative and currently has no automatic expiry, so backups also
+consume storage. Each pair has an access sentinel, a persistent trusted inventory,
+directory identity checks, deletion limits, and serialized operations. Missing
+sentinels, changed accounts/directories, ambiguous failures, or removal/rename of
+more than ten files or ten percent of the previous inventory stop the pair.
+Routine recovery never silently performs a new `--resync`. Network metadata
+failures retry automatically for established pairs; other failures retain files
+and the last trusted baseline for review.
+
+For an initialized pair needing attention, **Review...** lists the exact local
+and cloud removals and their direction. Cancel keeps the pair stopped. Explicit
+**Resume synchronization** approves only that current snapshot for one run; the
+five-minute approval is checked again immediately before writes and consumed
+before starting them. It cannot bypass account/path/access checks or the hard
+ten-file deletion limit. A changed/expired snapshot needs a fresh review. This
+also supports deleting a file in a small folder or cleaning up preserved conflict
+copies without resetting sync history. Low local/backup-disk space stops writes;
+incoming versions must fit with at least 64 MiB remaining.
+
+The runtime must be a stable **rclone 1.71.0 or newer**. Explorer first checks its
+private `~/.local/libexec/explorer-win7/rclone`, then the system executable. An old
+or development build cannot enable two-way sync. The tested private runtime for
+this installation is 1.74.2. No system rclone executable is replaced.
+
+Sync uses separate full-Drive OAuth consent, a purpose-specific secure-wallet
+record and encrypted `app-sync-rclone.conf`. The worker verifies that browse and
+sync authorizations identify the same Google account before accepting work.
+The G: filesystem remains read-only. Full Drive permission is necessary for
+general existing-folder synchronization; users still use Explorer's app-owned
+client and never create their own Cloud projects. Google revocation applies to
+the whole project: **Sign out** stops the sync worker, unmounts G:, revokes the
+application once, then removes both local authorizations/configurations.
+
+`explorer-win7-google-drive-sync` accepts a bounded startup credential envelope
+only over stdin. It forks a worker with memory-only keys and a private same-user
+Unix socket, checks peer identity, and serializes jobs under a worker lock.
+Public status/commands contain no tokens or encryption keys. File contents and
+backups are ordinary local data protected by permissions, not by the credential
+configuration's encryption. Use the operating system's disk encryption when
+encrypted local copies are required.
+
+Existing native KWallet records migrate to the canonical Secret Service record
+after a successful explicit connection, with validated records, secure writes and
+legacy deletion. Already-unlocked legacy Secret Service records can also be
+reused silently. Silent reads cannot migrate or unlock. A desktop without a
+compatible Secret Service can continue explicit wallet connections, but automatic
+reconnect may require unlocking/connecting manually. Google's External Testing
+registration also expires Drive refresh tokens after seven days; production
+publishing requires the applicable Google verification.
 
 ## Maintainer registration and release
 
@@ -63,8 +170,10 @@ publisher. It is not an onboarding step for every user. Follow Google's
 [desktop OAuth setup](https://developers.google.com/identity/protocols/oauth2/native-app)
 and [OAuth policies](https://developers.google.com/identity/protocols/oauth2/policies).
 Register a **Desktop app** client in the application's project, enable Drive API,
-use accurate Explorer branding and contact information, and configure only
-`https://www.googleapis.com/auth/drive.readonly` for this implementation.
+use accurate Explorer branding and contact information, and declare
+`https://www.googleapis.com/auth/drive.readonly` for browsing plus
+`https://www.googleapis.com/auth/drive` for optional selected-folder sync. Explorer
+requests the write scope only after the explicit synchronization consent action.
 
 That scope reads the complete existing Drive and is classified as **restricted**.
 A public release needs the applicable Google verification; a narrower `drive.file`

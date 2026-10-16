@@ -127,6 +127,41 @@ inline bool googleDriveMounted()
     return googleDriveMountedIn(data);
 }
 
+// A kernel mount ID distinguishes a replacement mount at the same path. It
+// prevents a late quota response from being applied to a newly connected Drive.
+inline QString googleDriveMountIdIn(const QByteArray &mountInfo)
+{
+    if (!googleDriveMountedIn(mountInfo))
+        return {};
+    const QString root = QDir::cleanPath(googleDriveMount().toLocalFile());
+    for (const auto &record : mountInfo.split('\n')) {
+        auto fields = record.split(' ');
+        fields.removeAll(QByteArray());
+        if (fields.size() < 6 || QDir::cleanPath(QString::fromLocal8Bit(
+                detail::decodeMountInfoField(fields.at(4)))) != root)
+            continue;
+        const QByteArray id = fields.first();
+        if (id.isEmpty() || id.size() > 20 || id.startsWith('0'))
+            return {};
+        for (char ch : id)
+            if (ch < '0' || ch > '9') return {};
+        bool valid = false;
+        const auto value = id.toULongLong(&valid);
+        return valid && value ? QString::fromLatin1(id) : QString();
+    }
+    return {};
+}
+
+inline QString googleDriveMountId()
+{
+    constexpr qint64 cap = 1024 * 1024;
+    QFile file(QStringLiteral("/proc/self/mountinfo"));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    const QByteArray data = file.read(cap);
+    return data.size() == cap ? QString() : googleDriveMountIdIn(data);
+}
+
 inline QUrl computer()
 {
     return QUrl(QStringLiteral("computer:///"));

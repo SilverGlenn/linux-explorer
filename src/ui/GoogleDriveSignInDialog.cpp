@@ -37,6 +37,15 @@ GoogleDriveSignInDialog::GoogleDriveSignInDialog(KFilePlacesModel *places,
     Aero::setPointSize(m_showInNetwork, 9);
     contentLayout()->addWidget(m_showInNetwork);
 
+    m_autoReconnect = new QCheckBox(tr("Reconnect Google Drive automatically when Explorer starts"));
+    m_autoReconnect->setObjectName(QStringLiteral("googleDriveAutoReconnect"));
+    m_autoReconnect->setAccessibleName(tr("Reconnect Google Drive automatically when Explorer starts"));
+    m_autoReconnect->setAccessibleDescription(
+        tr("Reconnects using the saved account when Explorer starts. Sign-in never opens automatically."));
+    m_autoReconnect->setChecked(m_connection->autoReconnectEnabled());
+    Aero::setPointSize(m_autoReconnect, 9);
+    contentLayout()->addWidget(m_autoReconnect);
+
     m_status = Aero::label(QString(), 9, Aero::Palette::MutedText);
     m_status->setObjectName(QStringLiteral("googleDriveSignInStatus"));
     m_status->setAccessibleDescription(tr("Google Drive sign-in status"));
@@ -85,8 +94,70 @@ GoogleDriveSignInDialog::GoogleDriveSignInDialog(KFilePlacesModel *places,
     connect(m_signOut, &QPushButton::clicked,
             this, &GoogleDriveSignInDialog::signOut);
     connect(m_cancel, &QPushButton::clicked, this, &GoogleDriveSignInDialog::reject);
+    connect(m_autoReconnect, &QCheckBox::toggled,
+            m_connection, &GoogleDriveConnection::setAutoReconnectEnabled);
     connect(m_connection, &GoogleDriveConnection::statusChanged,
-            this, &GoogleDriveSignInDialog::setStatus);
+            this, [this](const QString &message) {
+                // The shared connection may also be doing startup reconnect or
+                // work initiated by another Explorer window. Only surface its
+                // progress while this dialog owns an explicit operation.
+                if (m_operation != Operation::None && !m_rejecting)
+                    setStatus(message);
+            });
+    connect(m_connection, &GoogleDriveConnection::stateChanged,
+            this, [this](GoogleDriveConnection::ConnectionState state) {
+                if (m_rejecting || m_operation != Operation::None)
+                    return;
+                switch (state) {
+                case GoogleDriveConnection::ConnectionState::Connected:
+                    if (m_connection->isConnected()) {
+                        const QUrl mount = Locations::googleDriveMount();
+                        m_connected = true;
+                        m_canRetry = false;
+                        m_hasFailure = false;
+                        setConnectedState(mount);
+                        setStatus(tr("Google Drive is connected."));
+                    }
+                    break;
+                case GoogleDriveConnection::ConnectionState::Connecting:
+                    if (m_connection->isAutomaticReconnectInProgress())
+                        setStatus(tr("Reconnecting to Google Drive…"));
+                    break;
+                case GoogleDriveConnection::ConnectionState::Offline:
+                    m_connected = false;
+                    m_mapped.clear();
+                    m_showInNetwork->show();
+                    setStatus(tr("Google Drive is offline. Explorer will try again automatically."));
+                    break;
+                case GoogleDriveConnection::ConnectionState::WalletLocked:
+                    m_connected = false;
+                    m_mapped.clear();
+                    m_showInNetwork->show();
+                    setStatus(tr("Unlock your desktop account store to reconnect to Google Drive."));
+                    break;
+                case GoogleDriveConnection::ConnectionState::SignInRequired:
+                    m_connected = false;
+                    m_mapped.clear();
+                    m_canRetry = true;
+                    m_showInNetwork->show();
+                    setStatus(tr("Sign in again to reconnect to Google Drive."));
+                    break;
+                case GoogleDriveConnection::ConnectionState::Unavailable:
+                    m_connected = false;
+                    m_mapped.clear();
+                    setStatus(m_connection->unavailableReason());
+                    break;
+                case GoogleDriveConnection::ConnectionState::Disconnected:
+                    if (!m_connection->isConnected()) {
+                        m_connected = false;
+                        m_mapped.clear();
+                        m_showInNetwork->show();
+                        setStatus(tr("Google Drive is disconnected. Sign in with Google to connect again."));
+                    }
+                    break;
+                }
+                updateControls();
+            });
     connect(m_connection, &GoogleDriveConnection::connected,
             this, &GoogleDriveSignInDialog::connected);
     connect(m_connection, &GoogleDriveConnection::failed,
@@ -96,7 +167,8 @@ GoogleDriveSignInDialog::GoogleDriveSignInDialog(KFilePlacesModel *places,
     connect(m_connection, &GoogleDriveConnection::signedOut,
             this, &GoogleDriveSignInDialog::signedOut);
 
-    setTabOrder(m_showInNetwork, m_signIn);
+    setTabOrder(m_showInNetwork, m_autoReconnect);
+    setTabOrder(m_autoReconnect, m_signIn);
     setTabOrder(m_signIn, m_signInAgain);
     setTabOrder(m_signInAgain, m_open);
     setTabOrder(m_open, m_disconnect);
@@ -141,6 +213,7 @@ void GoogleDriveSignInDialog::signIn()
     m_canRetry = false;
     m_hasFailure = false;
     m_signOutCompleted = false;
+    m_signOutWarningPending = false;
     setStatus(tr("Connecting to Google Drive…"));
     updateControls();
     m_connection->connectDrive();
@@ -154,6 +227,7 @@ void GoogleDriveSignInDialog::retrySignIn()
     m_canRetry = false;
     m_hasFailure = false;
     m_signOutCompleted = false;
+    m_signOutWarningPending = false;
     setStatus(tr("Waiting for Google sign-in…"));
     updateControls();
     m_connection->signInAgain();
@@ -176,6 +250,7 @@ void GoogleDriveSignInDialog::signOut()
     m_operation = Operation::SignOut;
     m_hasFailure = false;
     m_signOutCompleted = false;
+    m_signOutWarningPending = true;
     setStatus(tr("Signing out of Google Drive…"));
     updateControls();
     m_connection->signOut();
@@ -185,13 +260,29 @@ void GoogleDriveSignInDialog::connected(const QUrl &url)
 {
     if (m_rejecting)
         return;
-    m_operation = Operation::None;
     const QUrl expectedMount = Locations::googleDriveMount();
     if (!url.isValid() || url.isEmpty() || !url.isLocalFile()
         || url != expectedMount) {
-        failed(tr("Google Drive returned an invalid mounted location."));
+        if (m_operation == Operation::Connect || m_operation == Operation::Retry)
+            failed(tr("Google Drive returned an invalid mounted location."));
         return;
     }
+
+    const bool ownsConnect = m_operation == Operation::Connect
+        || m_operation == Operation::Retry;
+    if (!ownsConnect) {
+        // A shared startup reconnect (or another window's Connect) can update
+        // this dialog, but it must never accept it or create a Network place.
+        m_connected = m_connection->isConnected();
+        if (m_connected) {
+            setConnectedState(url);
+            setStatus(tr("Google Drive is connected."));
+        }
+        updateControls();
+        return;
+    }
+
+    m_operation = Operation::None;
     m_hasFailure = false;
     setConnectedState(url);
     setStatus(tr("Google Drive is connected."));
@@ -218,7 +309,14 @@ void GoogleDriveSignInDialog::failed(const QString &message)
 {
     if (m_rejecting)
         return;
+    const bool ownedOperation = m_operation == Operation::Connect || m_operation == Operation::Retry
+        || m_operation == Operation::Disconnect || m_operation == Operation::SignOut;
+    const bool pendingSignOutWarning = m_operation == Operation::None
+        && m_signOutWarningPending;
+    if (!ownedOperation && !pendingSignOutWarning)
+        return;
     m_operation = Operation::None;
+    m_signOutWarningPending = false;
     m_canRetry = !m_signOutCompleted;
     m_hasFailure = true;
     m_signInAgain->show();
@@ -298,7 +396,9 @@ void GoogleDriveSignInDialog::updateControls()
     m_signIn->setVisible(!hasConnection && !m_canRetry);
     m_signInAgain->setVisible(!hasConnection && m_canRetry);
     m_showInNetwork->setVisible(!hasConnection);
-    const bool busy = m_operation != Operation::None;
+    m_autoReconnect->setVisible(m_available);
+    const bool busy = m_operation != Operation::None
+        || m_connection->isAutomaticReconnectInProgress();
     m_signIn->setEnabled(m_available && !busy && !hasConnection);
     m_signInAgain->setEnabled(m_available && !busy && !hasConnection);
     m_open->setEnabled(hasConnection && !busy && m_mapped.isValid() && !m_mapped.isEmpty());

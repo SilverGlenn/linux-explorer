@@ -17,7 +17,8 @@ class GoogleDriveConnection;
 // There is no KIO worker that can list a machine's drives, so this is a table
 // built from the devices the places model tracks and the connected managed
 // cloud drive. Local free space is filled in afterwards by a job per row since
-// querying can block on a dead mount; cloud quota remains unknown.
+// querying can block on a dead mount. Cloud quota arrives through the managed
+// connection's asynchronous backend.
 class ComputerModel : public QAbstractTableModel {
     Q_OBJECT
 
@@ -83,6 +84,7 @@ protected:
     virtual void queryFreeSpace(const QUrl &url);
 
 private:
+    friend class GoogleDriveComputerTest;
     struct Device {
         QString name;
         QString type;
@@ -113,10 +115,13 @@ private:
     };
 
     void rebuild();
+    void updateGoogleDriveQuota();
+    void readGoogleDriveQuota(Device &drive) const;
     void applySort(QList<Device> &devices) const;
 
     KFilePlacesModel *m_places = nullptr;
     QPointer<GoogleDriveConnection> m_driveConnection;
+    bool m_googleQuotaRequested = false;
     QList<Device> m_devices;
     int m_unmountedCount = 0;
     SortKey m_sortKey = SortByName;

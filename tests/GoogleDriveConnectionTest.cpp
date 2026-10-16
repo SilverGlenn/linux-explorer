@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QProcess>
 #include <QSignalSpy>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -27,6 +28,8 @@ public:
     QByteArray record;
     bool delayWrite = false;
     int reads = 0;
+    int silentReads = 0;
+    Result silentResult = Result::Success;
     int writes = 0;
     int removes = 0;
     Completion pendingWrite;
@@ -46,6 +49,13 @@ public:
         pendingWrite = completion;
         if (!delayWrite)
             QTimer::singleShot(0, this, [this] { finishWrite(); });
+    }
+    void readSilently(Completion completion) override
+    {
+        ++silentReads;
+        const auto snapshot = record;
+        const auto result = snapshot.isEmpty() && silentResult == Result::Success ? Result::Missing : silentResult;
+        QTimer::singleShot(0, this, [completion, snapshot, result] { completion(result, snapshot); });
     }
     void finishWrite()
     {
@@ -155,10 +165,50 @@ public:
     bool isConnected() const override { return mounted; }
 };
 
+class QuotaFixtureConnection final : public GoogleDriveConnection
+{
+public:
+    QString mountId = QStringLiteral("41");
+    bool isConnected() const override { return !mountId.isEmpty(); }
+    void connectDrive() override { ++authenticationRequests; }
+    void signInAgain() override { ++authenticationRequests; }
+    int authenticationRequests = 0;
+protected:
+    QString storageMountId() const override { return mountId; }
+};
+
 bool writeFile(const QString &path, const QByteArray &value)
 {
     QFile file(path);
     return file.open(QIODevice::WriteOnly) && file.write(value) == value.size();
+}
+
+QString quotaHelper(QTemporaryDir &directory, const QByteArray &response, double delay = 0)
+{
+    const QString path = directory.filePath(QStringLiteral("quota-helper.py"));
+    const QString python = QStandardPaths::findExecutable(QStringLiteral("python3"));
+    const QByteArray source = "#!" + python.toUtf8() + R"PY(
+import base64, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+assert sys.argv[1:] == ['app-quota']
+assert sys.stdin.buffer.read() == b''
+with (root / 'calls').open('a') as calls:
+    calls.write('quota\n')
+(root / 'started').touch()
+)PY" + "time.sleep(" + QByteArray::number(delay) + ")\n" +
+        "sys.stdout.buffer.write(base64.b64decode('" + response.toBase64() + "'))\n";
+    if (python.isEmpty() || !writeFile(path, source)
+        || !QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner))
+        return {};
+    return path;
+}
+
+QByteArray quotaResponse(const QString &id = QStringLiteral("41"),
+                        const QString &available = QStringLiteral("12884901888"))
+{
+    return QJsonDocument(QJsonObject{{QStringLiteral("mount_id"), id},
+        {QStringLiteral("total"), QStringLiteral("16106127360")},
+        {QStringLiteral("available"), available}}).toJson(QJsonDocument::Compact);
 }
 
 class HelperFixture
@@ -208,6 +258,8 @@ if command == 'app-export-token':
         expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()
         print(json.dumps({'access_token': 'fixture-access-token', 'refresh_token': 'fixture-refresh-token',
                          'token_type': 'Bearer', 'expiry': expiry}))
+elif command == 'app-connect' and (root / 'mode').read_text() == 'slow-connect':
+    time.sleep(0.3)
 elif command == 'app-forget':
     (root / 'forgot').touch()
 elif command not in ('disconnect', 'app-connect'):
@@ -298,6 +350,379 @@ private:
         }
     }
 private slots:
+    void disconnectWaitsForSyncStopBeforeUnmount()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("success"));
+        FixtureConnection connection;
+        connection.m_helperOverride = helper.script();
+        GoogleDriveConnection::LifecycleCompletion stopped;
+        connection.setSyncLifecycleHooks([&stopped](bool signOut, auto completion) {
+            QVERIFY(!signOut);
+            stopped = std::move(completion);
+        }, {});
+        connection.disconnectDrive();
+        QVERIFY(bool(stopped));
+        QVERIFY(connection.m_operationLock);
+        QVERIFY(helper.calls().isEmpty());
+        stopped(true, {});
+        stopped = {};
+        QTRY_COMPARE(connection.m_operation, GoogleDriveConnection::Operation::None);
+        QCOMPARE(helper.commands(), QStringList{QStringLiteral("disconnect")});
+    }
+    void failedSyncStopPreservesMountAndPreventsUnmount()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("success"));
+        FixtureConnection connection;
+        connection.mounted = true;
+        connection.m_helperOverride = helper.script();
+        connection.setSyncLifecycleHooks([](bool, auto completion) {
+            completion(false, QStringLiteral("Fixture sync worker could not stop"));
+        }, {});
+        QSignalSpy errors(&connection, &GoogleDriveConnection::failed);
+        connection.disconnectDrive();
+        QCOMPARE(errors.size(), 1);
+        QVERIFY(connection.isConnected());
+        QVERIFY(helper.calls().isEmpty());
+        QVERIFY(connection.autoReconnectSuppressed());
+    }
+    void signOutWaitsForLocalSyncCleanupBeforeDeclaringCompletion()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("success"));
+        FixtureStore store;
+        store.record = fixtureRecord();
+        QUrl browser;
+        GoogleDriveAuth auth(fixtureClient(), fixtureDependencies(&store, &browser));
+        FixtureConnection connection;
+        inject(connection, auth, helper.script());
+        GoogleDriveConnection::LifecycleCompletion cleaned;
+        int prepares = 0;
+        connection.setSyncLifecycleHooks([&prepares](bool signOut, auto completion) {
+            QVERIFY(signOut);
+            ++prepares;
+            completion(true, {});
+        }, [&cleaned](auto completion) { cleaned = std::move(completion); });
+        QSignalSpy signedOut(&connection, &GoogleDriveConnection::signedOut);
+        connection.signOut();
+        QTRY_VERIFY(bool(cleaned));
+        QCOMPARE(prepares, 1);
+        QCOMPARE(helper.commands(), QStringList({QStringLiteral("disconnect"), QStringLiteral("app-export-token")}));
+        QCOMPARE(signedOut.size(), 0);
+        QVERIFY(connection.m_operationLock);
+        cleaned(true, {});
+        cleaned = {};
+        QTRY_COMPARE(signedOut.size(), 1);
+        QCOMPARE(helper.commands().last(), QStringLiteral("app-forget"));
+        QVERIFY(store.record.isEmpty());
+    }
+    void init()
+    {
+        QCoreApplication::setOrganizationName(QStringLiteral("explorer-reconnect-tests"));
+        QSettings().remove(QStringLiteral("GoogleDrive"));
+    }
+    void automaticReconnectReusesMountWithoutWalletOrNavigation()
+    {
+        FixtureStore store;
+        QUrl browser;
+        GoogleDriveAuth auth(fixtureClient(), fixtureDependencies(&store, &browser));
+        FixtureConnection connection;
+        connection.mounted = true;
+        inject(connection, auth, {});
+        QSignalSpy connected(&connection, &GoogleDriveConnection::connected);
+        connection.reconnectSavedDrive();
+        QCOMPARE(connection.connectionState(), GoogleDriveConnection::ConnectionState::Connected);
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 0);
+        QVERIFY(browser.isEmpty());
+        QCOMPARE(connected.size(), 0);
+    }
+    void automaticReconnectMissingConfigNeverReadsWallet()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("success"));
+        FixtureStore store;
+        QUrl browser;
+        GoogleDriveAuth auth(fixtureClient(), fixtureDependencies(&store, &browser));
+        FixtureConnection connection;
+        inject(connection, auth, helper.script());
+        connection.m_appConfigOverride = helper.marker(QStringLiteral("missing-config"));
+        connection.reconnectSavedDrive();
+        QCOMPARE(connection.connectionState(), GoogleDriveConnection::ConnectionState::SignInRequired);
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 0);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(helper.calls().isEmpty());
+    }
+    void automaticReconnectLockedWalletStopsWithoutPromptsOrRetries()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("success"));
+        FixtureStore store;
+        store.record = fixtureRecord();
+        store.silentResult = GoogleDriveCredentialStore::Result::InteractionRequired;
+        QUrl browser;
+        GoogleDriveAuth auth(fixtureClient(), fixtureDependencies(&store, &browser));
+        FixtureConnection connection;
+        inject(connection, auth, helper.script());
+        connection.m_appConfigOverride = helper.marker(QStringLiteral("saved-config"));
+        QVERIFY(writeFile(connection.m_appConfigOverride, "encrypted fixture"));
+        QSignalSpy errors(&connection, &GoogleDriveConnection::failed);
+        connection.reconnectSavedDrive();
+        QTRY_COMPARE(connection.connectionState(), GoogleDriveConnection::ConnectionState::WalletLocked);
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 1);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(helper.calls().isEmpty());
+        QVERIFY(!connection.m_reconnectTimer->isActive());
+        QCOMPARE(errors.size(), 0);
+    }
+    void automaticReconnectSuccessDoesNotEmitInteractiveSuccess()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("slow-connect"));
+        FixtureStore store;
+        store.record = fixtureRecord();
+        QUrl browser;
+        GoogleDriveAuth auth(fixtureClient(), fixtureDependencies(&store, &browser));
+        FixtureConnection connection;
+        inject(connection, auth, helper.script());
+        connection.m_appConfigOverride = helper.marker(QStringLiteral("saved-config"));
+        QVERIFY(writeFile(connection.m_appConfigOverride, "encrypted fixture"));
+        QSignalSpy connected(&connection, &GoogleDriveConnection::connected);
+        connection.reconnectSavedDrive();
+        QTRY_COMPARE(helper.commands().size(), 1);
+        connection.mounted = true;
+        QTRY_COMPARE(connection.m_operation, GoogleDriveConnection::Operation::None);
+        QCOMPARE(connection.connectionState(), GoogleDriveConnection::ConnectionState::Connected);
+        QCOMPARE(connected.size(), 0);
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 1);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(helper.calls().first().value(QStringLiteral("token_null")).toBool());
+    }
+    void manualDisconnectSuppressesStartupAcrossControllers()
+    {
+        HelperFixture helper;
+        QVERIFY(helper.create("success"));
+        FixtureConnection connection;
+        connection.m_helperOverride = helper.script();
+        connection.disconnectDrive();
+        QTRY_COMPARE(connection.m_operation, GoogleDriveConnection::Operation::None);
+        FixtureConnection next;
+        QVERIFY(next.autoReconnectSuppressed());
+        next.reconnectSavedDrive();
+        QVERIFY(!next.m_auth);
+        QVERIFY(!next.m_process);
+        next.setAutoReconnectEnabled(true);
+        QVERIFY(!next.autoReconnectSuppressed());
+    }
+    void automaticRetryBudgetIsBoundedAndPreferenceStopsRetry()
+    {
+        FixtureConnection connection;
+        connection.m_reconnectAttempts = 1;
+        connection.scheduleReconnectRetry();
+        QVERIFY(connection.m_reconnectTimer->isActive());
+        connection.setAutoReconnectEnabled(false);
+        QVERIFY(!connection.m_reconnectTimer->isActive());
+        QVERIFY(!connection.autoReconnectEnabled());
+        connection.setAutoReconnectEnabled(true);
+        connection.m_reconnectAttempts = 3;
+        connection.scheduleReconnectRetry();
+        QVERIFY(!connection.m_reconnectTimer->isActive());
+    }
+    void connectedDriveQuotaSmokeTest()
+    {
+        if (!qEnvironmentVariableIsSet("EXPLORER_LIVE_DRIVE_QUOTA"))
+            QSKIP("Opt-in capacity-only check of an already connected Drive.");
+        GoogleDriveConnection connection;
+        QVERIFY(connection.isConnected());
+        connection.refreshStorageQuota(true);
+        QTRY_VERIFY_WITH_TIMEOUT(connection.hasStorageQuota(), 15000);
+        QVERIFY(connection.storageTotalBytes() > 0);
+        QVERIFY(connection.storageAvailableBytes() <= connection.storageTotalBytes());
+        QVERIFY(!connection.m_auth);
+        QVERIFY(!connection.m_operationLock);
+        const QString output = qEnvironmentVariable("EXPLORER_QUOTA_REPORT");
+        if (!output.isEmpty()) {
+            QVERIFY(writeFile(output, QJsonDocument(QJsonObject{
+                {QStringLiteral("total"), QString::number(connection.storageTotalBytes())},
+                {QStringLiteral("available"), QString::number(connection.storageAvailableBytes())},
+                {QStringLiteral("credential_access"), false}}).toJson()));
+        }
+    }
+
+    void storageQuotaIsBoundedCachedAndNeverAuthorizes()
+    {
+        QTemporaryDir directory;
+        QuotaFixtureConnection connection;
+        connection.m_helperOverride = quotaHelper(directory, quotaResponse());
+        QVERIFY(!connection.m_helperOverride.isEmpty());
+        QSignalSpy changes(&connection, &GoogleDriveConnection::storageQuotaChanged);
+        QSignalSpy errors(&connection, &GoogleDriveConnection::failed);
+        connection.refreshStorageQuota();
+        auto *pending = connection.m_quotaProcess.data();
+        connection.refreshStorageQuota(true);
+        QCOMPARE(connection.m_quotaProcess.data(), pending);
+        QTRY_VERIFY(connection.hasStorageQuota());
+        QCOMPARE(connection.storageTotalBytes(), 16106127360ULL);
+        QCOMPARE(connection.storageAvailableBytes(), 12884901888ULL);
+        QCOMPARE(changes.size(), 1);
+        connection.refreshStorageQuota();
+        QVERIFY(!connection.m_quotaProcess);
+        connection.refreshStorageQuota(true);
+        QTRY_VERIFY(!connection.m_quotaProcess);
+        QCOMPARE(changes.size(), 1); // unchanged figures do not reset views
+        QFile calls(directory.filePath(QStringLiteral("calls")));
+        QVERIFY(calls.open(QIODevice::ReadOnly));
+        QCOMPARE(calls.readAll(), QByteArray("quota\nquota\n"));
+        QVERIFY(!connection.m_auth);
+        QVERIFY(!connection.m_operationLock);
+        QCOMPARE(connection.authenticationRequests, 0);
+        QCOMPARE(errors.size(), 0);
+    }
+
+    void storageQuotaRejectsInvalidReplies_data()
+    {
+        QTest::addColumn<QByteArray>("response");
+        QTest::newRow("wrong-mount") << quotaResponse(QStringLiteral("42"));
+        QTest::newRow("invalid-json") << QByteArray("not JSON");
+        QTest::newRow("too-large") << QByteArray(5000, 'x');
+        QTest::newRow("free-larger-than-total") << quotaResponse(QStringLiteral("41"), QStringLiteral("16106127361"));
+        QTest::newRow("negative") << quotaResponse(QStringLiteral("41"), QStringLiteral("-1"));
+        QTest::newRow("overflow") << quotaResponse(QStringLiteral("41"), QStringLiteral("18446744073709551616"));
+        QTest::newRow("fraction") << quotaResponse(QStringLiteral("41"), QStringLiteral("1.5"));
+        QTest::newRow("leading-zero") << quotaResponse(QStringLiteral("41"), QStringLiteral("0123"));
+        QTest::newRow("non-ascii") << quotaResponse(QStringLiteral("41"), QString::fromUtf8("１２３"));
+        for (const QString &field : {QStringLiteral("total"), QStringLiteral("available")}) {
+            auto object = QJsonDocument::fromJson(quotaResponse()).object();
+            object[field] = QString::number(quint64(1) << 50);
+            QTest::newRow(qPrintable(QStringLiteral("fabricated-") + field)) << QJsonDocument(object).toJson();
+        }
+        auto object = QJsonDocument::fromJson(quotaResponse()).object();
+        object[QStringLiteral("total")] = QStringLiteral("0");
+        QTest::newRow("zero-total") << QJsonDocument(object).toJson();
+        object = QJsonDocument::fromJson(quotaResponse()).object();
+        object[QStringLiteral("total")] = 16106127360.0;
+        QTest::newRow("numeric-instead-of-decimal-string") << QJsonDocument(object).toJson();
+        object[QStringLiteral("extra")] = QStringLiteral("unexpected");
+        QTest::newRow("extra-fields") << QJsonDocument(object).toJson();
+    }
+
+    void storageQuotaRejectsInvalidReplies()
+    {
+        QFETCH(QByteArray, response);
+        QTemporaryDir directory;
+        QuotaFixtureConnection connection;
+        connection.m_helperOverride = quotaHelper(directory, response);
+        QVERIFY(!connection.m_helperOverride.isEmpty());
+        connection.refreshStorageQuota();
+        QTRY_VERIFY(!connection.m_quotaProcess);
+        QVERIFY(!connection.hasStorageQuota());
+        QCOMPARE(connection.storageTotalBytes(), 0ULL);
+        QVERIFY(connection.m_quotaOutput.isEmpty());
+        connection.refreshStorageQuota(); // failed requests are throttled too
+        QVERIFY(!connection.m_quotaProcess);
+        QVERIFY(!connection.m_auth);
+    }
+
+    void storageQuotaDiscardedOnMountReplacementAndOffline()
+    {
+        QTemporaryDir directory;
+        QuotaFixtureConnection connection;
+        connection.m_helperOverride = quotaHelper(directory, quotaResponse(), .2);
+        QVERIFY(!connection.m_helperOverride.isEmpty());
+        connection.refreshMountState();
+        connection.refreshStorageQuota();
+        QTRY_VERIFY(QFile::exists(directory.filePath(QStringLiteral("started"))));
+        connection.mountId = QStringLiteral("42");
+        QTRY_VERIFY(!connection.m_quotaProcess);
+        QVERIFY(!connection.hasStorageQuota());
+        connection.m_helperOverride = quotaHelper(directory, quotaResponse(QStringLiteral("42"), QStringLiteral("0")));
+        connection.refreshStorageQuota(true);
+        QTRY_VERIFY(connection.hasStorageQuota());
+        QCOMPARE(connection.storageAvailableBytes(), 0ULL); // a full account is valid
+        connection.refreshMountState();
+        QVERIFY(!connection.hasStorageQuota()); // observed replacement invalidates cache
+        connection.refreshStorageQuota();
+        QTRY_VERIFY(connection.hasStorageQuota());
+        connection.mountId.clear();
+        QVERIFY(!connection.hasStorageQuota());
+        connection.refreshMountState();
+        QVERIFY(!connection.m_quotaKnown);
+        QVERIFY(!connection.m_auth);
+    }
+
+    void storageQuotaTimeoutCancelsWithoutUiErrorOrWallet()
+    {
+        QTemporaryDir directory;
+        QuotaFixtureConnection connection;
+        connection.m_helperOverride = quotaHelper(directory, quotaResponse(), 5);
+        QVERIFY(!connection.m_helperOverride.isEmpty());
+        QSignalSpy errors(&connection, &GoogleDriveConnection::failed);
+        connection.refreshStorageQuota();
+        QTRY_VERIFY(QFile::exists(directory.filePath(QStringLiteral("started"))));
+        QVERIFY(connection.m_quotaTimeout->isActive());
+        QVERIFY(QMetaObject::invokeMethod(connection.m_quotaTimeout, "timeout", Qt::DirectConnection));
+        QVERIFY(!connection.m_quotaProcess);
+        QVERIFY(!connection.hasStorageQuota());
+        QVERIFY(!connection.m_auth);
+        QCOMPARE(errors.size(), 0);
+    }
+
+    void storageQuotaWaitsForConnectionOperations()
+    {
+        using Operation = GoogleDriveConnection::Operation;
+        QuotaFixtureConnection connection;
+        for (const Operation operation : {Operation::Connect, Operation::Disconnect,
+                Operation::SignOutDisconnect, Operation::Export, Operation::Forget}) {
+            connection.m_operation = operation;
+            connection.refreshStorageQuota(true);
+            QVERIFY(!connection.m_quotaProcess);
+            QVERIFY(!connection.m_auth);
+        }
+        connection.m_operation = Operation::None;
+    }
+
+    void disconnectWaitsForQuotaProcessToReleaseItsDescriptor()
+    {
+        QTemporaryDir directory;
+        const QString python = QStandardPaths::findExecutable(QStringLiteral("python3"));
+        const QString script = directory.filePath(QStringLiteral("helper.py"));
+        QVERIFY(writeFile(script, "#!" + python.toUtf8() + R"PY(
+import os, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+if sys.argv[1] == 'app-quota':
+    (root / 'quota-pid').write_text(str(os.getpid()))
+    time.sleep(5)
+elif sys.argv[1] == 'disconnect':
+    try:
+        os.kill(int((root / 'quota-pid').read_text()), 0)
+        result = 'still-open'
+    except ProcessLookupError:
+        result = 'closed'
+    (root / 'disconnect').write_text(result)
+)PY"));
+        QVERIFY(QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QuotaFixtureConnection connection;
+        connection.m_helperOverride = script;
+        QSignalSpy errors(&connection, &GoogleDriveConnection::failed);
+        connection.refreshStorageQuota();
+        QTRY_VERIFY(QFile::exists(directory.filePath(QStringLiteral("quota-pid"))));
+        connection.disconnectDrive();
+        QVERIFY(!connection.m_process); // unmount has not been started synchronously
+        connection.refreshStorageQuota(true);
+        QVERIFY(!connection.m_quotaProcess);
+        QTRY_VERIFY(QFile::exists(directory.filePath(QStringLiteral("disconnect"))));
+        QFile marker(directory.filePath(QStringLiteral("disconnect")));
+        QVERIFY(marker.open(QIODevice::ReadOnly));
+        QCOMPARE(marker.readAll(), QByteArray("closed"));
+        QTRY_COMPARE(connection.m_operation, GoogleDriveConnection::Operation::None);
+        QCOMPARE(errors.size(), 0);
+        QVERIFY(!connection.m_auth);
+    }
+
     void mountObservationNeverStartsAuthorization()
     {
         FixtureConnection connection;

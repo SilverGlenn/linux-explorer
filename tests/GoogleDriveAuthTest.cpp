@@ -21,9 +21,13 @@ public:
     Result writeResult = Result::Success;
     Result removeResult = Result::Success;
     int reads = 0;
+    int silentReads = 0;
+    Result silentReadResult = Result::Success;
     int writes = 0;
     int removes = 0;
     bool delayWrite = false;
+    bool migrate = false;
+    bool requiresMigration() const override { return migrate; }
     Completion pendingWrite;
     QByteArray pendingRecord;
     void read(Completion completion) override
@@ -40,6 +44,14 @@ public:
         pendingWrite = completion;
         if (!delayWrite)
             QTimer::singleShot(0, this, [this] { finishWrite(); });
+    }
+    void readSilently(Completion completion) override
+    {
+        ++silentReads;
+        const auto value = record;
+        const auto result = silentReadResult == Result::Success && value.isEmpty()
+            ? Result::Missing : silentReadResult;
+        QTimer::singleShot(0, this, [completion, result, value] { completion(result, value); });
     }
     void finishWrite()
     {
@@ -212,6 +224,222 @@ private:
         return result;
     }
 private slots:
+    void accountPurposeEnforcesSeparateScopes()
+    {
+        MemoryStore store;
+        store.record = recordWith();
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth sync(client(), dependencies(&store, &network, &browser), GoogleDriveAuth::AccountPurpose::Sync);
+        QCOMPARE(sync.authorizationScope(), GoogleDriveAuth::syncScope());
+        QSignalSpy unavailable(&sync, &GoogleDriveAuth::savedAccountUnavailable);
+        sync.connectSavedAccount();
+        QTRY_COMPARE(unavailable.size(), 1);
+        QCOMPARE(unavailable.first().first().value<GoogleDriveAuth::SavedAccountResult>(), GoogleDriveAuth::SavedAccountResult::Invalid);
+        store.record = recordWith({{QStringLiteral("scope"), GoogleDriveAuth::syncScope()}});
+        QSignalSpy authorized(&sync, &GoogleDriveAuth::authorized);
+        sync.connectSavedAccount();
+        QTRY_COMPARE(authorized.size(), 1);
+        GoogleDriveAuth browse(client(), dependencies(&store, &network, &browser));
+        QCOMPARE(browse.authorizationScope(), GoogleDriveAuth::requiredScope());
+        QSignalSpy rejected(&browse, &GoogleDriveAuth::savedAccountUnavailable);
+        browse.connectSavedAccount();
+        QTRY_COMPARE(rejected.size(), 1);
+        QCOMPARE(rejected.first().first().value<GoogleDriveAuth::SavedAccountResult>(), GoogleDriveAuth::SavedAccountResult::Invalid);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+        QCOMPARE(store.writes, 0);
+    }
+    void explicitSyncConsentRequestsAndStoresOnlyFullDriveScope()
+    {
+        MemoryStore store;
+        NetworkState network;
+        network.tokenResponse = responseWithScope(GoogleDriveAuth::syncScope());
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser), GoogleDriveAuth::AccountPurpose::Sync);
+        QSignalSpy authorized(&auth, &GoogleDriveAuth::authorized);
+        auth.startSignIn();
+        QTRY_VERIFY(browser.isValid());
+        QCOMPARE(QUrlQuery(browser).queryItemValue(QStringLiteral("scope"), QUrl::FullyDecoded), GoogleDriveAuth::syncScope());
+        QVERIFY(sendCallback(callbackUrl(browser)).startsWith("HTTP/1.1 200"));
+        QTRY_COMPARE(authorized.size(), 1);
+        QCOMPARE(QJsonDocument::fromJson(store.record).object().value(QStringLiteral("scope")).toString(), GoogleDriveAuth::syncScope());
+        QCOMPARE(store.writes, 1);
+    }
+    void localForgetNeverReadsWalletOrRevokesGoogle()
+    {
+        MemoryStore store;
+        store.record = recordWith({{QStringLiteral("scope"), GoogleDriveAuth::syncScope()}});
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser), GoogleDriveAuth::AccountPurpose::Sync);
+        QSignalSpy removed(&auth, &GoogleDriveAuth::signedOutLocally);
+        auth.forgetLocalAccount();
+        QTRY_COMPARE(removed.size(), 1);
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 0);
+        QCOMPARE(store.removes, 1);
+        QVERIFY(store.record.isEmpty());
+        QVERIFY(browser.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+    }
+    void localForgetWaitsForCommittedWrite()
+    {
+        MemoryStore store;
+        store.record = recordWith();
+        store.migrate = true;
+        store.delayWrite = true;
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy authorized(&auth, &GoogleDriveAuth::authorized);
+        QSignalSpy removed(&auth, &GoogleDriveAuth::signedOutLocally);
+        auth.connectExisting();
+        QTRY_COMPARE(store.writes, 1);
+        auth.forgetLocalAccount();
+        QVERIFY(auth.isBusy());
+        QCOMPARE(store.removes, 0);
+        store.finishWrite();
+        QTRY_COMPARE(removed.size(), 1);
+        QCOMPARE(store.removes, 1);
+        QCOMPARE(authorized.size(), 0);
+        QVERIFY(store.record.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+    }
+    void signOutSupersedesQueuedForgetWithoutErasingFutureSignIn()
+    {
+        MemoryStore store;
+        store.record = recordWith();
+        store.migrate = true;
+        store.delayWrite = true;
+        NetworkState network;
+        network.tokenResponse = responseWithScope();
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy currentToken(&auth, &GoogleDriveAuth::revocationTokenRequested);
+        QSignalSpy removed(&auth, &GoogleDriveAuth::signedOutLocally);
+        QSignalSpy authorized(&auth, &GoogleDriveAuth::authorized);
+        auth.connectExisting();
+        QTRY_COMPARE(store.writes, 1);
+        auth.forgetLocalAccount();
+        auth.signOut();
+        store.finishWrite();
+        QTRY_COMPARE(currentToken.size(), 1);
+        auth.completeSignOut(QJsonDocument(sampleToken()).toJson(QJsonDocument::Compact));
+        QTRY_COMPARE(removed.size(), 1);
+        QCOMPARE(store.removes, 1);
+        store.migrate = false;
+        store.delayWrite = false;
+        auth.startSignIn();
+        QTRY_VERIFY(browser.isValid());
+        QVERIFY(sendCallback(callbackUrl(browser)).startsWith("HTTP/1.1 200"));
+        QTRY_COMPARE(authorized.size(), 1);
+        QCOMPARE(store.removes, 1);
+        QVERIFY(!store.record.isEmpty());
+    }
+    void savedOnlyReadNeverFallsBackToBrowser_data()
+    {
+        QTest::addColumn<int>("storeResult");
+        QTest::addColumn<int>("expected");
+        QTest::newRow("missing") << int(GoogleDriveCredentialStore::Result::Missing) << int(GoogleDriveAuth::SavedAccountResult::Missing);
+        QTest::newRow("locked") << int(GoogleDriveCredentialStore::Result::InteractionRequired) << int(GoogleDriveAuth::SavedAccountResult::WalletLocked);
+        QTest::newRow("unavailable") << int(GoogleDriveCredentialStore::Result::Unavailable) << int(GoogleDriveAuth::SavedAccountResult::Unavailable);
+    }
+    void savedOnlyReadNeverFallsBackToBrowser()
+    {
+        QFETCH(int, storeResult);
+        QFETCH(int, expected);
+        MemoryStore store;
+        store.silentReadResult = GoogleDriveCredentialStore::Result(storeResult);
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy unavailable(&auth, &GoogleDriveAuth::savedAccountUnavailable);
+        QSignalSpy failed(&auth, &GoogleDriveAuth::failed);
+        auth.connectSavedAccount();
+        QTRY_COMPARE(unavailable.size(), 1);
+        QCOMPARE(int(unavailable.first().first().value<GoogleDriveAuth::SavedAccountResult>()), expected);
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 1);
+        QCOMPARE(store.writes, 0);
+        QCOMPARE(store.removes, 0);
+        QCOMPARE(failed.size(), 0);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+        QVERIFY(!auth.isBusy());
+    }
+    void savedOnlySuccessUsesCanonicalTokenWithoutWalletPrompt()
+    {
+        MemoryStore store;
+        store.record = recordWith();
+        store.migrate = true; // automatic reads must never trigger migration writes
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy authorized(&auth, &GoogleDriveAuth::authorized);
+        auth.connectSavedAccount();
+        QTRY_COMPARE(authorized.size(), 1);
+        QVERIFY(authorized.first().first().toByteArray().isEmpty());
+        QCOMPARE(store.reads, 0);
+        QCOMPARE(store.silentReads, 1);
+        QCOMPARE(store.writes, 0);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+    }
+    void explicitMigrationDoesNotReplaySavedTokenAndCancellationWaitsForWrite()
+    {
+        MemoryStore store;
+        store.record = recordWith();
+        store.migrate = true;
+        store.delayWrite = true;
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy authorized(&auth, &GoogleDriveAuth::authorized);
+        auth.connectExisting();
+        QTRY_COMPARE(store.writes, 1);
+        auth.cancel();
+        QVERIFY(auth.isBusy());
+        store.finishWrite();
+        QTRY_VERIFY(!auth.isBusy());
+        QCOMPARE(authorized.size(), 0);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+        auth.connectExisting();
+        QTRY_COMPARE(store.writes, 2);
+        store.finishWrite();
+        QTRY_COMPARE(authorized.size(), 1);
+        QVERIFY(authorized.first().first().toByteArray().isEmpty());
+    }
+    void interactiveWalletSavedOnlyMissingStillDoesNotAuthorize()
+    {
+        MemoryStore store;
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy unavailable(&auth, &GoogleDriveAuth::savedAccountUnavailable);
+        auth.connectSavedAccountInteractively();
+        QTRY_COMPARE(unavailable.size(), 1);
+        QCOMPARE(store.reads, 1);
+        QCOMPARE(store.silentReads, 0);
+        QVERIFY(browser.isEmpty());
+        QVERIFY(network.requestUrls.isEmpty());
+    }
+    void savedOnlyInvalidRecordDoesNotModifyCredentials()
+    {
+        MemoryStore store;
+        store.record = "invalid saved record";
+        NetworkState network;
+        QUrl browser;
+        GoogleDriveAuth auth(client(), dependencies(&store, &network, &browser));
+        QSignalSpy unavailable(&auth, &GoogleDriveAuth::savedAccountUnavailable);
+        auth.connectSavedAccount();
+        QTRY_COMPARE(unavailable.size(), 1);
+        QCOMPARE(unavailable.first().first().value<GoogleDriveAuth::SavedAccountResult>(), GoogleDriveAuth::SavedAccountResult::Invalid);
+        QCOMPARE(store.writes, 0);
+        QCOMPARE(store.removes, 0);
+        QVERIFY(browser.isEmpty());
+    }
     void missingClientDoesNotOpenBrowserOrWallet()
     {
         MemoryStore store;

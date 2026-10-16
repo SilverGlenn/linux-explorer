@@ -5,6 +5,7 @@
 #include "aero/icons.h"
 
 #include <KFilePlacesModel>
+#include <KBookmark>
 
 #include <QApplication>
 #include <QImage>
@@ -15,6 +16,12 @@
 #include <QTest>
 #include <QTimer>
 #include <QTreeWidget>
+
+// The production pure ordering helper avoids a dependency on host Solid
+// device discovery; KFilePlacesModel::groupType/isDevice are not virtual.
+namespace NavigationPaneOrdering {
+void pinSystemDrive(QTreeWidgetItem *computer);
+}
 
 namespace {
 
@@ -88,6 +95,89 @@ private Q_SLOTS:
     {
         QSettings().remove(QStringLiteral("Navigation/Groups"));
         QSettings().remove(QStringLiteral("Navigation/FavoritesOrder"));
+    }
+
+    void actualSystemDrivePinsBeforeCloudWithoutChangingOtherItems()
+    {
+        QTreeWidgetItem computer;
+        const auto add = [&computer](const QString &name, const QUrl &url, int placeRow) {
+            auto *item = new QTreeWidgetItem(&computer);
+            item->setText(0, name);
+            item->setData(0, Qt::UserRole, url);
+            item->setData(0, Qt::UserRole + 2, placeRow);
+            return item;
+        };
+        const QUrl root = QUrl::fromLocalFile(QStringLiteral("/"));
+        const QUrl other = QUrl::fromLocalFile(QStringLiteral("/tmp/other-drive"));
+        for (bool connected : {true, false, true}) {
+            // Reconstruct as rebuild() does after mount/Places changes, with
+            // the optional cloud row first and discovered device rows after.
+            qDeleteAll(computer.takeChildren());
+            QTreeWidgetItem *cloud = connected
+                ? add(QStringLiteral("Google Drive (G:)"), Locations::googleDriveMount(), -1)
+                : nullptr;
+            auto *impostor = add(QStringLiteral("Local Disk (C:)"), other, 7);
+            auto *system = add(QStringLiteral("User renamed root disk"), root, 12);
+            auto *last = add(QStringLiteral("Last drive"), QUrl::fromLocalFile(QStringLiteral("/media/last")), 19);
+            NavigationPaneOrdering::pinSystemDrive(&computer);
+            QCOMPARE(computer.child(0), system);
+            int row = 1;
+            if (cloud) QCOMPARE(computer.child(row++), cloud);
+            QCOMPARE(computer.child(row++), impostor);
+            QCOMPARE(computer.child(row), last);
+            QCOMPARE(system->data(0, Qt::UserRole + 2).toInt(), 12);
+            QCOMPARE(impostor->data(0, Qt::UserRole + 2).toInt(), 7);
+            NavigationPaneOrdering::pinSystemDrive(&computer);
+            QCOMPARE(computer.child(0), system);
+        }
+        // A disk merely labelled C: must stay in its existing position when
+        // the exact root URL is absent.
+        delete computer.takeChild(0);
+        auto *first = computer.child(0);
+        NavigationPaneOrdering::pinSystemDrive(&computer);
+        QCOMPARE(computer.child(0), first);
+    }
+
+    void mountAndPlacesRebuildsPreserveSharedBookmarkOrder()
+    {
+        FixtureConnection connection;
+        NavigationPane pane(&connection, nullptr);
+        KFilePlacesModel *places = pane.placesModel();
+        const auto cleanup = qScopeGuard([&] { removeFixtureBookmarks(places); });
+        places->addPlace(QStringLiteral("Drive navigation fixture first"),
+                         QUrl(QStringLiteral("sftp://example.test/first")));
+        places->addPlace(QStringLiteral("Drive navigation fixture second"),
+                         QUrl(QStringLiteral("sftp://example.test/second")));
+        const auto bookmarkSnapshot = [places] {
+            QStringList rows;
+            for (int row = 0; row < places->rowCount(); ++row) {
+                const QModelIndex index = places->index(row, 0);
+                rows.append(places->url(index).toString() + QLatin1Char('|')
+                            + places->text(index) + QLatin1Char('|')
+                            + places->bookmarkForIndex(index).metaDataItem(
+                                QStringLiteral("explorerWin7Favorite")));
+            }
+            return rows;
+        };
+        const QStringList before = bookmarkSnapshot();
+        const QStringList favoriteOrder = Settings::favoritesOrder();
+        for (bool mounted : {true, false, true}) {
+            connection.setMounted(mounted);
+            pane.refresh();
+            places->refresh();
+            pane.refresh();
+            QCOMPARE(bookmarkSnapshot(), before);
+            QCOMPARE(Settings::favoritesOrder(), favoriteOrder);
+            QCOMPARE(driveRows(pane, QStringLiteral("Computer")).size(), mounted ? 1 : 0);
+            auto *computer = group(pane, QStringLiteral("Computer"));
+            for (int row = 0; row < computer->childCount(); ++row) {
+                if (computer->child(row)->data(0, Qt::UserRole).toUrl()
+                    == QUrl::fromLocalFile(QStringLiteral("/"))) {
+                    QCOMPARE(row, 0);
+                }
+            }
+        }
+        QCOMPARE(connection.accountRequests, 0);
     }
 
     void mountStateCreatesOneComputerEntryWithoutBookmark()

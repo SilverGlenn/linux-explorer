@@ -1,5 +1,10 @@
 <RCC>
     <qresource prefix="/win7">
+        <file alias="google-drive-base/drive-16.png">../../assets/images/google-drive-base/drive-16.png</file>
+        <file alias="google-drive-base/drive-24.png">../../assets/images/google-drive-base/drive-24.png</file>
+        <file alias="google-drive-base/drive-32.png">../../assets/images/google-drive-base/drive-32.png</file>
+        <file alias="google-drive-base/drive-48.png">../../assets/images/google-drive-base/drive-48.png</file>
+        <file alias="google-drive-base/drive-256.png">../../assets/images/google-drive-base/drive-256.png</file>
         <file alias="branch-closed.png">../../assets/images/branch-closed.png</file>
         <file alias="branch-closed@2x.png">../../assets/images/branch-closed@2x.png</file>
         <file alias="branch-open.png">../../assets/images/branch-open.png</file>

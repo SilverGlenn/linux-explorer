@@ -31,6 +31,7 @@ jobs:
           files: |
             dist/build/explorer-win7-x86_64
             dist/build/explorer-win7-google-drive
+            dist/build/explorer-win7-google-drive-sync
             dist/docs/google-drive.md
             dist/LICENSE
           fail_on_unmatched_files: true

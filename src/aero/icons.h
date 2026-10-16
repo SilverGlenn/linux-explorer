@@ -24,7 +24,7 @@ void setIconFallbacks(const QStringList &names);
 // to a gear or an add-window icon, which changes the Explorer affordance.
 QIcon helpIcon();
 QIcon previewPaneIcon();
-// The current desktop hard-drive artwork with an unaltered Google Drive badge.
+// Windows 7 silver hard-drive artwork with an unaltered Google Drive badge.
 QIcon googleDriveIcon();
 
 } // namespace Aero

@@ -21,6 +21,7 @@
 #include "Locations.h"
 #include "MapDriveDialog.h"
 #include "GoogleDriveSignInDialog.h"
+#include "GoogleDriveSyncDialog.h"
 #include "MountDialog.h"
 #include "OptionsDialog.h"
 #include "NavigationPane.h"
@@ -531,6 +532,8 @@ void MainWindow::buildActions()
                                  &MainWindow::showMapDriveDialog);
     m_actGoogleDrive = windowAction(tr("Connect Google Drive..."),
                                     &MainWindow::showGoogleDriveDialog);
+    m_actGoogleDriveSync = windowAction(tr("Google Drive synchronization..."),
+                                       &MainWindow::showGoogleDriveSyncDialog);
     m_actExtract = windowAction(tr("Extract All..."), &MainWindow::extractSelection);
     m_actOptions = windowAction(tr("Folder and search options"),
                                 &MainWindow::showOptionsDialog);
@@ -727,6 +730,7 @@ void MainWindow::buildMenuBar()
     tools->addAction(m_actConnectDrives);
     tools->addAction(m_actMapDrive);
     tools->addAction(m_actGoogleDrive);
+    tools->addAction(m_actGoogleDriveSync);
     tools->addSeparator();
     tools->addAction(m_actOpenTerminal);
     tools->addAction(m_actOpenAsAdmin);
@@ -1760,6 +1764,12 @@ void MainWindow::showGoogleDriveDialog()
         return;
     m_places->refresh();
     navigateTo(dialog.mappedUrl());
+}
+
+void MainWindow::showGoogleDriveSyncDialog()
+{
+    GoogleDriveSyncDialog dialog(this);
+    dialog.exec();
 }
 
 void MainWindow::setViewMode(Settings::ViewMode mode)

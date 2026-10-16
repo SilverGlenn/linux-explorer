@@ -1,11 +1,9 @@
 #include "icons.h"
 
-#include <QApplication>
 #include <QFont>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPixmap>
-#include <QStyle>
 #include <functional>
 
 namespace Aero {
@@ -74,9 +72,12 @@ QIcon previewPaneIcon()
 
 QIcon googleDriveIcon()
 {
-    QIcon base = tryIconName(QStringLiteral("drive-harddisk"));
-    if (base.isNull())
-        base = QApplication::style()->standardIcon(QStyle::SP_DriveHDIcon);
+    // Match the supplied Windows 7 silver drive reference independently of
+    // the platform theme used by previews, choosers, or another desktop.
+    QIcon base;
+    for (int side : {16, 24, 32, 48, 256})
+        base.addFile(QStringLiteral(":/win7/google-drive-base/drive-%1.png").arg(side),
+                     QSize(side, side));
     const QIcon badge(QStringLiteral(":/google/drive-logo.png"));
     QIcon icon;
     for (int side : {16, 20, 24, 32, 48, 64, 96, 128, 256}) {
@@ -84,10 +85,15 @@ QIcon googleDriveIcon()
         pixmap.fill(Qt::transparent);
         QPainter painter(&pixmap);
         base.paint(&painter, QRect(0, 0, side, side));
-        // Place, resize, and keep clear space around Google's original image;
-        // no recoloring or reconstruction of the product logo.
-        const int extent = qMax(9, qRound(side * 0.46));
-        badge.paint(&painter, QRect(side - extent, side - extent, extent, extent));
+        // Match the Windows system-drive badge on the upper-left of the drive,
+        // keeping Google's original image unaltered apart from resizing.
+        // Match the Microsoft badge's visible size in the 16px sidebar icon,
+        // allowing for the Google asset's transparent margins.
+        const int extent = side == 16 ? 12 : qMax(7, qRound(side / 3.0));
+        // The compact navigation artwork fills the canvas vertically, unlike
+        // the larger drive artwork with its transparent space above the disk.
+        const int badgeTop = side == 16 ? 0 : qRound(side / 3.0);
+        badge.paint(&painter, QRect(0, badgeTop, extent, extent));
         painter.end();
         icon.addPixmap(pixmap);
     }

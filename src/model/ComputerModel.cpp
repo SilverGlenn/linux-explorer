@@ -30,7 +30,14 @@ ComputerModel::ComputerModel(KFilePlacesModel *places, GoogleDriveConnection *dr
     connect(m_places, &QAbstractItemModel::dataChanged, this, &ComputerModel::rebuild);
     if (m_driveConnection) {
         connect(m_driveConnection, &GoogleDriveConnection::mountStateChanged,
-                this, &ComputerModel::rebuild);
+                this, [this] {
+            // A true notification can also identify a replacement kernel
+            // mount observed between polls without an intervening false.
+            m_googleQuotaRequested = false;
+            rebuild();
+        });
+        connect(m_driveConnection, &GoogleDriveConnection::storageQuotaChanged,
+                this, &ComputerModel::updateGoogleDriveQuota);
     }
 
     rebuild();
@@ -40,6 +47,9 @@ void ComputerModel::rebuild()
 {
     QList<Device> devices;
     int unmounted = 0;
+    const bool googleConnected = m_driveConnection && m_driveConnection->isConnected();
+    if (!googleConnected)
+        m_googleQuotaRequested = false;
 
     for (int row = 0; row < m_places->rowCount(); ++row) {
         const QModelIndex index = m_places->index(row, 0);
@@ -90,15 +100,14 @@ void ComputerModel::rebuild()
         devices.append(device);
     }
 
-    if (m_driveConnection && m_driveConnection->isConnected()) {
+    if (googleConnected) {
         Device drive;
         drive.name = tr("Google Drive (G:)");
         drive.type = tr("Google Drive");
         drive.fsType = tr("Google Drive");
         drive.url = Locations::googleDriveMount();
         drive.icon = Aero::googleDriveIcon();
-        // Remote quota is unknown. statfs on this FUSE mount must never supply
-        // the host disk's capacity or wait for an unavailable remote service.
+        readGoogleDriveQuota(drive);
         devices.append(drive);
     }
 
@@ -106,29 +115,90 @@ void ComputerModel::rebuild()
 
     // Nothing the page draws has moved, which is the common case, and
     // resetting anyway would lose the selection
-    if (devices == m_devices && unmounted == m_unmountedCount)
-        return;
+    if (devices != m_devices || unmounted != m_unmountedCount) {
+        beginResetModel();
+        m_devices = devices;
+        m_unmountedCount = unmounted;
+        endResetModel();
 
-    beginResetModel();
-    m_devices = devices;
-    m_unmountedCount = unmounted;
-    endResetModel();
-
-    // Only the drives with no figure yet, the rest being carried over
-    for (const Device &device : std::as_const(m_devices)) {
-        if (!device.sizeKnown && !Locations::isGoogleDriveMount(device.url))
-            queryFreeSpace(device.url);
+        // Only the drives with no figure yet, the rest being carried over.
+        for (const Device &device : std::as_const(m_devices)) {
+            if (!device.sizeKnown && !Locations::isGoogleDriveMount(device.url))
+                queryFreeSpace(device.url);
+        }
+    }
+    // Request once per observed mount lifecycle. A failed/unknown quota must
+    // not become a request loop when Places emits unrelated data changes.
+    if (googleConnected && !m_googleQuotaRequested) {
+        m_googleQuotaRequested = true;
+        m_driveConnection->refreshStorageQuota();
     }
 }
 
 void ComputerModel::refresh()
 {
+    if (m_driveConnection && m_driveConnection->isConnected()) {
+        m_googleQuotaRequested = true;
+        m_driveConnection->refreshStorageQuota(true);
+    }
     rebuild();
 
     // A rebuild keeps the figures it has, and a drive filling up changes no row
     for (const Device &device : std::as_const(m_devices)) {
         if (!Locations::isGoogleDriveMount(device.url))
             queryFreeSpace(device.url);
+    }
+}
+
+void ComputerModel::readGoogleDriveQuota(Device &drive) const
+{
+    drive.total = 0;
+    drive.available = 0;
+    drive.sizeKnown = false;
+    if (!m_driveConnection || !m_driveConnection->isConnected()
+        || !m_driveConnection->hasStorageQuota())
+        return;
+    const quint64 total = m_driveConnection->storageTotalBytes();
+    const quint64 available = m_driveConnection->storageAvailableBytes();
+    if (total == 0 || available > total || !m_driveConnection->hasStorageQuota())
+        return;
+    drive.total = total;
+    drive.available = available;
+    drive.sizeKnown = true;
+}
+
+void ComputerModel::updateGoogleDriveQuota()
+{
+    for (int row = 0; row < m_devices.size(); ++row) {
+        if (m_devices.at(row).url != Locations::googleDriveMount())
+            continue;
+        Device updated = m_devices.at(row);
+        readGoogleDriveQuota(updated);
+        if (updated == m_devices.at(row))
+            return;
+        QList<Device> devices = m_devices;
+        devices[row] = updated;
+        if (m_sortKey == SortBySize || m_sortKey == SortByFree)
+            applySort(devices);
+        bool reordered = false;
+        for (int i = 0; i < devices.size(); ++i) {
+            if (devices.at(i).url != m_devices.at(i).url) {
+                reordered = true;
+                break;
+            }
+        }
+        if (reordered) {
+            beginResetModel();
+            m_devices = devices;
+            endResetModel();
+        } else {
+            m_devices[row] = updated;
+            // The tile delegate reads figures from Name, so include that cell
+            // as well as the details columns without disturbing selection.
+            Q_EMIT dataChanged(index(row, Name), index(row, FreeSpace),
+                               {Qt::DisplayRole, TotalSizeRole, AvailableSizeRole, SizeKnownRole});
+        }
+        return;
     }
 }
 
@@ -166,9 +236,14 @@ void ComputerModel::sort(int column, Qt::SortOrder order)
 void ComputerModel::applySort(QList<Device> &devices) const
 {
     const bool descending = (m_sortOrder == Qt::DescendingOrder);
+    const QUrl root = QUrl::fromLocalFile(QStringLiteral("/"));
 
     std::stable_sort(devices.begin(), devices.end(),
-                     [this, descending](const Device &left, const Device &right) {
+                     [this, descending, root](const Device &left, const Device &right) {
+        // Pin the actual system root before applying any requested ordering.
+        // A renamed disk or a label that resembles C: cannot change identity.
+        if ((left.url == root) != (right.url == root))
+            return left.url == root;
         // Drives with no figure sink to the bottom, before the order is
         // applied so reversing does not float them to the top
         if (m_sortKey == SortBySize || m_sortKey == SortByFree) {

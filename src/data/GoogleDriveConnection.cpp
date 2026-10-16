@@ -13,6 +13,9 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QSet>
+#include <QSettings>
+#include <utility>
 #include <unistd.h>
 
 namespace {
@@ -23,14 +26,34 @@ constexpr qsizetype kMaxPrivateOutput = 64 * 1024;
 GoogleDriveConnection::GoogleDriveConnection(QObject *parent) : QObject(parent)
 {
     m_lastMountState = Locations::googleDriveMounted();
+    m_connectionState = m_lastMountState ? ConnectionState::Connected : ConnectionState::Disconnected;
+    m_observedMountId = Locations::googleDriveMountId();
+    m_quotaTimeout = new QTimer(this);
+    m_quotaTimeout->setSingleShot(true);
+    m_quotaTimeout->setInterval(15000);
+    connect(m_quotaTimeout, &QTimer::timeout, this, [this] {
+        cancelStorageQuery();
+        clearStorageQuota();
+    });
     m_mountTimer = new QTimer(this);
     m_mountTimer->setInterval(2000);
     m_mountTimer->setTimerType(Qt::CoarseTimer);
     connect(m_mountTimer, &QTimer::timeout, this, &GoogleDriveConnection::refreshMountState);
     m_mountTimer->start();
+    m_reconnectTimer = new QTimer(this);
+    m_reconnectTimer->setSingleShot(true);
+    m_reconnectTimer->setTimerType(Qt::CoarseTimer);
+    connect(m_reconnectTimer, &QTimer::timeout, this, [this] {
+        m_reconnectStarted = false;
+        reconnectSavedDrive();
+    });
     m_timeout = new QTimer(this);
     m_timeout->setSingleShot(true);
     connect(m_timeout, &QTimer::timeout, this, [this] {
+        if (m_automaticReconnect) {
+            finishAutomaticFailure(ConnectionState::Offline);
+            return;
+        }
         if (m_operation == Operation::Export) {
             m_exportInvalid = true;
             stopHelper();
@@ -47,6 +70,7 @@ GoogleDriveConnection::GoogleDriveConnection(QObject *parent) : QObject(parent)
 
 GoogleDriveConnection::~GoogleDriveConnection()
 {
+    cancelStorageQuery();
     cancel();
     if (m_auth && m_auth->isBusy()) {
         // A keychain write or requested revocation may already be committed.
@@ -54,7 +78,7 @@ GoogleDriveConnection::~GoogleDriveConnection()
         // is destroyed; no detached operation opens a browser or starts a mount.
         auto *pending = m_auth.data();
         pending->setParent(qApp);
-        const auto retainedLock = std::shared_ptr<QLockFile>(m_operationLock.release());
+        const auto retainedLock = std::exchange(m_operationLock, {});
         connect(pending, &GoogleDriveAuth::idle, pending, [retainedLock] {
             if (retainedLock)
                 retainedLock->unlock();
@@ -101,22 +125,300 @@ bool GoogleDriveConnection::isConnected() const
     return Locations::googleDriveMounted();
 }
 
+GoogleDriveConnection::ConnectionState GoogleDriveConnection::connectionState() const { return m_connectionState; }
+bool GoogleDriveConnection::isAutomaticReconnectInProgress() const { return m_automaticReconnect; }
+bool GoogleDriveConnection::autoReconnectEnabled() const
+{
+    return QSettings().value(QStringLiteral("GoogleDrive/AutoReconnectEnabled"), true).toBool();
+}
+bool GoogleDriveConnection::autoReconnectSuppressed() const
+{
+    return QSettings().value(QStringLiteral("GoogleDrive/AutoReconnectSuppressed"), false).toBool();
+}
+void GoogleDriveConnection::setSyncLifecycleHooks(PrepareDisconnect prepare, CleanupAccount cleanup)
+{
+    m_prepareDisconnect = std::move(prepare);
+    m_cleanupAccount = std::move(cleanup);
+}
+void GoogleDriveConnection::setConnectionState(ConnectionState state)
+{
+    if (m_connectionState == state)
+        return;
+    m_connectionState = state;
+    Q_EMIT stateChanged(state);
+}
+void GoogleDriveConnection::setAutoReconnectEnabled(bool enabled)
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("GoogleDrive/AutoReconnectEnabled"), enabled);
+    if (enabled)
+        settings.setValue(QStringLiteral("GoogleDrive/AutoReconnectSuppressed"), false);
+    settings.sync();
+    m_reconnectTimer->stop();
+    m_reconnectStarted = false;
+    m_reconnectAttempts = 0;
+    if (!enabled && m_automaticReconnect)
+        cancel();
+    Q_EMIT autoReconnectPreferenceChanged(enabled);
+}
+void GoogleDriveConnection::suppressAutoReconnect()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("GoogleDrive/AutoReconnectSuppressed"), true);
+    settings.sync();
+    m_reconnectTimer->stop();
+    m_reconnectStarted = true;
+}
+void GoogleDriveConnection::scheduleReconnectRetry()
+{
+    if (!autoReconnectEnabled() || autoReconnectSuppressed() || m_reconnectAttempts >= 3)
+        return;
+    const int delay = m_reconnectAttempts <= 1 ? 15000 : 60000;
+    m_reconnectTimer->start(delay);
+}
+void GoogleDriveConnection::reconnectSavedDrive()
+{
+    if (!autoReconnectEnabled() || autoReconnectSuppressed() || m_reconnectStarted
+        || m_operation != Operation::None || (m_auth && m_auth->isBusy()))
+        return;
+    if (isConnected()) {
+        m_reconnectStarted = true;
+        setConnectionState(ConnectionState::Connected);
+        refreshMountState();
+        return; // observers must not open the wallet for an existing mount
+    }
+    if (m_reconnectAttempts >= 3)
+        return;
+    if (!isAvailable()) {
+        m_reconnectStarted = true;
+        setConnectionState(ConnectionState::Unavailable);
+        return;
+    }
+    if (!QFileInfo::exists(appConfigPath())) {
+        m_reconnectStarted = true;
+        setConnectionState(ConnectionState::SignInRequired);
+        return;
+    }
+    ++m_reconnectAttempts;
+    if ((activeConnection && activeConnection != this) || !lockOperation(true)) {
+        scheduleReconnectRetry();
+        return;
+    }
+    // Another process may have finished mounting before we acquired its lock.
+    if (isConnected()) {
+        releaseOperation();
+        m_reconnectStarted = true;
+        setConnectionState(ConnectionState::Connected);
+        refreshMountState();
+        return;
+    }
+    m_reconnectStarted = true;
+    m_automaticReconnect = true;
+    m_cancelled = false;
+    m_operation = Operation::Connect;
+    setConnectionState(ConnectionState::Connecting);
+    auth()->connectSavedAccount();
+}
+void GoogleDriveConnection::finishAutomaticFailure(ConnectionState state)
+{
+    if (m_process) {
+        stopHelper();
+        ++m_generation;
+        m_process.clear();
+    }
+    m_timeout->stop();
+    m_operation = Operation::None;
+    m_automaticReconnect = false;
+    m_output.fill('\0');
+    m_output.clear();
+    releaseOperation();
+    setConnectionState(state);
+    if (state == ConnectionState::Offline)
+        scheduleReconnectRetry();
+}
+
 void GoogleDriveConnection::refreshMountState()
 {
     const bool mounted = isConnected();
-    if (mounted == m_lastMountState)
+    const QString mountId = storageMountId();
+    const bool replaced = mountId != m_observedMountId;
+    if (replaced) {
+        m_observedMountId = mountId;
+        cancelStorageQuery();
+        clearStorageQuota();
+        m_requestedQuotaMountId.clear();
+        m_quotaAge.invalidate();
+    }
+    if (mounted == m_lastMountState && !replaced)
         return;
     m_lastMountState = mounted;
     Q_EMIT mountStateChanged(mounted);
+    if (mounted) {
+        m_reconnectTimer->stop();
+        setConnectionState(ConnectionState::Connected);
+    } else if (m_operation == Operation::None && m_connectionState == ConnectionState::Connected) {
+        setConnectionState(ConnectionState::Disconnected);
+    }
+}
+
+QString GoogleDriveConnection::storageMountId() const
+{
+    return isConnected() ? Locations::googleDriveMountId() : QString();
+}
+
+bool GoogleDriveConnection::hasStorageQuota() const
+{
+    return m_quotaKnown && !m_quotaMountId.isEmpty() && m_quotaMountId == storageMountId();
+}
+
+quint64 GoogleDriveConnection::storageTotalBytes() const
+{
+    return hasStorageQuota() ? m_quotaTotal : 0;
+}
+
+quint64 GoogleDriveConnection::storageAvailableBytes() const
+{
+    return hasStorageQuota() ? m_quotaAvailable : 0;
+}
+
+void GoogleDriveConnection::cancelStorageQuery()
+{
+    ++m_quotaGeneration;
+    m_quotaTimeout->stop();
+    const auto process = m_quotaProcess;
+    m_quotaProcess.clear();
+    m_quotaOutput.clear();
+    if (process) {
+        m_stoppingQuotaProcess = process;
+        process->kill(); // finished owns deletion; never wait on FUSE in the UI
+    }
+}
+
+void GoogleDriveConnection::clearStorageQuota()
+{
+    const bool known = m_quotaKnown;
+    m_quotaKnown = false;
+    m_quotaMountId.clear();
+    m_quotaTotal = m_quotaAvailable = 0;
+    if (known)
+        Q_EMIT storageQuotaChanged();
+}
+
+void GoogleDriveConnection::refreshStorageQuota(bool force)
+{
+    // A new descriptor must not race unmount or connection-failure cleanup.
+    // Authentication/mount operations have priority over background figures.
+    if (m_operation != Operation::None)
+        return;
+    if (m_stoppingQuotaProcess && m_stoppingQuotaProcess->state() != QProcess::NotRunning)
+        return; // never accumulate stalled helpers after a timeout
+    const QString id = storageMountId();
+    if (id.isEmpty()) {
+        cancelStorageQuery();
+        clearStorageQuota();
+        return;
+    }
+    if (m_quotaProcess && m_requestedQuotaMountId == id)
+        return;
+    if (!force && m_requestedQuotaMountId == id
+        && m_quotaAge.isValid() && m_quotaAge.elapsed() < 30000)
+        return;
+    cancelStorageQuery();
+    m_requestedQuotaMountId = id;
+    m_quotaAge.start();
+    auto *process = new QProcess(qApp);
+    m_quotaProcess = process;
+    const quint64 generation = m_quotaGeneration;
+    const QPointer<GoogleDriveConnection> owner(this);
+    process->setStandardInputFile(QProcess::nullDevice());
+    process->setStandardErrorFile(QProcess::nullDevice());
+    connect(process, &QProcess::readyReadStandardOutput, process, [owner, process, generation] {
+        if (!owner || owner->m_quotaProcess != process || owner->m_quotaGeneration != generation)
+            return;
+        const auto data = process->read(4097 - owner->m_quotaOutput.size());
+        owner->m_quotaOutput += data;
+        if (owner->m_quotaOutput.size() > 4096) {
+            owner->cancelStorageQuery();
+            owner->clearStorageQuota();
+        }
+    });
+    connect(process, &QProcess::finished, process,
+            [owner, process, generation](int code, QProcess::ExitStatus status) {
+        if (owner)
+            owner->finishStorageQuery(process, generation,
+                code == 0 && status == QProcess::NormalExit);
+        if (owner && owner->m_stoppingQuotaProcess == process)
+            owner->m_stoppingQuotaProcess.clear();
+        process->deleteLater();
+    });
+    connect(process, &QProcess::errorOccurred, process,
+            [owner, process, generation](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        if (owner)
+            owner->finishStorageQuery(process, generation, false);
+        if (owner && owner->m_stoppingQuotaProcess == process)
+            owner->m_stoppingQuotaProcess.clear();
+        process->deleteLater();
+    });
+    m_quotaTimeout->start();
+    process->start(helperPath(), {QStringLiteral("app-quota")});
+}
+
+void GoogleDriveConnection::finishStorageQuery(QProcess *process, quint64 generation, bool successful)
+{
+    if (m_quotaProcess != process || m_quotaGeneration != generation)
+        return;
+    m_quotaTimeout->stop();
+    m_quotaProcess.clear();
+    m_quotaOutput += process->read(4097 - m_quotaOutput.size());
+    const QByteArray output = std::exchange(m_quotaOutput, {});
+    const auto document = QJsonDocument::fromJson(output);
+    const auto object = document.object();
+    const auto keys = object.keys();
+    const QSet<QString> expected{QStringLiteral("mount_id"), QStringLiteral("total"), QStringLiteral("available")};
+    const auto number = [&object](const QString &key, bool *valid) -> quint64 {
+        const QJsonValue value = object.value(key);
+        const QString text = value.toString();
+        *valid = value.isString() && !text.isEmpty() && text.size() <= 20
+            && (text.size() == 1 || text.front() != u'0');
+        for (QChar ch : text)
+            if (ch < u'0' || ch > u'9') *valid = false;
+        if (!*valid) return 0;
+        return text.toULongLong(valid);
+    };
+    bool totalValid = false, availableValid = false;
+    const quint64 total = number(QStringLiteral("total"), &totalValid);
+    const quint64 available = number(QStringLiteral("available"), &availableValid);
+    const QString id = object.value(QStringLiteral("mount_id")).toString();
+    constexpr quint64 assumedCapacity = quint64(1) << 50;
+    if (!successful || output.size() > 4096 || !document.isObject()
+        || QSet<QString>(keys.begin(), keys.end()) != expected
+        || id != m_requestedQuotaMountId || id != storageMountId()
+        || !totalValid || !availableValid || total == 0 || available > total
+        || total == assumedCapacity || available == assumedCapacity) {
+        clearStorageQuota();
+        return;
+    }
+    const bool changed = !m_quotaKnown || m_quotaMountId != id
+        || m_quotaTotal != total || m_quotaAvailable != available;
+    m_quotaMountId = id;
+    m_quotaTotal = total;
+    m_quotaAvailable = available;
+    m_quotaKnown = true;
+    if (changed)
+        Q_EMIT storageQuotaChanged();
 }
 
 QString GoogleDriveConnection::appConfigPath() const
 {
+    if (!m_appConfigOverride.isEmpty())
+        return m_appConfigOverride;
     return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
         + QStringLiteral("/linux-explorer-win7/google-drive/app-rclone.conf");
 }
 
-bool GoogleDriveConnection::lockOperation()
+bool GoogleDriveConnection::lockOperation(bool quiet)
 {
     const QString runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
     const QFileInfo directory(runtime);
@@ -125,14 +427,16 @@ bool GoogleDriveConnection::lockOperation()
         | QFileDevice::ExeOther;
     if (runtime.isEmpty() || directory.isSymLink() || !directory.isDir()
         || directory.ownerId() != ::getuid() || (directory.permissions() & publicPermissions)) {
-        Q_EMIT failed(tr("The private desktop session directory is unavailable. Sign in to your desktop again and retry."));
+        if (!quiet)
+            Q_EMIT failed(tr("The private desktop session directory is unavailable. Sign in to your desktop again and retry."));
         return false;
     }
-    auto lock = std::make_unique<QLockFile>(QDir(runtime).filePath(
+    auto lock = std::make_shared<QLockFile>(QDir(runtime).filePath(
         QStringLiteral("explorer-win7-google-drive-auth.lock")));
     lock->setStaleLockTime(0);
     if (!lock->tryLock()) {
-        Q_EMIT failed(tr("Google Drive is already being changed in another Explorer session. Try again when it finishes."));
+        if (!quiet)
+            Q_EMIT failed(tr("Google Drive is already being changed in another Explorer session. Try again when it finishes."));
         return false;
     }
     m_operationLock = std::move(lock);
@@ -160,6 +464,15 @@ GoogleDriveAuth *GoogleDriveConnection::auth()
         releaseOperation();
     });
     connect(m_auth, &GoogleDriveAuth::statusChanged, this, &GoogleDriveConnection::statusChanged);
+    connect(m_auth, &GoogleDriveAuth::savedAccountUnavailable, this,
+        [this](GoogleDriveAuth::SavedAccountResult result) {
+            if (!m_automaticReconnect || m_operation != Operation::Connect)
+                return;
+            finishAutomaticFailure(result == GoogleDriveAuth::SavedAccountResult::WalletLocked
+                ? ConnectionState::WalletLocked
+                : result == GoogleDriveAuth::SavedAccountResult::Unavailable
+                    ? ConnectionState::Unavailable : ConnectionState::SignInRequired);
+        });
     connect(m_auth, &GoogleDriveAuth::failed, this, [this](const QString &message) {
         if (m_operation != Operation::None && !m_cancelled)
             finishFailure(message);
@@ -194,8 +507,7 @@ GoogleDriveAuth *GoogleDriveConnection::auth()
             stopHelper();
             return;
         }
-        m_operation = Operation::Forget;
-        startHelper({QStringLiteral("app-forget")});
+        beginLocalAccountCleanup();
     });
     return m_auth;
 }
@@ -221,6 +533,9 @@ QByteArray GoogleDriveConnection::envelope(const QByteArray &token, const QStrin
 
 void GoogleDriveConnection::beginSignIn(bool forceBrowser)
 {
+    if (m_automaticReconnect)
+        cancel();
+    m_reconnectTimer->stop();
     if (m_operation != Operation::None)
         return;
     if (m_auth && m_auth->isBusy()) {
@@ -239,6 +554,8 @@ void GoogleDriveConnection::beginSignIn(bool forceBrowser)
         if (forceBrowser) {
             Q_EMIT failed(tr("Disconnect Google Drive before signing in again."));
         } else {
+            QSettings().setValue(QStringLiteral("GoogleDrive/AutoReconnectSuppressed"), false);
+            setConnectionState(ConnectionState::Connected);
             Q_EMIT connected(Locations::googleDriveMount());
         }
         return;
@@ -247,6 +564,7 @@ void GoogleDriveConnection::beginSignIn(bool forceBrowser)
         return;
     m_cancelled = false;
     m_operation = Operation::Connect;
+    setConnectionState(ConnectionState::Connecting);
     if (forceBrowser || !QFileInfo::exists(appConfigPath()))
         auth()->startSignIn();
     else
@@ -258,6 +576,9 @@ void GoogleDriveConnection::signInAgain() { beginSignIn(true); }
 
 void GoogleDriveConnection::disconnectDrive()
 {
+    suppressAutoReconnect();
+    if (m_automaticReconnect)
+        cancel();
     if (m_operation != Operation::None)
         return;
     if (activeConnection && activeConnection != this) {
@@ -269,11 +590,14 @@ void GoogleDriveConnection::disconnectDrive()
     m_cancelled = false;
     m_operation = Operation::Disconnect;
     Q_EMIT statusChanged(tr("Disconnecting Google Drive…"));
-    startHelper({QStringLiteral("disconnect")});
+    prepareDisconnect(false);
 }
 
 void GoogleDriveConnection::signOut()
 {
+    suppressAutoReconnect();
+    if (m_automaticReconnect)
+        cancel();
     if (m_operation != Operation::None)
         return;
     if (activeConnection && activeConnection != this) {
@@ -291,7 +615,92 @@ void GoogleDriveConnection::signOut()
     m_operation = Operation::SignOutDisconnect;
     Q_EMIT statusChanged(tr("Signing out of Google Drive…"));
     // Never revoke or erase credentials while a filesystem still uses them.
-    startHelper({QStringLiteral("disconnect")});
+    prepareDisconnect(true);
+}
+
+void GoogleDriveConnection::prepareDisconnect(bool signOut)
+{
+    if (!m_prepareDisconnect) {
+        startDisconnectHelper();
+        return;
+    }
+    const quint64 generation = ++m_generation;
+    const Operation operation = m_operation;
+    const QPointer<GoogleDriveConnection> owner(this);
+    const auto retainedLock = m_operationLock;
+    m_prepareDisconnect(signOut, [owner, generation, operation, retainedLock](bool successful, QString message) {
+        if (!owner || owner->m_cancelled || owner->m_generation != generation || owner->m_operation != operation)
+            return;
+        if (!successful) {
+            owner->finishFailure(message.isEmpty() ? tr("Google Drive synchronization could not stop. Try again.") : message);
+            return;
+        }
+        owner->startDisconnectHelper();
+    });
+    // A stop can queue behind the worker's bounded read-only folder check,
+    // then wait for an active transfer to exit. Keep the outer deadline later
+    // than the sync controller's stop deadline while retaining the lock.
+    QTimer::singleShot(255000, this, [owner, generation, operation] {
+        if (owner && owner->m_generation == generation && owner->m_operation == operation)
+            owner->finishFailure(tr("Google Drive synchronization is still stopping. Try again."));
+    });
+}
+
+void GoogleDriveConnection::beginLocalAccountCleanup()
+{
+    m_operation = Operation::Cleanup;
+    if (!m_cleanupAccount) {
+        m_operation = Operation::Forget;
+        startHelper({QStringLiteral("app-forget")});
+        return;
+    }
+    const quint64 generation = ++m_generation;
+    const QPointer<GoogleDriveConnection> owner(this);
+    const auto retainedLock = m_operationLock;
+    m_cleanupAccount([owner, generation, retainedLock](bool successful, QString message) {
+        if (!owner || owner->m_generation != generation || owner->m_operation != Operation::Cleanup)
+            return;
+        if (!successful) {
+            owner->finishFailure(message.isEmpty() ? tr("Saved synchronization credentials could not be removed. Try signing out again.") : message);
+            return;
+        }
+        owner->m_operation = Operation::Forget;
+        owner->startHelper({QStringLiteral("app-forget")});
+    });
+    QTimer::singleShot(30000, this, [owner, generation] {
+        if (owner && owner->m_generation == generation && owner->m_operation == Operation::Cleanup)
+            owner->finishFailure(tr("Saved synchronization credentials are still being removed. Try signing out again."));
+    });
+}
+
+void GoogleDriveConnection::startDisconnectHelper()
+{
+    const QPointer<QProcess> quota(m_quotaProcess ? m_quotaProcess : m_stoppingQuotaProcess);
+    cancelStorageQuery();
+    if (!quota || quota->state() == QProcess::NotRunning) {
+        startHelper({QStringLiteral("disconnect")});
+        return;
+    }
+    // kill() is asynchronous. Wait for the quota descriptor to be released
+    // before unmounting, while keeping the UI responsive and the operation lock.
+    const quint64 generation = ++m_generation;
+    const Operation operation = m_operation;
+    const QPointer<GoogleDriveConnection> owner(this);
+    const auto advance = [owner, generation, operation] {
+        if (owner && !owner->m_cancelled && owner->m_generation == generation
+            && owner->m_operation == operation)
+            owner->startHelper({QStringLiteral("disconnect")});
+    };
+    connect(quota, &QProcess::finished, this, advance);
+    connect(quota, &QProcess::errorOccurred, this, [advance](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            advance();
+    });
+    QTimer::singleShot(5000, this, [owner, generation, operation] {
+        if (owner && !owner->m_cancelled && owner->m_generation == generation
+            && owner->m_operation == operation)
+            owner->finishFailure(tr("Google Drive storage lookup is still stopping. Try disconnecting again."));
+    });
 }
 
 void GoogleDriveConnection::startHelper(const QStringList &arguments, QByteArray input)
@@ -376,8 +785,7 @@ void GoogleDriveConnection::helperFinished(Operation operation, int exitCode, bo
         m_forgetPending = false;
         m_output.fill('\0');
         m_output.clear();
-        m_operation = Operation::Forget;
-        startHelper({QStringLiteral("app-forget")});
+        beginLocalAccountCleanup();
         return;
     }
     if (operation != m_operation)
@@ -413,13 +821,34 @@ void GoogleDriveConnection::helperFinished(Operation operation, int exitCode, bo
     m_operation = Operation::None;
     releaseOperation();
     if (operation == Operation::Connect) {
-        if (isConnected())
-            Q_EMIT connected(Locations::googleDriveMount());
-        else
-            Q_EMIT failed(tr("Google Drive did not provide a verified read-only mount."));
+        if (isConnected()) {
+            const bool automatic = std::exchange(m_automaticReconnect, false);
+            setConnectionState(ConnectionState::Connected);
+            m_reconnectTimer->stop();
+            if (!automatic) {
+                QSettings settings;
+                settings.setValue(QStringLiteral("GoogleDrive/AutoReconnectSuppressed"), false);
+                if (!settings.contains(QStringLiteral("GoogleDrive/AutoReconnectEnabled")))
+                    settings.setValue(QStringLiteral("GoogleDrive/AutoReconnectEnabled"), true);
+                settings.sync();
+                m_reconnectAttempts = 0;
+                Q_EMIT autoReconnectPreferenceChanged(autoReconnectEnabled());
+                Q_EMIT connected(Locations::googleDriveMount());
+            }
+            refreshStorageQuota();
+        } else {
+            if (m_automaticReconnect)
+                finishAutomaticFailure(ConnectionState::Offline);
+            else {
+                setConnectionState(ConnectionState::Disconnected);
+                Q_EMIT failed(tr("Google Drive did not provide a verified read-only mount."));
+            }
+        }
     } else if (operation == Operation::Disconnect) {
+        setConnectionState(ConnectionState::Disconnected);
         Q_EMIT disconnected();
     } else if (operation == Operation::Forget) {
+        setConnectionState(ConnectionState::SignInRequired);
         Q_EMIT signedOut();
         if (!m_signOutWarning.isEmpty())
             Q_EMIT failed(m_signOutWarning);
@@ -429,6 +858,10 @@ void GoogleDriveConnection::helperFinished(Operation operation, int exitCode, bo
 
 void GoogleDriveConnection::finishFailure(const QString &message)
 {
+    if (m_automaticReconnect) {
+        finishAutomaticFailure(ConnectionState::Offline);
+        return;
+    }
     if (m_process) {
         stopHelper();
         ++m_generation;
@@ -439,6 +872,7 @@ void GoogleDriveConnection::finishFailure(const QString &message)
     m_output.fill('\0');
     m_output.clear();
     releaseOperation();
+    setConnectionState(isConnected() ? ConnectionState::Connected : ConnectionState::Disconnected);
     Q_EMIT failed(message);
 }
 
@@ -458,9 +892,10 @@ void GoogleDriveConnection::cancel()
 {
     // After disconnection, an explicitly requested sign-out must finish local
     // credential removal even if its dialog closes.
-    if (m_operation == Operation::Export || m_operation == Operation::Forget)
+    if (m_operation == Operation::Export || m_operation == Operation::Cleanup || m_operation == Operation::Forget)
         return;
     m_cancelled = true;
+    m_automaticReconnect = false;
     ++m_generation;
     m_timeout->stop();
     if (m_auth)
@@ -471,4 +906,5 @@ void GoogleDriveConnection::cancel()
     m_output.fill('\0');
     m_output.clear();
     releaseOperation();
+    setConnectionState(isConnected() ? ConnectionState::Connected : ConnectionState::Disconnected);
 }

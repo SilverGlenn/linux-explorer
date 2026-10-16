@@ -328,6 +328,8 @@ private slots:
         QFETCH(QByteArray, record);
         QFETCH(bool, mounted);
         QCOMPARE(Locations::googleDriveMountedIn(record), mounted);
+        QCOMPARE(Locations::googleDriveMountIdIn(record),
+                 mounted ? QStringLiteral("41") : QString());
     }
 
     void disconnectedPersonalMountBreadcrumbsHideBackingPath()

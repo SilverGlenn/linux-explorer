@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only Google Drive mount bridge using official rclone encryption.
 
-Explorer owns app OAuth and the desktop wallet; app-* commands use private stdin.
+Explorer owns app OAuth and the desktop wallet; credential commands use private stdin.
 Legacy setup is for a private interactive terminal, never a captured tool session.
 Dependencies: Python 3 (stdlib), rclone, fuse3/fusermount3, Explorer.
 Legacy personal setup also requires kdialog.
@@ -129,7 +129,7 @@ def decode_mount_field(value):
                   lambda match: chr(int(match.group(1), 8)), value)
 
 
-def mounts_at(text, path):
+def mounts_at(text, path, include_id=False):
     """Parse Linux mountinfo, decoding only its four specified octal escapes."""
     result = []
     for line in text.splitlines():
@@ -139,9 +139,12 @@ def mounts_at(text, path):
             if separator < 6 or len(fields) < separator + 4:
                 continue
             if decode_mount_field(fields[4]) == str(path):
-                result.append({"fstype": decode_mount_field(fields[separator + 1]),
-                               "source": decode_mount_field(fields[separator + 2]),
-                               "options": set(fields[5].split(","))})
+                record = {"fstype": decode_mount_field(fields[separator + 1]),
+                          "source": decode_mount_field(fields[separator + 2]),
+                          "options": set(fields[5].split(","))}
+                if include_id:
+                    record["mount_id"] = fields[0]
+                result.append(record)
         except (ValueError, IndexError):
             continue
     return result
@@ -213,12 +216,12 @@ class DriveHelper:
         finally:
             os.close(fd)
 
-    def mount_records(self):
+    def mount_records(self, include_id=False):
         with Path("/proc/self/mountinfo").open() as stream:
             text = stream.read(1024 * 1024 + 1)
         if len(text) > 1024 * 1024:
             raise HelperError("The system mount table exceeds the safety limit.")
-        return mounts_at(text, self.mount)
+        return mounts_at(text, self.mount, include_id=include_id)
 
     def require_encrypted(self):
         self.safe_directory(self.config_dir)
@@ -533,6 +536,50 @@ class DriveHelper:
 
 
 APP_ENVELOPE_LIMIT = 64 * 1024
+UNSIGNED_64_MAX = (1 << 64) - 1
+RCLONE_UNKNOWN_QUOTA = 1 << 50
+
+
+def quota_mount_id(records):
+    """Accept only one exact managed read-only mount, with its kernel ID."""
+    if not recognized_mount(records):
+        raise HelperError("Google Drive storage information is unavailable.")
+    mount_id = records[0].get("mount_id")
+    if (not isinstance(mount_id, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", mount_id)
+            or int(mount_id) > UNSIGNED_64_MAX):
+        raise HelperError("Google Drive storage information is unavailable.")
+    return mount_id
+
+
+def descriptor_mount_id(fd):
+    """Read bounded kernel metadata, without resolving the descriptor's path."""
+    with Path(f"/proc/self/fdinfo/{fd}").open(encoding="ascii") as stream:
+        text = stream.read(16 * 1024 + 1)
+    if len(text) > 16 * 1024:
+        raise HelperError("Google Drive storage information is unavailable.")
+    values = [line.split(":", 1)[1].strip() for line in text.splitlines()
+              if line.startswith("mnt_id:")]
+    if (len(values) != 1 or not re.fullmatch(r"[1-9][0-9]{0,19}", values[0])
+            or int(values[0]) > UNSIGNED_64_MAX):
+        raise HelperError("Google Drive storage information is unavailable.")
+    return values[0]
+
+
+def quota_bytes(info):
+    """Use kernel integer counts; reject rclone's documented unknown defaults."""
+    counts = (info.f_frsize, info.f_blocks, info.f_bfree, info.f_bavail)
+    if any(type(value) is not int or not 0 <= value <= UNSIGNED_64_MAX for value in counts):
+        raise HelperError("Google Drive storage information is unavailable.")
+    fragment, blocks, free_blocks, available_blocks = counts
+    if fragment == 0 or blocks == 0 or not available_blocks <= free_blocks <= blocks:
+        raise HelperError("Google Drive storage information is unavailable.")
+    total, free, available = (fragment * value for value in (blocks, free_blocks, available_blocks))
+    # https://rclone.org/commands/rclone_mount/#filesystem-size documents
+    # 1 PiB substitutions when a backend cannot provide total or free space.
+    if (total > UNSIGNED_64_MAX or free > UNSIGNED_64_MAX or available > UNSIGNED_64_MAX
+            or RCLONE_UNKNOWN_QUOTA in (total, free, available)):
+        raise HelperError("Google Drive storage information is unavailable.")
+    return str(total), str(available)
 
 
 def app_credentials(stream=None):
@@ -604,6 +651,30 @@ class AppDriveHelper(DriveHelper):
         super().__init__(home, environment)
         self.config = self.config_dir / "app-rclone.conf"
         self.config_password = None
+
+    def app_quota(self):
+        """Query only an existing mount; no credentials, config, lock, or writes.
+
+        The caller runs this helper off the UI thread and enforces a deadline:
+        opening or querying an unresponsive FUSE mount can block in the kernel.
+        """
+        fd = None
+        try:
+            mount_id = quota_mount_id(self.mount_records(include_id=True))
+            fd = os.open(self.mount, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            if descriptor_mount_id(fd) != mount_id:
+                raise HelperError("Google Drive storage information is unavailable.")
+            total, available = quota_bytes(os.fstatvfs(fd))
+            if (quota_mount_id(self.mount_records(include_id=True)) != mount_id
+                    or descriptor_mount_id(fd) != mount_id):
+                raise HelperError("Google Drive storage information is unavailable.")
+        except (HelperError, OSError, UnicodeError, ValueError, TypeError, OverflowError):
+            raise HelperError("Google Drive storage information is unavailable.") from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+        print(json.dumps({"mount_id": mount_id, "total": total, "available": available},
+                         ensure_ascii=True, separators=(",", ":")))
 
     def require_unlock_program(self):
         require_binary("cat")
@@ -757,6 +828,7 @@ def main(argv=None):
     subparsers.add_parser("app-forget", help="Remove only the disconnected encrypted application configuration")
     subparsers.add_parser("app-export-token", help="Return the current token privately to the calling application")
     subparsers.add_parser("app-status", help="Report app configuration and mount state without unlocking")
+    subparsers.add_parser("app-quota", help="Report existing read-only mount storage without credentials")
     subparsers.add_parser("disconnect", help="Unmount this helper's read-only mount without force")
     subparsers.add_parser("status", help="Report configuration/mount state without unlocking")
     args = parser.parse_args(argv)
@@ -776,6 +848,8 @@ def main(argv=None):
             helper.app_export_token(app_credentials())
         elif args.command == "app-status":
             helper.status()
+        elif args.command == "app-quota":
+            helper.app_quota()
         elif args.command == "setup":
             helper.setup(args.client_json, args.reconnect)
         elif args.command == "connect":

@@ -59,7 +59,9 @@ add_library(explorer_ui OBJECT
     src/data/Settings.cpp
     src/data/GoogleDriveService.cpp
     src/data/GoogleDriveAuth.cpp
+    src/data/GoogleDriveSecretStore.cpp
     src/data/GoogleDriveConnection.cpp
+    src/data/GoogleDriveSyncController.cpp
     src/model/Archives.cpp
     src/model/ComputerModel.cpp
     src/model/DirectoryModel.cpp
@@ -74,6 +76,7 @@ add_library(explorer_ui OBJECT
     src/ui/MapDriveDialog.cpp
     src/ui/GoogleDriveDialog.cpp
     src/ui/GoogleDriveSignInDialog.cpp
+    src/ui/GoogleDriveSyncDialog.cpp
     src/ui/MountDialog.cpp
     src/ui/OptionsDialog.cpp
     src/ui/PropertiesDialog.cpp
@@ -166,6 +169,10 @@ install(PROGRAMS scripts/google-drive-rclone.py
         DESTINATION bin RENAME explorer-win7-google-drive)
 configure_file(scripts/google-drive-rclone.py
     ${CMAKE_CURRENT_BINARY_DIR}/explorer-win7-google-drive COPYONLY)
+install(PROGRAMS scripts/google-drive-sync.py
+        DESTINATION bin RENAME explorer-win7-google-drive-sync)
+configure_file(scripts/google-drive-sync.py
+    ${CMAKE_CURRENT_BINARY_DIR}/explorer-win7-google-drive-sync COPYONLY)
 install(FILES linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
         linux-explorer-win7-chooser-dialog.desktop
         DESTINATION share/applications)

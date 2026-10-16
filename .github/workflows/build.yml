@@ -85,6 +85,7 @@ jobs:
           path: |
             build/explorer-win7-x86_64
             build/explorer-win7-google-drive
+            build/explorer-win7-google-drive-sync
             docs/google-drive.md
             LICENSE
             README.md

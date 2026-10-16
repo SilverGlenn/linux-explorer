@@ -46,6 +46,23 @@
 #include <algorithm>
 #include <functional>
 
+namespace NavigationPaneOrdering {
+
+// Kept as a pure item operation so ordering can be tested without simulating
+// Solid devices or modifying the shared Places model.
+void pinSystemDrive(QTreeWidgetItem *computer)
+{
+    const QUrl root = QUrl::fromLocalFile(QStringLiteral("/"));
+    for (int i = 1; i < computer->childCount(); ++i) {
+        if (computer->child(i)->data(0, Qt::UserRole).toUrl() == root) {
+            computer->insertChild(0, computer->takeChild(i));
+            return;
+        }
+    }
+}
+
+} // namespace NavigationPaneOrdering
+
 namespace {
 
 constexpr int kSelectionGutter = NavigationItemDelegate::rightGutter;
@@ -878,6 +895,10 @@ void NavigationPane::rebuild()
         }
         addEntry(group, index);
     }
+
+    // Reorder only this view's constructed children. Shared Places ordering,
+    // Favorites ranks, bookmark metadata, and the other drives stay intact.
+    NavigationPaneOrdering::pinSystemDrive(computer);
 
     // KDE does not always bookmark Desktop/Downloads. Supply the native
     // defaults without modifying user-places.xbel, and honor hidden bookmarks.

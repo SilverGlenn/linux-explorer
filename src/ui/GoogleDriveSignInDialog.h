@@ -47,6 +47,7 @@ private:
     QLabel *m_intro = nullptr;
     QLabel *m_status = nullptr;
     QCheckBox *m_showInNetwork = nullptr;
+    QCheckBox *m_autoReconnect = nullptr;
     QPushButton *m_signIn = nullptr;
     QPushButton *m_signInAgain = nullptr;
     QPushButton *m_open = nullptr;
@@ -60,5 +61,6 @@ private:
     bool m_canRetry = false;
     bool m_hasFailure = false;
     bool m_signOutCompleted = false;
+    bool m_signOutWarningPending = false;
     bool m_rejecting = false;
 };

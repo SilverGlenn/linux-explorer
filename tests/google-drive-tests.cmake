@@ -45,7 +45,31 @@ set_tests_properties(google_drive_signin_tests PROPERTIES
     TIMEOUT 90)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+add_executable(google_drive_secret_store_tests tests/GoogleDriveSecretStoreTest.cpp)
+target_link_libraries(google_drive_secret_store_tests PRIVATE explorer_ui Qt6::Test)
+add_test(NAME google_drive_secret_store_tests COMMAND bash
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-ui-tests.sh $<TARGET_FILE:google_drive_secret_store_tests>)
+set_tests_properties(google_drive_secret_store_tests PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=Fusion" TIMEOUT 90)
+foreach(sync_suite IN ITEMS controller dialog)
+    if(sync_suite STREQUAL "controller")
+        set(sync_source tests/GoogleDriveSyncControllerTest.cpp)
+    else()
+        set(sync_source tests/GoogleDriveSyncDialogTest.cpp)
+    endif()
+    add_executable(google_drive_sync_${sync_suite}_tests ${sync_source})
+    target_link_libraries(google_drive_sync_${sync_suite}_tests PRIVATE explorer_ui Qt6::Test)
+    add_test(NAME google_drive_sync_${sync_suite}_tests COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-ui-tests.sh
+        $<TARGET_FILE:google_drive_sync_${sync_suite}_tests>)
+    set_tests_properties(google_drive_sync_${sync_suite}_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=Fusion" TIMEOUT 90)
+endforeach()
 if(Python3_Interpreter_FOUND)
+    add_test(NAME google_drive_sync_helper_tests
+        COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/GoogleDriveSyncHelperTest.py)
+    set_tests_properties(google_drive_sync_helper_tests PROPERTIES TIMEOUT 120)
     add_test(NAME google_drive_mount_helper_tests
         COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/GoogleDriveMountHelperTest.py)

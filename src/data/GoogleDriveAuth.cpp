@@ -1,4 +1,5 @@
 #include "GoogleDriveAuth.h"
+#include "GoogleDriveSecretStore.h"
 
 #include <QAbstractOAuthReplyHandler>
 #include <QDateTime>
@@ -21,6 +22,7 @@
 namespace {
 constexpr auto walletService = "explorer-win7-google-drive";
 constexpr auto walletKey = "desktop-account-v1";
+constexpr auto canonicalWalletKey = "desktop-account-v2";
 constexpr int maxRecordSize = 65536;
 
 QString randomSecret()
@@ -52,29 +54,104 @@ bool boundedSecret(const QJsonValue &value)
 class KeychainStore final : public GoogleDriveCredentialStore
 {
 public:
-    using GoogleDriveCredentialStore::GoogleDriveCredentialStore;
+    explicit KeychainStore(bool sync, QObject *parent) : GoogleDriveCredentialStore(parent)
+        , m_key(sync ? QStringLiteral("desktop-sync-account-v1") : QString::fromLatin1(canonicalWalletKey))
+        , m_legacyKey(sync ? QStringLiteral("desktop-sync-account-legacy-v1") : QString::fromLatin1(walletKey))
+    {}
     void read(Completion completion) override
+    {
+        GoogleDriveSecretStore::run(this, m_key,
+            GoogleDriveSecretStore::Action::Read, false, {}, [this, completion](Result result, QByteArray record) {
+                m_requiresMigration = false;
+                if (result == Result::Missing || result == Result::Unavailable)
+                    readLegacy(completion);
+                else
+                    completion(result, record);
+            });
+    }
+    void readSilently(Completion completion) override
+    {
+        GoogleDriveSecretStore::run(this, m_key,
+            GoogleDriveSecretStore::Action::Read, true, {},
+            [this, completion](Result result, QByteArray record) {
+                if (result != Result::Missing) {
+                    completion(result, record);
+                    return;
+                }
+                // Older Secret Service records are also safe to reuse while
+                // already unlocked. Native KWallet-only records still defer;
+                // automatic mode never invokes QtKeychain or migrates data.
+                GoogleDriveSecretStore::run(this, m_legacyKey,
+                    GoogleDriveSecretStore::Action::Read, true, {}, completion);
+            });
+    }
+    bool requiresMigration() const override { return m_requiresMigration; }
+    void readLegacy(Completion completion)
     {
         auto *job = new QKeychain::ReadPasswordJob(QString::fromLatin1(walletService), this);
         configure(job);
-        connect(job, &QKeychain::Job::finished, this, [job, completion](QKeychain::Job *) {
+        connect(job, &QKeychain::Job::finished, this, [this, job, completion](QKeychain::Job *) {
             const Result result = job->error() == QKeychain::NoError ? Result::Success
                 : job->error() == QKeychain::EntryNotFound ? Result::Missing : Result::Failed;
-            completion(result, result == Result::Success ? job->binaryData() : QByteArray());
+            if (result != Result::Success) {
+                completion(result, {});
+                return;
+            }
+            m_requiresMigration = true;
+            completion(Result::Success, job->binaryData());
         });
         job->start();
     }
     void write(const QByteArray &record, Completion completion) override
     {
-        auto *job = new QKeychain::WritePasswordJob(QString::fromLatin1(walletService), this);
-        configure(job);
-        job->setBinaryData(record);
-        connect(job, &QKeychain::Job::finished, this, [job, completion](QKeychain::Job *) {
-            completion(job->error() == QKeychain::NoError ? Result::Success : Result::Failed, {});
+        writeCanonical(record, [this, record, completion](Result result, QByteArray) {
+            if (result != Result::Unavailable) {
+                completion(result, {});
+                return;
+            }
+            auto *job = new QKeychain::WritePasswordJob(QString::fromLatin1(walletService), this);
+            configure(job);
+            job->setBinaryData(record);
+            connect(job, &QKeychain::Job::finished, this, [job, completion](QKeychain::Job *) {
+                completion(job->error() == QKeychain::NoError ? Result::Success : Result::Failed, {});
+            });
+            job->start();
         });
-        job->start();
     }
     void remove(Completion completion) override
+    {
+        GoogleDriveSecretStore::run(this, m_key,
+            GoogleDriveSecretStore::Action::Remove, false, {}, [this, completion](Result result, QByteArray) {
+                removeLegacy([result, completion](Result legacy, QByteArray) {
+                    completion(result == Result::Success && legacy == Result::Success
+                        ? Result::Success : Result::Failed, {});
+                });
+            });
+    }
+private:
+    void writeCanonical(const QByteArray &record, Completion completion)
+    {
+        GoogleDriveSecretStore::run(this, m_key,
+            GoogleDriveSecretStore::Action::Write, false, record, [this, completion](Result result, QByteArray) {
+                if (result != Result::Success) {
+                    completion(result, {});
+                    return;
+                }
+                removeLegacy([this, completion](Result removed, QByteArray) {
+                    if (removed == Result::Success) {
+                        m_requiresMigration = false;
+                        completion(Result::Success, {});
+                        return;
+                    }
+                    // Do not leave a silently duplicated account when a legacy
+                    // wallet refuses deletion. Keep the original record intact.
+                    GoogleDriveSecretStore::run(this, m_key,
+                        GoogleDriveSecretStore::Action::Remove, false, {},
+                        [completion](Result, QByteArray) { completion(Result::Failed, {}); });
+                });
+            });
+    }
+    void removeLegacy(Completion completion)
     {
         auto *job = new QKeychain::DeletePasswordJob(QString::fromLatin1(walletService), this);
         configure(job);
@@ -84,13 +161,15 @@ public:
         });
         job->start();
     }
-private:
-    static void configure(QKeychain::Job *job)
+    void configure(QKeychain::Job *job)
     {
-        job->setKey(QString::fromLatin1(walletKey));
+        job->setKey(m_legacyKey);
         job->setInsecureFallback(false);
         job->setAutoDelete(true);
     }
+    bool m_requiresMigration = false;
+    QString m_key;
+    QString m_legacyKey;
 };
 }
 
@@ -269,19 +348,27 @@ private:
 };
 
 GoogleDriveAuth::GoogleDriveAuth(ClientConfig config, QObject *parent)
-    : GoogleDriveAuth(std::move(config), Dependencies{}, parent) {}
+    : GoogleDriveAuth(std::move(config), Dependencies{}, AccountPurpose::Browse, parent) {}
+
+GoogleDriveAuth::GoogleDriveAuth(ClientConfig config, AccountPurpose purpose, QObject *parent)
+    : GoogleDriveAuth(std::move(config), Dependencies{}, purpose, parent) {}
 
 GoogleDriveAuth::GoogleDriveAuth(ClientConfig config, Dependencies dependencies, QObject *parent)
-    : QObject(parent), m_config(std::move(config)), m_dependencies(std::move(dependencies))
+    : GoogleDriveAuth(std::move(config), std::move(dependencies), AccountPurpose::Browse, parent) {}
+
+GoogleDriveAuth::GoogleDriveAuth(ClientConfig config, Dependencies dependencies, AccountPurpose purpose, QObject *parent)
+    : QObject(parent), m_config(std::move(config)), m_purpose(purpose), m_dependencies(std::move(dependencies))
 {
-    m_store = m_dependencies.store ? m_dependencies.store : new KeychainStore(this);
+    m_store = m_dependencies.store ? m_dependencies.store : new KeychainStore(purpose == AccountPurpose::Sync, this);
     if (!m_dependencies.openBrowser)
         m_dependencies.openBrowser = [](const QUrl &url) { return QDesktopServices::openUrl(url); };
     if (!m_dependencies.networkFactory)
         m_dependencies.networkFactory = [](QObject *owner) { return new GoogleDriveBoundedNetwork(owner); };
     m_timeout.setSingleShot(true);
     connect(&m_timeout, &QTimer::timeout, this, [this] {
-        if (m_operation == Operation::Revoking || m_operation == Operation::AwaitingRevocationToken) {
+        if (m_silentRead && m_operation == Operation::Reading) {
+            finishSilentRead(SavedAccountResult::Unavailable);
+        } else if (m_operation == Operation::Revoking || m_operation == Operation::AwaitingRevocationToken) {
             clearFlow();
             deleteRecord(tr("Signed out locally, but Google could not confirm access was revoked. Remove Explorer in your Google account's app permissions."));
         } else {
@@ -293,6 +380,8 @@ GoogleDriveAuth::GoogleDriveAuth(ClientConfig config, Dependencies dependencies,
 GoogleDriveAuth::~GoogleDriveAuth() { clearFlow(); }
 
 QString GoogleDriveAuth::requiredScope() { return QStringLiteral("https://www.googleapis.com/auth/drive.readonly"); }
+QString GoogleDriveAuth::syncScope() { return QStringLiteral("https://www.googleapis.com/auth/drive"); }
+QString GoogleDriveAuth::authorizationScope() const { return m_purpose == AccountPurpose::Sync ? syncScope() : requiredScope(); }
 bool GoogleDriveAuth::available() const
 {
     static const QRegularExpression id(QStringLiteral("\\A[A-Za-z0-9_-]{1,1024}\\.apps\\.googleusercontent\\.com\\z"));
@@ -346,6 +435,7 @@ void GoogleDriveAuth::fail(const QString &message)
     m_operation = Operation::Idle;
     m_cancelWrite = false;
     m_pendingSignOut = false;
+    m_pendingForget = false;
     emit failed(message);
     emit idle();
 }
@@ -362,7 +452,7 @@ void GoogleDriveAuth::makeFlow()
     m_flow->setClientIdentifierSharedKey(m_config.clientSecret);
     m_flow->setAuthorizationUrl(QUrl(QStringLiteral("https://accounts.google.com/o/oauth2/v2/auth")));
     m_flow->setAccessTokenUrl(QUrl(QStringLiteral("https://oauth2.googleapis.com/token")));
-    m_flow->setScope(requiredScope());
+    m_flow->setScope(authorizationScope());
     m_flow->setState(randomSecret());
     m_flow->setPkceMethod(QOAuth2AuthorizationCodeFlow::PkceMethod::S256, 64);
     m_reply = new GoogleDriveLoopbackReply(m_flow);
@@ -427,6 +517,40 @@ void GoogleDriveAuth::connectExisting()
     readRecord(false);
 }
 
+void GoogleDriveAuth::connectSavedAccount()
+{
+    if (isBusy())
+        return;
+    if (!available()) {
+        finishSilentRead(SavedAccountResult::Unavailable);
+        return;
+    }
+    readRecord(false, false, true, true);
+}
+
+void GoogleDriveAuth::connectSavedAccountInteractively()
+{
+    if (isBusy())
+        return;
+    if (!available()) {
+        finishSilentRead(SavedAccountResult::Unavailable);
+        return;
+    }
+    readRecord(false, false, true, false);
+}
+
+void GoogleDriveAuth::finishSilentRead(SavedAccountResult result)
+{
+    ++m_generation;
+    m_timeout.stop();
+    m_silentRead = false;
+    m_operation = Operation::Idle;
+    m_token = {};
+    m_password.clear();
+    emit savedAccountUnavailable(result);
+    emit idle();
+}
+
 bool GoogleDriveAuth::validateToken(const QJsonObject &token)
 {
     static const QSet<QString> expected {QStringLiteral("access_token"), QStringLiteral("refresh_token"),
@@ -453,7 +577,7 @@ bool GoogleDriveAuth::decodeRecord(const QByteArray &record, QJsonObject *token,
     const QString secret = object.value(QStringLiteral("config_password")).toString();
     if (object.value(QStringLiteral("version")).toInt() != 1
         || object.value(QStringLiteral("client_id")).toString() != m_config.clientId
-        || object.value(QStringLiteral("scope")).toString() != requiredScope()
+        || object.value(QStringLiteral("scope")).toString() != authorizationScope()
         || secret.size() != 43 || !validateToken(object.value(QStringLiteral("token")).toObject()))
         return false;
     for (const QChar c : secret) {
@@ -468,21 +592,36 @@ bool GoogleDriveAuth::decodeRecord(const QByteArray &record, QJsonObject *token,
 QByteArray GoogleDriveAuth::encodeRecord() const
 {
     return QJsonDocument(QJsonObject {{QStringLiteral("version"), 1},
-        {QStringLiteral("client_id"), m_config.clientId}, {QStringLiteral("scope"), requiredScope()},
+        {QStringLiteral("client_id"), m_config.clientId}, {QStringLiteral("scope"), authorizationScope()},
         {QStringLiteral("token"), m_token}, {QStringLiteral("config_password"), m_password}}).toJson(QJsonDocument::Compact);
 }
 
-void GoogleDriveAuth::readRecord(bool forSignOut, bool forSignIn)
+void GoogleDriveAuth::readRecord(bool forSignOut, bool forSignIn, bool savedOnly, bool silent)
 {
     const quint64 generation = ++m_generation;
     m_operation = Operation::Reading;
-    emit statusChanged(tr("Opening the desktop credential wallet…"));
+    m_silentRead = silent;
+    if (silent)
+        m_timeout.start(10000);
+    else
+        emit statusChanged(tr("Opening the desktop credential wallet…"));
     const QPointer<GoogleDriveAuth> guard(this);
-    m_store->read([guard, generation, forSignOut, forSignIn](GoogleDriveCredentialStore::Result result, QByteArray record) {
+    auto completion = [guard, generation, forSignOut, forSignIn, savedOnly, silent](GoogleDriveCredentialStore::Result result, QByteArray record) {
         if (!guard || generation != guard->m_generation)
             return;
         auto *self = guard.data();
-        if (result == GoogleDriveCredentialStore::Result::Failed) {
+        self->m_timeout.stop();
+        self->m_silentRead = false;
+        if (savedOnly && result != GoogleDriveCredentialStore::Result::Success) {
+            self->finishSilentRead(result == GoogleDriveCredentialStore::Result::Missing
+                ? SavedAccountResult::Missing
+                : result == GoogleDriveCredentialStore::Result::InteractionRequired
+                    ? SavedAccountResult::WalletLocked : SavedAccountResult::Unavailable);
+            return;
+        }
+        if (result == GoogleDriveCredentialStore::Result::Failed
+            || result == GoogleDriveCredentialStore::Result::Unavailable
+            || result == GoogleDriveCredentialStore::Result::InteractionRequired) {
             self->fail(tr("The desktop credential wallet is unavailable or locked. Unlock it and try again."));
             return;
         }
@@ -497,10 +636,12 @@ void GoogleDriveAuth::readRecord(bool forSignOut, bool forSignIn)
             return;
         }
         if (!self->decodeRecord(record, &self->m_token, &self->m_password)) {
-            if (forSignOut)
+            if (savedOnly)
+                self->finishSilentRead(SavedAccountResult::Invalid);
+            else if (forSignOut)
                 self->deleteRecord(tr("Saved credentials were invalid and were removed locally. Google access could not be revoked; remove Explorer in your Google account's app permissions."));
             else
-                self->fail(tr("Saved Google credentials do not match this application or its read-only access. Sign out and sign in again."));
+                self->fail(tr("Saved Google credentials do not match this application or the requested Drive access. Sign out and sign in again."));
             return;
         }
         if (forSignOut) {
@@ -512,12 +653,22 @@ void GoogleDriveAuth::readRecord(bool forSignOut, bool forSignIn)
             emit self->revocationTokenRequested(self->m_password);
         } else if (forSignIn) {
             self->beginAuthorization();
+        } else if (!silent && self->m_store->requiresMigration()) {
+            // Migration is a real wallet write. Use Writing's cancellation and
+            // process-lock retention, and never replay the older wallet token
+            // over rclone's canonical refreshed token during reconnect.
+            self->saveRecord(true);
         } else {
+            self->m_silentRead = false;
             self->m_operation = Operation::Idle;
             emit self->authorized({}, self->m_password);
             emit self->idle();
         }
-    });
+    };
+    if (silent)
+        m_store->readSilently(std::move(completion));
+    else
+        m_store->read(std::move(completion));
 }
 
 void GoogleDriveAuth::finishTokens(const QVariantMap &values)
@@ -527,8 +678,8 @@ void GoogleDriveAuth::finishTokens(const QVariantMap &values)
     const int seconds = values.value(QStringLiteral("expires_in")).toInt(&expiryOk);
     // Google supports granular consent. Never infer a grant from our request,
     // including when Qt would otherwise assume a missing scope was granted.
-    if (scopes.size() != 1 || scopes.first() != requiredScope() || !expiryOk || seconds <= 0 || seconds > 86400) {
-        fail(tr("Google did not confirm the required read-only Drive permission. Sign in again and allow that permission."));
+    if (scopes.size() != 1 || scopes.first() != authorizationScope() || !expiryOk || seconds <= 0 || seconds > 86400) {
+        fail(tr("Google did not confirm the requested Drive permission. Sign in again and allow that permission."));
         return;
     }
     QJsonObject token {{QStringLiteral("access_token"), values.value(QStringLiteral("access_token")).toString()},
@@ -544,17 +695,23 @@ void GoogleDriveAuth::finishTokens(const QVariantMap &values)
     m_reply->setTokenAccepted(true);
 }
 
-void GoogleDriveAuth::saveRecord()
+void GoogleDriveAuth::saveRecord(bool reconnect)
 {
     clearFlow();
     m_operation = Operation::Writing;
     m_cancelWrite = false;
     const quint64 generation = m_generation;
     const QPointer<GoogleDriveAuth> guard(this);
-    m_store->write(encodeRecord(), [guard, generation](GoogleDriveCredentialStore::Result result, QByteArray) {
+    m_store->write(encodeRecord(), [guard, generation, reconnect](GoogleDriveCredentialStore::Result result, QByteArray) {
         if (!guard || generation != guard->m_generation)
             return;
         auto *self = guard.data();
+        if (self->m_pendingForget && !self->m_pendingSignOut) {
+            self->m_pendingForget = false;
+            self->m_operation = Operation::Idle;
+            self->forgetLocalAccount();
+            return;
+        }
         if (result != GoogleDriveCredentialStore::Result::Success) {
             self->fail(tr("Google credentials could not be saved securely in the desktop wallet. Unlock the wallet and try again."));
             return;
@@ -562,6 +719,7 @@ void GoogleDriveAuth::saveRecord()
         self->m_operation = Operation::Idle;
         if (self->m_pendingSignOut) {
             self->m_pendingSignOut = false;
+            self->m_pendingForget = false;
             self->signOut();
             return;
         }
@@ -572,7 +730,7 @@ void GoogleDriveAuth::saveRecord()
             return;
         }
         emit self->statusChanged(tr("Google account connected."));
-        emit self->authorized(QJsonDocument(self->m_token).toJson(QJsonDocument::Compact), self->m_password);
+        emit self->authorized(reconnect ? QByteArray() : QJsonDocument(self->m_token).toJson(QJsonDocument::Compact), self->m_password);
         emit self->idle();
     });
 }
@@ -589,6 +747,7 @@ void GoogleDriveAuth::cancel()
         return;
     ++m_generation;
     clearFlow();
+    m_silentRead = false;
     m_operation = Operation::Idle;
     emit statusChanged(tr("Google sign-in cancelled."));
     emit idle();
@@ -604,6 +763,22 @@ void GoogleDriveAuth::signOut()
         return;
     cancel();
     readRecord(true);
+}
+
+void GoogleDriveAuth::forgetLocalAccount()
+{
+    if (m_operation == Operation::Writing) {
+        m_pendingForget = true;
+        return;
+    }
+    if (m_operation == Operation::Deleting)
+        return;
+    ++m_generation;
+    clearFlow();
+    m_silentRead = false;
+    m_pendingForget = false;
+    m_pendingSignOut = false;
+    deleteRecord(); // deliberately no wallet read, browser, or Google revocation
 }
 
 void GoogleDriveAuth::completeSignOut(const QByteArray &currentRcloneToken)
@@ -655,6 +830,8 @@ void GoogleDriveAuth::deleteRecord(const QString &revocationError)
             return;
         auto *self = guard.data();
         self->m_operation = Operation::Idle;
+        self->m_pendingForget = false;
+        self->m_pendingSignOut = false;
         self->m_token = {};
         self->m_password.clear();
         if (result != GoogleDriveCredentialStore::Result::Success) {

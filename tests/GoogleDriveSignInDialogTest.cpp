@@ -52,6 +52,11 @@ QCheckBox *networkCheck(GoogleDriveSignInDialog &dialog)
     return dialog.findChild<QCheckBox *>(QStringLiteral("googleDriveShowInNetwork"));
 }
 
+QCheckBox *autoReconnectCheck(GoogleDriveSignInDialog &dialog)
+{
+    return dialog.findChild<QCheckBox *>(QStringLiteral("googleDriveAutoReconnect"));
+}
+
 int placeCount(KFilePlacesModel &places, const QUrl &url)
 {
     int count = 0;
@@ -98,6 +103,9 @@ private Q_SLOTS:
         QVERIFY(button(dialog, "googleDriveSignOut")->isVisible());
         QVERIFY(button(dialog, "googleDriveSignOut")->isEnabled());
         QVERIFY(networkCheck(dialog)->isChecked());
+        QVERIFY(autoReconnectCheck(dialog)->isChecked());
+        QCOMPARE(autoReconnectCheck(dialog)->accessibleName(),
+                 QStringLiteral("Reconnect Google Drive automatically when Explorer starts"));
         QCOMPARE(button(dialog, "googleDriveSignIn")->accessibleName(),
                  QStringLiteral("Sign in with Google"));
         QVERIFY(!status(dialog)->accessibleDescription().isEmpty());
@@ -194,6 +202,57 @@ private Q_SLOTS:
         QCOMPARE(connection.cancelCalls, 0);
     }
 
+    void unownedSharedConnectionCannotNavigateOrBookmark()
+    {
+        KFilePlacesModel places;
+        waitForPlacesInitialized(places);
+        FakeGoogleDriveConnection connection;
+        GoogleDriveSignInDialog dialog(&places, nullptr, &connection);
+        showDialog(dialog);
+
+        // Another Explorer window may complete the shared connection while
+        // this dialog is open. The result belongs to that window, so this one
+        // must not accept or add its optional Network shortcut.
+        Q_EMIT connection.connected(Locations::googleDriveMount());
+        QCOMPARE(dialog.result(), 0);
+        QVERIFY(dialog.mappedUrl().isEmpty());
+        QCOMPARE(placeCount(places, Locations::googleDriveMount()), 0);
+
+        // Startup reconnect reports shared state rather than an explicit
+        // connected(url) request. The dialog may update its buttons, but must
+        // still leave navigation and bookmarking to the owning window.
+        connection.connectedState = true;
+        Q_EMIT connection.stateChanged(GoogleDriveConnection::ConnectionState::Connected);
+        QCOMPARE(dialog.result(), 0);
+        QCOMPARE(dialog.mappedUrl(), Locations::googleDriveMount());
+        QCOMPARE(placeCount(places, Locations::googleDriveMount()), 0);
+    }
+
+    void automaticReconnectPreferenceIsRemembered()
+    {
+        FakeGoogleDriveConnection connection;
+        const bool previous = connection.autoReconnectEnabled();
+        connection.setAutoReconnectEnabled(true);
+        GoogleDriveSignInDialog dialog(nullptr, nullptr, &connection);
+        showDialog(dialog);
+        QVERIFY(autoReconnectCheck(dialog)->isChecked());
+        autoReconnectCheck(dialog)->setChecked(false);
+        QVERIFY(!connection.autoReconnectEnabled());
+        connection.setAutoReconnectEnabled(previous);
+    }
+
+    void reconnectNeedsSignInShowsExplicitRetryAction()
+    {
+        FakeGoogleDriveConnection connection;
+        GoogleDriveSignInDialog dialog(nullptr, nullptr, &connection);
+        showDialog(dialog);
+        Q_EMIT connection.stateChanged(GoogleDriveConnection::ConnectionState::SignInRequired);
+        QCOMPARE(status(dialog)->text(), QStringLiteral("Sign in again to reconnect to Google Drive."));
+        QVERIFY(button(dialog, "googleDriveSignInAgain")->isVisible());
+        button(dialog, "googleDriveSignInAgain")->click();
+        QCOMPARE(connection.retryCalls, 1);
+    }
+
     void retryAndConnectionActionsCallTheirOwnOperations()
     {
         FakeGoogleDriveConnection connection;
@@ -233,6 +292,8 @@ private Q_SLOTS:
         QVERIFY(!button(signOutDialog, "googleDriveOpen")->isEnabled());
         Q_EMIT signingOut.disconnected();
         Q_EMIT signingOut.signedOut();
+        // Sign-out may finish locally but report that Google revocation could
+        // not be verified. Preserve that warning as part of the owned action.
         Q_EMIT signingOut.failed(QStringLiteral("Google account revocation could not be confirmed."));
         QCOMPARE(status(signOutDialog)->text(),
                  QStringLiteral("Google account revocation could not be confirmed."));
@@ -259,6 +320,7 @@ private Q_SLOTS:
         QVERIFY(!button(dialog, "googleDriveOpen")->isVisible());
         QVERIFY(!button(dialog, "googleDriveDisconnect")->isVisible());
 
+        button(dialog, "googleDriveSignIn")->click();
         Q_EMIT connection.failed(QStringLiteral("The Drive mount is unavailable."));
         QVERIFY(button(dialog, "googleDriveSignOut")->isVisible());
         QVERIFY(button(dialog, "googleDriveSignInAgain")->isVisible());
@@ -310,6 +372,8 @@ private Q_SLOTS:
             QFont font = status(dialog)->font();
             font.setPointSizeF(9.0 * scale);
             status(dialog)->setFont(font);
+            button(dialog, button(dialog, "googleDriveSignInAgain")->isVisible()
+                               ? "googleDriveSignInAgain" : "googleDriveSignIn")->click();
             Q_EMIT connection.failed(message);
             QCoreApplication::processEvents();
             QCOMPARE(status(dialog)->textFormat(), Qt::PlainText);

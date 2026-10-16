@@ -799,5 +799,217 @@ class GoogleDriveMountHelperTest(unittest.TestCase):
             read.assert_not_called()
 
 
+class GoogleDriveQuotaHelperTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="explorer-drive-quota-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name)
+        self.helper = HELPER.AppDriveHelper(self.home, environment={})
+        self.output = io.StringIO()
+        self.output_context = contextlib.redirect_stdout(self.output)
+        self.output_context.__enter__()
+        self.addCleanup(self.output_context.__exit__, None, None, None)
+
+    def records(self, mount_id="123", **kwargs):
+        records = mount_record(**kwargs)
+        records[0]["mount_id"] = mount_id
+        return records
+
+    def stats(self, **kwargs):
+        values = dict(f_frsize=4096, f_blocks=3932160, f_bfree=1003453, f_bavail=1003453)
+        values.update(kwargs)
+        return SimpleNamespace(**values)
+
+    @contextlib.contextmanager
+    def quota_io(self, records=None, stats=None):
+        with contextlib.ExitStack() as stack:
+            patches = {
+                "records": stack.enter_context(mock.patch.object(self.helper, "mount_records",
+                    return_value=self.records() if records is None else records)),
+                "open": stack.enter_context(mock.patch.object(HELPER.os, "open", return_value=51)),
+                "close": stack.enter_context(mock.patch.object(HELPER.os, "close")),
+                "stat": stack.enter_context(mock.patch.object(HELPER.os, "fstatvfs",
+                    return_value=self.stats() if stats is None else stats)),
+                "fd_id": stack.enter_context(mock.patch.object(HELPER, "descriptor_mount_id", return_value="123")),
+            }
+            yield patches
+
+    def test_quota_emits_exact_decimal_bytes_and_mount_identity(self):
+        with self.quota_io() as calls:
+            self.helper.app_quota()
+        self.assertEqual(json.loads(self.output.getvalue()),
+                         {"mount_id": "123", "total": "16106127360", "available": "4110143488"})
+        self.assertLess(len(self.output.getvalue()), 256)
+        calls["records"].assert_has_calls([mock.call(include_id=True), mock.call(include_id=True)])
+        calls["open"].assert_called_once_with(self.helper.mount,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        calls["stat"].assert_called_once_with(51)
+        calls["fd_id"].assert_has_calls([mock.call(51), mock.call(51)])
+        calls["close"].assert_called_once_with(51)
+
+    def test_zero_available_and_large_genuine_quota_remain_valid(self):
+        for total in (16106127360, 2 << 50, HELPER.UNSIGNED_64_MAX):
+            with self.subTest(total=total), self.quota_io(stats=self.stats(
+                    f_frsize=1, f_blocks=total, f_bfree=0, f_bavail=0)):
+                self.output.seek(0)
+                self.output.truncate(0)
+                self.helper.app_quota()
+                self.assertEqual(json.loads(self.output.getvalue()),
+                                 {"mount_id": "123", "total": str(total), "available": "0"})
+
+    def test_missing_foreign_writable_and_stacked_mounts_never_open_path(self):
+        conflicting_options = self.records()
+        conflicting_options[0]["options"].add("rw")
+        cases = [[], self.records(source="other:"), self.records(fstype="fuse.sshfs"),
+                 self.records(mode="rw"), self.records(mode="nosuid"), conflicting_options,
+                 self.records() + self.records("124")]
+        for records in cases:
+            with self.subTest(records=records), self.quota_io(records=records) as calls:
+                with self.assertRaises(HELPER.HelperError):
+                    self.helper.app_quota()
+                calls["open"].assert_not_called()
+                calls["stat"].assert_not_called()
+                calls["close"].assert_not_called()
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_mount_id_requires_bounded_canonical_unsigned_decimal(self):
+        for mount_id in (None, 123, "0", "0123", "-1", "1.0", "1e3", "１２３", "1\n", "9" * 21,
+                         str(HELPER.UNSIGNED_64_MAX + 1)):
+            with self.subTest(mount_id=mount_id), self.quota_io(records=self.records(mount_id)) as calls:
+                with self.assertRaises(HELPER.HelperError):
+                    self.helper.app_quota()
+                calls["open"].assert_not_called()
+
+    def test_opened_descriptor_must_reference_verified_mount_before_any_stat(self):
+        with self.quota_io() as calls:
+            calls["fd_id"].return_value = "124"
+            with self.assertRaises(HELPER.HelperError):
+                self.helper.app_quota()
+            calls["stat"].assert_not_called()
+            calls["close"].assert_called_once_with(51)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_changed_removed_or_replaced_mount_after_stat_discards_capacity(self):
+        for final_records in ([], self.records("124"), self.records(source="other:"),
+                              self.records(mode="rw"), self.records() + self.records("124")):
+            with self.subTest(final_records=final_records), self.quota_io() as calls:
+                calls["records"].side_effect = [self.records(), final_records]
+                with self.assertRaises(HELPER.HelperError):
+                    self.helper.app_quota()
+                calls["stat"].assert_called_once_with(51)
+                calls["close"].assert_called_once_with(51)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_descriptor_mount_id_is_rechecked_after_stat(self):
+        with self.quota_io() as calls:
+            calls["fd_id"].side_effect = ["123", "124"]
+            with self.assertRaises(HELPER.HelperError):
+                self.helper.app_quota()
+            calls["stat"].assert_called_once_with(51)
+            calls["close"].assert_called_once_with(51)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_invalid_counts_and_rclone_unknown_quota_never_produce_numbers(self):
+        invalid = []
+        for field in ("f_frsize", "f_blocks", "f_bfree", "f_bavail"):
+            invalid.extend(self.stats(**{field: value}) for value in (-1, True, 1.5, "4096", None,
+                                                                    HELPER.UNSIGNED_64_MAX + 1))
+        invalid.extend([self.stats(f_frsize=0), self.stats(f_blocks=0),
+                        self.stats(f_bfree=3932161), self.stats(f_bavail=1003454),
+                        self.stats(f_frsize=2, f_blocks=HELPER.UNSIGNED_64_MAX, f_bfree=0, f_bavail=0),
+                        self.stats(f_frsize=1, f_blocks=HELPER.RCLONE_UNKNOWN_QUOTA, f_bfree=0, f_bavail=0),
+                        self.stats(f_frsize=1, f_blocks=HELPER.RCLONE_UNKNOWN_QUOTA + 100,
+                                   f_bfree=HELPER.RCLONE_UNKNOWN_QUOTA, f_bavail=100),
+                        self.stats(f_frsize=1, f_blocks=HELPER.RCLONE_UNKNOWN_QUOTA + 100,
+                                   f_bfree=HELPER.RCLONE_UNKNOWN_QUOTA, f_bavail=HELPER.RCLONE_UNKNOWN_QUOTA)])
+        for info in invalid:
+            with self.subTest(info=info), self.quota_io(stats=info) as calls:
+                with self.assertRaises(HELPER.HelperError):
+                    self.helper.app_quota()
+                calls["close"].assert_called_once_with(51)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_open_and_stat_failures_are_generic_and_descriptor_is_closed(self):
+        for operation in ("open", "stat", "fd_id"):
+            with self.subTest(operation=operation), self.quota_io() as calls:
+                calls[operation].side_effect = OSError("private filesystem path or server response")
+                with self.assertRaisesRegex(HELPER.HelperError,
+                                            "^Google Drive storage information is unavailable\\.$"):
+                    self.helper.app_quota()
+                if operation == "open":
+                    calls["close"].assert_not_called()
+                else:
+                    calls["close"].assert_called_once_with(51)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_mountinfo_id_opt_in_preserves_existing_record_shape(self):
+        text = f"123 21 0:31 / {self.helper.mount} ro,nosuid,nodev - fuse.rclone {HELPER.REMOTE} rw\n"
+        with mock.patch.object(Path, "open", return_value=io.StringIO(text)):
+            self.assertEqual(self.helper.mount_records(), mount_record())
+        with mock.patch.object(Path, "open", return_value=io.StringIO(text)):
+            self.assertEqual(self.helper.mount_records(include_id=True),
+                             [{"mount_id": "123", "source": HELPER.REMOTE,
+                               "fstype": "fuse.rclone", "options": {"ro", "nosuid", "nodev"}}])
+
+    def test_mountinfo_and_fdinfo_reads_are_bounded(self):
+        stream = mock.MagicMock()
+        stream.__enter__.return_value = stream
+        stream.read.return_value = "x" * (1024 * 1024 + 1)
+        with mock.patch.object(Path, "open", return_value=stream):
+            with self.assertRaises(HELPER.HelperError):
+                self.helper.mount_records(include_id=True)
+        stream.read.assert_called_once_with(1024 * 1024 + 1)
+        stream.read.reset_mock()
+        stream.read.return_value = "x" * (16 * 1024 + 1)
+        with mock.patch.object(Path, "open", return_value=stream):
+            with self.assertRaises(HELPER.HelperError):
+                HELPER.descriptor_mount_id(51)
+        stream.read.assert_called_once_with(16 * 1024 + 1)
+
+    def test_fdinfo_accepts_only_one_valid_kernel_mount_id(self):
+        for text in ("pos:\t0\nmnt_id:\t123\nflags:\t0100000\n", "mnt_id: 123\n"):
+            with mock.patch.object(Path, "open", autospec=True, return_value=io.StringIO(text)) as opened:
+                self.assertEqual(HELPER.descriptor_mount_id(51), "123")
+                opened.assert_called_once_with(Path("/proc/self/fdinfo/51"), encoding="ascii")
+        for text in ("", "mnt_id: 123\nmnt_id: 123\n", "mnt_id: -1\n", "mnt_id: 0123\n",
+                     "mnt_id: １２３\n", "mnt_id: " + str(HELPER.UNSIGNED_64_MAX + 1)):
+            with self.subTest(text=text), mock.patch.object(Path, "open", return_value=io.StringIO(text)):
+                with self.assertRaises(HELPER.HelperError):
+                    HELPER.descriptor_mount_id(51)
+
+    def test_cli_quota_never_reads_stdin_credentials_config_or_takes_a_lock(self):
+        self.helper.safe_directory(self.helper.config_dir, create=True)
+        self.helper.config.write_bytes(b"opaque-existing-config\n")
+        self.helper.config.chmod(0o600)
+        before = (self.helper.config.read_bytes(), self.helper.config.stat(),
+                  sorted(str(path) for path in self.home.rglob("*")))
+        with self.quota_io(), contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(HELPER, "AppDriveHelper", return_value=self.helper))
+            stack.enter_context(mock.patch.object(HELPER.os, "getuid", return_value=1000))
+            stack.enter_context(mock.patch.object(HELPER.sys, "stdin", object()))
+            for name in ("app_credentials", "encrypted_config", "checked_file", "require_binary"):
+                stack.enter_context(mock.patch.object(HELPER, name, side_effect=AssertionError(name + " called")))
+            for name in ("operation_lock", "safe_directory", "require_encrypted", "read_app_token",
+                         "install_app_config", "password_command", "rclone_args", "run_private"):
+                stack.enter_context(mock.patch.object(self.helper, name, side_effect=AssertionError(name + " called")))
+            stack.enter_context(mock.patch.object(HELPER.subprocess, "run", side_effect=AssertionError("child run")))
+            stack.enter_context(mock.patch.object(HELPER.subprocess, "Popen", side_effect=AssertionError("child spawn")))
+            self.assertEqual(HELPER.main(["app-quota"]), 0)
+        self.assertEqual(json.loads(self.output.getvalue())["available"], "4110143488")
+        after = (self.helper.config.read_bytes(), self.helper.config.stat(),
+                 sorted(str(path) for path in self.home.rglob("*")))
+        self.assertEqual(before, after)
+
+    def test_cli_quota_failure_prints_only_generic_error_and_no_json(self):
+        errors = io.StringIO()
+        with self.quota_io() as calls, contextlib.redirect_stderr(errors), \
+             mock.patch.object(HELPER, "AppDriveHelper", return_value=self.helper), \
+             mock.patch.object(HELPER.os, "getuid", return_value=1000):
+            calls["stat"].side_effect = OSError("private-token-or-path")
+            self.assertEqual(HELPER.main(["app-quota"]), 1)
+        self.assertEqual(errors.getvalue(), "Google Drive storage information is unavailable.\n")
+        self.assertEqual(self.output.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

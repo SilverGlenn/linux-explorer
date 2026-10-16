@@ -151,6 +151,7 @@ private:
     void showMountDialog();
     void showMapDriveDialog();
     void showGoogleDriveDialog();
+    void showGoogleDriveSyncDialog();
 
     // For the Computer view's command bar, saying so when nothing is installed
     void openSystemApplication(const QStringList &desktopNames);
@@ -306,6 +307,7 @@ private:
     QAction *m_actConnectDrives = nullptr;
     QAction *m_actMapDrive = nullptr;
     QAction *m_actGoogleDrive = nullptr;
+    QAction *m_actGoogleDriveSync = nullptr;
     QAction *m_actPreviewPane = nullptr;
     QAction *m_actHelp = nullptr;
     QAction *m_actExtract = nullptr;
