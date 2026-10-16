@@ -1,6 +1,7 @@
 #include "LibrariesView.h"
 #include "Libraries.h"
 #include "aero/icons.h"
+#include "aero/contextmenu.h"
 #include "aero/listview.h"
 #include "aero/palette.h"
 #include "aero/text.h"
@@ -90,7 +91,7 @@ LibrariesView::LibrariesView(QWidget *parent) : QWidget(parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(18, 8, 8, 0);
     layout->setSpacing(0);
-    auto *title = Aero::label(tr("Libraries"), 12, "#006600");
+    auto *title = Aero::label(tr("Libraries"), 14, "#006600");
     title->setObjectName(QStringLiteral("librariesHeading"));
     layout->addWidget(title);
     auto *description = Aero::label(
@@ -227,6 +228,8 @@ void LibrariesView::showItemContextMenu(QAbstractItemView *view, const QPoint &p
                           [this, target] { Q_EMIT urlActivated(target); }));
     menu.addAction(tr("Open in &new window"), this,
                    [this, target] { Q_EMIT newWindowRequested(target); });
+    Aero::setPointSize(&menu, 9);
+    Aero::styleContextMenu(&menu);
     menu.exec(view->viewport()->mapToGlobal(pos));
 }
 

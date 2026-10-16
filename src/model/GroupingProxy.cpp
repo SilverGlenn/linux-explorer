@@ -1,4 +1,5 @@
 #include "GroupingProxy.h"
+#include "aero/fonts.h"
 #include "DirectoryModel.h"
 
 #include <KFileItem>
@@ -364,9 +365,7 @@ QVariant GroupingProxy::data(const QModelIndex &index, int role) const
                 return {};
             return QStringLiteral("%1 (%2)").arg(group.title).arg(group.rows.size());
         case Qt::FontRole: {
-            QFont font;
-            font.setBold(true);
-            return font;
+            return Aero::shellFont(11);
         }
         default:
             return {};

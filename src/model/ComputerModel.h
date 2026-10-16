@@ -3,18 +3,21 @@
 #include <QAbstractTableModel>
 #include <QIcon>
 #include <QList>
+#include <QPointer>
 #include <QString>
 #include <QUrl>
 
 #include <kio/global.h>
 
 class KFilePlacesModel;
+class GoogleDriveConnection;
 
 // The drive list behind the Computer view
 //
 // There is no KIO worker that can list a machine's drives, so this is a table
-// built from the devices the places model tracks, and free space is filled in
-// afterwards by a job per row since querying can block on a dead mount
+// built from the devices the places model tracks and the connected managed
+// cloud drive. Local free space is filled in afterwards by a job per row since
+// querying can block on a dead mount; cloud quota remains unknown.
 class ComputerModel : public QAbstractTableModel {
     Q_OBJECT
 
@@ -47,6 +50,11 @@ public:
 
     explicit ComputerModel(KFilePlacesModel *places, QObject *parent = nullptr);
 
+    // An injected connection supplies mount state without starting sign-in or
+    // probing the remote filesystem. The usual constructor uses the shared one.
+    ComputerModel(KFilePlacesModel *places, GoogleDriveConnection *driveConnection,
+                  QObject *parent);
+
     // For the free space figures, which nothing watches, devices coming and
     // going being tracked by the places model itself
     void refresh();
@@ -70,6 +78,9 @@ public:
 
     // Drives that exist but are not mounted, so are absent from the rows above
     int unmountedCount() const;
+
+protected:
+    virtual void queryFreeSpace(const QUrl &url);
 
 private:
     struct Device {
@@ -102,10 +113,10 @@ private:
     };
 
     void rebuild();
-    void queryFreeSpace(const QUrl &url);
     void applySort(QList<Device> &devices) const;
 
     KFilePlacesModel *m_places = nullptr;
+    QPointer<GoogleDriveConnection> m_driveConnection;
     QList<Device> m_devices;
     int m_unmountedCount = 0;
     SortKey m_sortKey = SortByName;

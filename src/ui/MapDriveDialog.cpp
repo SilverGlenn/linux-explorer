@@ -91,7 +91,7 @@ MapDriveDialog::MapDriveDialog(KFilePlacesModel *places, QWidget *parent)
     setWindowTitle(tr("Map Network Drive"));
 
     contentLayout()->addWidget(Aero::label(
-        tr("What network folder would you like to map?"), 9));
+        tr("What network folder would you like to map?"), 12, Aero::Palette::HeadingText));
     QLabel *hint = Aero::label(
         tr("Specify the folder address, in either Windows (\\\\server\\share) "
            "or address (smb://server/share) form."), 9, Aero::Palette::MutedText);

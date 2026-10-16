@@ -7,12 +7,16 @@
 #include "Libraries.h"
 #include "Locations.h"
 #include "Settings.h"
+#include "GoogleDriveService.h"
+#include "GoogleDriveConnection.h"
 #include "aero/icons.h"
 #include "aero/text.h"
 
 #include <AeroQt/navbuttons.h>
 #include <KFilePlacesModel>
 #include <KIO/Global>
+#include <KIO/ListJob>
+#include <KIO/StatJob>
 #include <QAction>
 #include <QCompleter>
 #include <QDir>
@@ -23,6 +27,9 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMenu>
+#include <QSet>
+#include <memory>
+#include <sys/stat.h>
 #include <QProgressBar>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -54,9 +61,17 @@ constexpr int kMaxRecentEntries = 15;
 
 BrowserNavigation::BrowserNavigation(KFilePlacesModel *places, ComputerModel *computer,
                                      QHBoxLayout *layout, QObject *parent)
+    : BrowserNavigation(places, computer, layout,
+                        GoogleDriveConnection::sharedConnection(), parent)
+{}
+
+BrowserNavigation::BrowserNavigation(KFilePlacesModel *places, ComputerModel *computer,
+                                     QHBoxLayout *layout, GoogleDriveConnection *driveConnection,
+                                     QObject *parent)
     : QObject(parent ? parent : layout->parentWidget())
     , m_places(places)
     , m_computerModel(computer)
+    , m_driveConnection(driveConnection)
     , m_host(layout->parentWidget())
 {
     // No background at all, the inset call marking this bar transparent so the
@@ -224,9 +239,24 @@ BrowserNavigation::Crumb BrowserNavigation::driveFor(const QString &path) const
     if (bestLength < 0) {
         // Nothing in the places model claims this path, which happens before
         // the model has finished populating
-        return {tr("Local Disk"), QUrl::fromLocalFile(QStringLiteral("/"))};
+        return {tr("Local Disk (C:)"), QUrl::fromLocalFile(QStringLiteral("/"))};
     }
     return {label, mountUrl};
+}
+
+BrowserNavigation::~BrowserNavigation()
+{
+    cancelPathProbe();
+    if (m_crumbMenu)
+        m_crumbMenu->close();
+}
+
+void BrowserNavigation::cancelPathProbe()
+{
+    if (m_pathProbe) {
+        m_pathProbe->kill(KJob::Quietly);
+        m_pathProbe.clear();
+    }
 }
 
 QList<BrowserNavigation::Crumb> BrowserNavigation::crumbsFor(const QUrl &url) const
@@ -287,6 +317,20 @@ QList<BrowserNavigation::Crumb> BrowserNavigation::crumbsFor(const QUrl &url) co
     }
 
     if (!url.isLocalFile()) {
+        if (url.scheme() == QLatin1String("gdrive") && url.authority().isEmpty()) {
+            QUrl walk(QStringLiteral("gdrive:/"));
+            crumbs = {{tr("Network"), QUrl(QStringLiteral("remote:/"))},
+                      {tr("Google Drive"), walk}};
+            const QStringList segments = url.path().split(QLatin1Char('/'), Qt::SkipEmptyParts);
+            for (int i = 0; i < segments.size(); ++i) {
+                walk.setPath(walk.path() + (walk.path().endsWith(QLatin1Char('/'))
+                    ? QString() : QStringLiteral("/")) + segments.at(i));
+                // Keep provider file IDs on the actual destination, without
+                // attaching one folder's ID to its ancestors.
+                crumbs.append({segments.at(i), i == segments.size() - 1 ? url : walk});
+            }
+            return crumbs;
+        }
         // Remote and virtual locations hang straight off Computer
         QString label = url.scheme();
         if (url.scheme() == QLatin1String("trash"))
@@ -296,6 +340,23 @@ QList<BrowserNavigation::Crumb> BrowserNavigation::crumbsFor(const QUrl &url) co
     }
 
     const QString path = QDir::cleanPath(url.toLocalFile());
+
+    // The managed FUSE mount has a fixed private backing path. Give it a
+    // Computer drive breadcrumb trail without consulting device/storage
+    // metadata, which can block on an unavailable network filesystem.
+    if (Locations::isGoogleDriveMount(url)) {
+        const QUrl mountUrl = Locations::googleDriveMount();
+        const QString mount = QDir::cleanPath(mountUrl.toLocalFile());
+        crumbs = {{tr("Computer"), Locations::computer()},
+                  {tr("Google Drive (G:)"), mountUrl}};
+        QString walk = mount;
+        for (const QString &segment : path.mid(mount.size())
+                 .split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
+            walk += QLatin1Char('/') + segment;
+            crumbs.append({segment, QUrl::fromLocalFile(walk)});
+        }
+        return crumbs;
+    }
 
     Libraries::Entry library;
     int longest = -1;
@@ -422,6 +483,8 @@ QIcon BrowserNavigation::locationIcon(const QUrl &url) const
         return Aero::themeIcon({"system-search", "folder-saved-search"});
     if (Locations::isLibraries(url))
         return Aero::themeIcon({"folder-library", "folder-documents", "folder"});
+    if (Locations::isGoogleDriveMount(url))
+        return Aero::googleDriveIcon();
 
     // Prefer the places entry so the glyphs match the pane's, and the lookup
     // matches ancestors too, hence checking the location itself
@@ -435,6 +498,7 @@ QIcon BrowserNavigation::locationIcon(const QUrl &url) const
 
 void BrowserNavigation::clearPathLayout()
 {
+    cancelPathProbe();
     // A location change (including a D-Bus reveal) must not leave a menu for
     // the old trail visible. Close it while its breadcrumb still exists.
     if (m_crumbMenu)
@@ -497,6 +561,7 @@ void BrowserNavigation::beginPathEdit()
     m_pathEdit->setCompleter(completer);
 
     connect(m_pathEdit, &QLineEdit::returnPressed, this, &BrowserNavigation::submitPathEdit);
+    connect(m_pathEdit, &QLineEdit::textEdited, this, &BrowserNavigation::cancelPathProbe);
 
     // Layout insertion queues show() for later. Show now so F6/Alt+D
     // actually transfer the keyboard instead of leaving it on the file list.
@@ -509,6 +574,7 @@ void BrowserNavigation::submitPathEdit()
 {
     if (!m_pathEdit)
         return;
+    cancelPathProbe();
     QString text = m_pathEdit->text().trimmed();
     if (text.isEmpty()) {
         endPathEdit();
@@ -517,15 +583,59 @@ void BrowserNavigation::submitPathEdit()
     if (text.startsWith(QLatin1Char('~')))
         text.replace(0, 1, QDir::homePath());
 
-    QUrl target = QUrl::fromUserInput(text, QDir::homePath(),
-                                      QUrl::AssumeLocalFile);
+    QUrl target = GoogleDriveService::managedDriveLocation(
+        QUrl::fromUserInput(text, QDir::homePath(), QUrl::AssumeLocalFile));
 
     if (!accepts(target)) {
         endPathEdit();
         return;
     }
 
-    // Or a nonexistent path pushes a history entry and shows nothing at all
+    if (Locations::isGoogleDriveMount(target)) {
+        // The root is established by verified mount metadata. Descendants
+        // need an asynchronous worker: a FUSE stat can wait on the network.
+        if (target.matches(Locations::googleDriveMount(), QUrl::StripTrailingSlash)) {
+            finishTypedNavigation(target, text);
+            return;
+        }
+        auto *job = KIO::stat(target, KIO::StatJob::SourceSide,
+                              KIO::StatBasic, KIO::HideProgressInfo);
+        job->setUiDelegate(nullptr);
+        m_pathProbe = job;
+        const QPointer<QLineEdit> editor(m_pathEdit);
+        const QString submitted = editor->text();
+        connect(job, &KJob::result, this, [this, job, editor, submitted, target, text] {
+            if (m_pathProbe != job || m_pathEdit != editor)
+                return;
+            m_pathProbe.clear();
+            if (editor->text() != submitted)
+                return;
+            if (!accepts(target)) {
+                endPathEdit();
+                return;
+            }
+            if (job->error()) {
+                emit errorOccurred(tr("Google Drive couldn't open this location. Check the address and try again."));
+                endPathEdit();
+            } else if (S_ISDIR(job->statResult().numberValue(KIO::UDSEntry::UDS_FILE_TYPE))) {
+                finishTypedNavigation(target, text);
+            } else {
+                endPathEdit();
+                emit typedFileActivated(target);
+            }
+        });
+        const QPointer<KIO::StatJob> pending(job);
+        QTimer::singleShot(15000, this, [this, pending] {
+            if (!pending || m_pathProbe != pending)
+                return;
+            cancelPathProbe();
+            emit errorOccurred(tr("Google Drive did not respond in time. Try again."));
+            endPathEdit();
+        });
+        return;
+    }
+
+    // Or a nonexistent path pushes a history entry and shows nothing at all.
     if (target.isLocalFile()) {
         const QFileInfo info(target.toLocalFile());
         if (info.isFile()) {
@@ -542,8 +652,14 @@ void BrowserNavigation::submitPathEdit()
         }
     }
 
-    // A path typed into an elevated window stays elevated, as its crumbs do.
-    if (target.isLocalFile() && currentUrl().scheme() == QLatin1String("admin"))
+    finishTypedNavigation(target, text);
+}
+
+void BrowserNavigation::finishTypedNavigation(QUrl target, const QString &text)
+{
+    // Drive always uses its normal read-only worker, even from an admin view.
+    if (target.isLocalFile() && !Locations::isGoogleDriveMount(target)
+        && currentUrl().scheme() == QLatin1String("admin"))
         target.setScheme(QStringLiteral("admin"));
     if (!accepts(target)) {
         endPathEdit();
@@ -628,6 +744,75 @@ void BrowserNavigation::showCrumbMenu(const QUrl &parent, const QPoint &globalPo
                            index.data(Qt::DisplayRole).toString(), this,
                            [this, url] { navigateTo(url); });
         }
+    } else if (Locations::isGoogleDriveMount(parent)) {
+        if (!accepts(parent))
+            return;
+        // FUSE enumeration runs in a cancellable worker, while the menu and
+        // other windows keep processing input. No filesystem probe on the UI.
+        QAction *status = menu.addAction(tr("Loading…"));
+        status->setEnabled(false);
+        const bool showHidden = m_showHiddenFiles ? m_showHiddenFiles() : false;
+        auto *job = KIO::listDir(parent, KIO::HideProgressInfo);
+        job->setUiDelegate(nullptr);
+        const auto names = std::make_shared<QSet<QString>>();
+        const QPointer<BrowserNavigation> owner(this);
+        const QString here = QDir::cleanPath(currentUrl().toLocalFile());
+        connect(job, &KIO::ListJob::entries, &menu,
+                [this, owner, &menu, job, parent, names, status, showHidden, here](
+                    KIO::Job *, const KIO::UDSEntryList &entries) {
+            if (!owner)
+                return;
+            for (const auto &entry : entries) {
+                const QString name = entry.stringValue(KIO::UDSEntry::UDS_NAME);
+                if (!S_ISDIR(entry.numberValue(KIO::UDSEntry::UDS_FILE_TYPE))
+                    || name.isEmpty() || name == QLatin1String(".")
+                    || name == QLatin1String("..") || name.contains(QLatin1Char('/'))
+                    || (!showHidden && name.startsWith(QLatin1Char('.')))
+                    || names->contains(name))
+                    continue;
+                if (names->size() >= kMaxCrumbMenuEntries)
+                    break;
+                names->insert(name);
+                const QUrl url = QUrl::fromLocalFile(
+                    QDir(parent.toLocalFile()).filePath(name));
+                auto *action = new QAction(Aero::themeIcon({"folder"}), name, &menu);
+                action->setData(url);
+                action->setCheckable(true);
+                const QString path = QDir::cleanPath(url.toLocalFile());
+                action->setChecked(here == path || here.startsWith(path + QLatin1Char('/')));
+                connect(action, &QAction::triggered, this, [this, url] { navigateTo(url); });
+                QAction *before = status;
+                for (QAction *existing : menu.actions()) {
+                    if (existing == status || QString::localeAwareCompare(
+                            existing->text().toCaseFolded(), name.toCaseFolded()) > 0) {
+                        before = existing;
+                        break;
+                    }
+                }
+                menu.insertAction(before, action);
+            }
+            if (names->size() >= kMaxCrumbMenuEntries) {
+                status->setVisible(false);
+                job->kill(KJob::Quietly);
+            }
+        });
+        connect(job, &KJob::result, &menu, [names, status](KJob *finished) {
+            if (finished->error()) {
+                status->setText(tr("Google Drive couldn't read this folder."));
+            } else if (names->isEmpty()) {
+                status->setText(tr("No subfolders"));
+            } else {
+                status->setVisible(false);
+            }
+        });
+        connect(&menu, &QMenu::aboutToHide, job, [job] { job->kill(KJob::Quietly); });
+        const QPointer<KIO::ListJob> pending(job);
+        QTimer::singleShot(15000, &menu, [pending, status] {
+            if (pending) {
+                pending->kill(KJob::Quietly);
+                status->setText(tr("Google Drive did not respond. Try again."));
+            }
+        });
     } else if (parent.isLocalFile()) {
         const bool showHidden = (m_showHiddenFiles ? m_showHiddenFiles() : false);
         QDir::Filters filters = QDir::Dirs | QDir::NoDotAndDotDot;
@@ -680,6 +865,10 @@ void BrowserNavigation::goUp()
     const QUrl current = currentUrl();
     if (Locations::isComputer(current) || Locations::isLibraries(current))
         return;
+    if (current.matches(Locations::googleDriveMount(), QUrl::StripTrailingSlash)) {
+        navigateTo(Locations::computer());
+        return;
+    }
     if (Libraries::forUrl(current).url.isValid()) {
         navigateTo(Locations::libraries());
         return;
@@ -772,21 +961,29 @@ bool BrowserNavigation::accepts(const QUrl &url)
     if (!url.isValid())
         return false;
     const QString error = m_urlPolicy ? m_urlPolicy(url) : QString();
-    if (error.isEmpty())
-        return true;
-    emit errorOccurred(error);
-    return false;
+    if (!error.isEmpty()) {
+        emit errorOccurred(error);
+        return false;
+    }
+    if (Locations::isGoogleDriveMount(url)
+        && (!m_driveConnection || !m_driveConnection->isConnected())) {
+        emit errorOccurred(tr("Google Drive is not connected. Connect it before "
+                              "opening this folder."));
+        return false;
+    }
+    return true;
 }
 
 bool BrowserNavigation::initialize(const QUrl &url)
 {
-    if (!accepts(url))
+    const QUrl target = GoogleDriveService::managedDriveLocation(url);
+    if (!accepts(target))
         return false;
     m_history.clear();
     m_historyIndex = -1;
-    pushHistory(url);
-    setCrumbTrail(url);
-    emit locationChanged(url);
+    pushHistory(target);
+    setCrumbTrail(target);
+    emit locationChanged(target);
     return true;
 }
 
@@ -797,13 +994,27 @@ QUrl BrowserNavigation::currentUrl() const
 
 bool BrowserNavigation::navigateTo(const QUrl &url, bool announceNavigation)
 {
-    if (url.matches(currentUrl(), QUrl::StripTrailingSlash) || !accepts(url))
+    const QUrl target = GoogleDriveService::managedDriveLocation(url);
+    if (target.matches(currentUrl(), QUrl::StripTrailingSlash) || !accepts(target))
         return false;
-    pushHistory(url);
-    setCrumbTrail(url);
+    pushHistory(target);
+    setCrumbTrail(target);
     if (announceNavigation)
         emit navigated();
-    emit locationChanged(url);
+    emit locationChanged(target);
+    return true;
+}
+
+bool BrowserNavigation::redirectTo(const QUrl &from, const QUrl &to)
+{
+    const QUrl target = GoogleDriveService::managedDriveLocation(to);
+    if (m_historyIndex < 0 || !from.isValid()
+        || !from.matches(currentUrl(), QUrl::StripTrailingSlash)
+        || target.matches(currentUrl(), QUrl::StripTrailingSlash) || !accepts(target))
+        return false;
+    m_history[m_historyIndex] = target;
+    setCrumbTrail(target);
+    emit locationChanged(target);
     return true;
 }
 

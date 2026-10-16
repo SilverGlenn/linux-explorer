@@ -5,7 +5,9 @@
 #include "aero/text.h"
 #include "aero/listview.h"
 #include "aero/artwork.h"
+#include "aero/arrows.h"
 #include "aero/palette.h"
+#include "aero/fonts.h"
 
 #include <KIO/Global>
 
@@ -21,12 +23,71 @@
 #include <QSortFilterProxyModel>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
+#include <QStyleOptionFocusRect>
+#include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
 
 #include <functional>
 
 namespace {
+
+// The whole heading, including its rule, toggles the group. A real button
+// supplies keyboard activation and exposes the expanded state to accessibility.
+class DriveHeading : public QToolButton {
+public:
+    explicit DriveHeading(QWidget *parent = nullptr) : QToolButton(parent)
+    {
+        setCheckable(true);
+        setChecked(true);
+        setFocusPolicy(Qt::StrongFocus);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setStyleSheet(QStringLiteral("QToolButton { border: none; background: transparent; }"));
+        Aero::setPointSize(this, 11);
+    }
+
+    QSize sizeHint() const override
+    {
+        return QSize(fontMetrics().horizontalAdvance(text()) + 40, fontMetrics().height() + 4);
+    }
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right) {
+            setChecked(event->key() == Qt::Key_Right);
+            event->accept();
+        } else if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            click();
+            event->accept();
+        } else {
+            QToolButton::keyPressEvent(event);
+        }
+    }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        const QPixmap arrow = Aero::arrowPixmap(isChecked() ? Qt::DownArrow : Qt::RightArrow,
+                                                Aero::Palette::rgb(Aero::Palette::MutedText));
+        const QSizeF size = arrow.deviceIndependentSize();
+        painter.drawPixmap(QPointF(2, (height() - size.height()) / 2), arrow);
+        painter.setFont(font());
+        painter.setPen(Aero::Palette::rgb(Aero::Palette::HeadingText));
+        // Leave room for fractional glyph advances before asking Qt to elide.
+        const int textWidth = qMin(fontMetrics().horizontalAdvance(text()) + 2, qMax(0, width() - 20));
+        painter.drawText(QRect(18, 0, textWidth, height()), Qt::AlignLeft | Qt::AlignVCenter,
+                         fontMetrics().elidedText(text(), Qt::ElideRight, textWidth));
+        painter.setPen(Aero::Palette::rgb(Aero::Palette::Hairline));
+        painter.drawLine(18 + textWidth + 8, height() / 2, width() - 1, height() / 2);
+        if (hasFocus()) {
+            QStyleOptionFocusRect focus;
+            focus.initFrom(this);
+            focus.rect = rect();
+            style()->drawPrimitive(QStyle::PE_FrameFocusRect, &focus, &painter, this);
+        }
+    }
+};
 
 // A 250px tile with a 4px gap
 constexpr int kTileWidth = 250;
@@ -44,7 +105,8 @@ int tileHeight(const QFontMetrics &metrics)
 
 int contentHeight(const QFontMetrics &metrics)
 {
-    const int textHeight = metrics.height() + kLineGap + Aero::kCapacityBarHeight;
+    const int nameHeight = qMax(metrics.height(), QFontMetrics(Aero::shellFont(11)).height());
+    const int textHeight = nameHeight + kLineGap + Aero::kCapacityBarHeight;
     return qMax(32, textHeight) + 10;
 }
 
@@ -129,7 +191,9 @@ void paintTileText(QPainter *painter, const QRect &area, const QFontMetrics &met
 void paintContentText(QPainter *painter, const QRect &area, const QFontMetrics &metrics,
                       const DriveText &drive)
 {
-    const int lineHeight = metrics.height();
+    const QFont nameFont = Aero::shellFont(11);
+    const QFontMetrics nameMetrics(nameFont);
+    const int lineHeight = nameMetrics.height();
     const int barWidth = qMin(Aero::kCapacityBarWidth, area.width());
     const int figuresWidth = qMin(metrics.horizontalAdvance(drive.figures) + 16,
                                   area.width() / 2);
@@ -142,9 +206,10 @@ void paintContentText(QPainter *painter, const QRect &area, const QFontMetrics &
     const int y = area.top() + (area.height() - blockHeight) / 2;
 
     const QRect nameRect(area.left(), y, leftWidth, lineHeight);
+    painter->setFont(nameFont);
     painter->setPen(drive.primary);
     painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
-                      metrics.elidedText(drive.name, Qt::ElideRight, leftWidth));
+                      nameMetrics.elidedText(drive.name, Qt::ElideRight, leftWidth));
 
     if (drive.sizeKnown) {
         const QRect barRect(area.left(), y + lineHeight + kLineGap,
@@ -155,6 +220,7 @@ void paintContentText(QPainter *painter, const QRect &area, const QFontMetrics &
 
     const QRect figuresRect(area.left() + leftWidth, area.top(),
                             area.width() - leftWidth, area.height());
+    painter->setFont(Aero::shellFont());
     painter->setPen(drive.secondary);
     painter->drawText(figuresRect, Qt::AlignRight | Qt::AlignVCenter,
                       metrics.elidedText(drive.figures, Qt::ElideRight, figuresWidth));
@@ -418,18 +484,18 @@ void ComputerView::addSection(QVBoxLayout *layout, const QString &title, bool re
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(8);
 
-    auto *heading = new QHBoxLayout;
-    heading->setContentsMargins(0, 0, 0, 0);
-    heading->setSpacing(8);
-    section.heading = Aero::label(title, 11, Aero::Palette::HeadingText);
-    heading->addWidget(section.heading, 0, Qt::AlignVCenter);
-    heading->addWidget(Aero::hairline(), 1, Qt::AlignVCenter);
-    box->addLayout(heading);
+    section.heading = new DriveHeading;
+    section.heading->setText(title);
+    section.heading->setObjectName(removable ? QStringLiteral("removableDriveHeading")
+                                             : QStringLiteral("fixedDriveHeading"));
+    box->addWidget(section.heading);
 
     section.filter = new DriveFilter(removable, this);
     section.filter->setSourceModel(m_model);
 
     auto *list = new DriveList;
+    list->setObjectName(removable ? QStringLiteral("removableDriveList")
+                                 : QStringLiteral("fixedDriveList"));
     section.view = list;
     list->setModel(section.filter);
     list->setModelColumn(ComputerModel::Name);
@@ -469,6 +535,20 @@ void ComputerView::addSection(QVBoxLayout *layout, const QString &title, bool re
     list->onLeaveEdge = [this, list](int direction) {
         return stepToNeighbour(list, direction);
     };
+
+    const int sectionIndex = m_sections.size();
+    connect(section.heading, &QToolButton::toggled, this, [this, sectionIndex](bool expanded) {
+        const Section &group = m_sections.at(sectionIndex);
+        if (!expanded) {
+            if (group.view->hasFocus())
+                group.heading->setFocus(Qt::OtherFocusReason);
+            if (indexForUrl(group.filter, m_selectedUrl).isValid())
+                setSelectedUrl({});
+        }
+        group.view->setVisible(expanded);
+        group.heading->setAccessibleDescription(expanded ? tr("Expanded") : tr("Collapsed"));
+        group.container->updateGeometry();
+    });
 
     layout->addWidget(section.container);
     m_sections.append(section);
@@ -538,6 +618,12 @@ void ComputerView::focusView()
             return;
         }
     }
+    for (const Section &section : std::as_const(m_sections)) {
+        if (section.heading->isVisible()) {
+            section.heading->setFocus(Qt::TabFocusReason);
+            return;
+        }
+    }
 }
 
 void ComputerView::applyMode()
@@ -549,6 +635,10 @@ void ComputerView::applyMode()
     }
 
     m_stack->setCurrentWidget(m_scroll);
+    for (const Section &section : std::as_const(m_sections)) {
+        if (!section.heading->isChecked() && indexForUrl(section.filter, m_selectedUrl).isValid())
+            setSelectedUrl({});
+    }
     const int iconSize = Settings::iconSizeFor(m_mode);
 
     for (const Section &section : std::as_const(m_sections)) {
@@ -619,6 +709,9 @@ void ComputerView::updateSections()
         section.container->setVisible(count > 0);
         section.heading->setText(
             QStringLiteral("%1 (%2)").arg(section.title).arg(count));
+        section.heading->setAccessibleDescription(section.heading->isChecked() ? tr("Expanded")
+                                                                              : tr("Collapsed"));
+        section.view->setVisible(section.heading->isChecked());
         section.view->updateGeometry();
     }
 }
@@ -683,7 +776,7 @@ bool ComputerView::stepToNeighbour(QListView *from, int direction)
     while (next >= 0 && next < m_sections.size()) {
         const Section &section = m_sections.at(next);
         const int rows = section.filter->rowCount();
-        if (section.container->isVisible() && rows > 0) {
+        if (section.view->isVisible() && rows > 0) {
             // Entering from above lands on the first drive and from below the last
             const int targetRow = (direction > 0) ? 0 : rows - 1;
             const QModelIndex target = section.filter->index(targetRow, ComputerModel::Name);

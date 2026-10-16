@@ -1,6 +1,10 @@
 #pragma once
 
+#include <QDir>
+#include <QByteArray>
+#include <QFile>
 #include <QString>
+#include <QStandardPaths>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -11,6 +15,117 @@
 // the file list over to the drive model instead, which means every path
 // forwarding a location to a job has to check for it first
 namespace Locations {
+
+namespace detail {
+
+inline QByteArray decodeMountInfoField(const QByteArray &field)
+{
+    QByteArray decoded;
+    decoded.reserve(field.size());
+    for (qsizetype i = 0; i < field.size(); ++i) {
+        if (i + 3 < field.size() && field.at(i) == '\\') {
+            const QByteArray escape = field.mid(i, 4);
+            char value = '\0';
+            if (escape == QByteArrayLiteral("\\040")) value = ' ';
+            else if (escape == QByteArrayLiteral("\\011")) value = '\t';
+            else if (escape == QByteArrayLiteral("\\012")) value = '\n';
+            else if (escape == QByteArrayLiteral("\\134")) value = '\\';
+            if (value != '\0') {
+                decoded.append(value);
+                i += 3;
+                continue;
+            }
+            decoded.append(field.at(i));
+        } else {
+            decoded.append(field.at(i));
+        }
+    }
+    return decoded;
+}
+
+} // namespace detail
+
+// User-owned rclone mountpoint. It remains an ordinary local path so KIO's
+// local worker can browse the FUSE filesystem after rclone has mounted it.
+inline QUrl googleDriveMount()
+{
+    const QString dataRoot = QStandardPaths::writableLocation(
+        QStandardPaths::GenericDataLocation);
+    if (dataRoot.isEmpty())
+        return {};
+    return QUrl::fromLocalFile(QDir::cleanPath(
+        QDir(dataRoot).filePath(QStringLiteral("linux-explorer-win7/mounts/google-drive"))));
+}
+
+// Lexical containment only: never resolve symlinks or touch the mount path.
+// The separator check keeps similarly prefixed siblings outside the mount.
+inline bool isGoogleDriveMount(const QUrl &url)
+{
+    if (!url.isLocalFile())
+        return false;
+    const QUrl mount = googleDriveMount();
+    if (!mount.isLocalFile())
+        return false;
+    const QString root = QDir::cleanPath(mount.toLocalFile());
+    const QString path = QDir::cleanPath(url.toLocalFile());
+    if (path == root)
+        return true;
+    const QString prefix = root.endsWith(QLatin1Char('/'))
+        ? root : root + QLatin1Char('/');
+    return path.startsWith(prefix);
+}
+
+// Parse mountinfo records without probing mount paths. Mountinfo encodes
+// spaces, tabs, newlines, and backslashes as octal escapes.
+inline bool googleDriveMountedIn(const QByteArray &mountInfo)
+{
+    const QUrl mount = googleDriveMount();
+    if (!mount.isLocalFile())
+        return false;
+    const QString root = QDir::cleanPath(mount.toLocalFile());
+    int recordsAtMount = 0;
+    bool validRcloneMount = false;
+    const QList<QByteArray> records = mountInfo.split('\n');
+    for (QByteArray record : records) {
+        if (record.endsWith('\r'))
+            record.chop(1);
+        QList<QByteArray> fields = record.split(' ');
+        fields.removeAll(QByteArray());
+        if (fields.size() <= 5)
+            continue;
+        const QString mountPoint = QDir::cleanPath(QString::fromLocal8Bit(
+            detail::decodeMountInfoField(fields.at(4))));
+        if (mountPoint != root)
+            continue;
+        ++recordsAtMount;
+
+        const qsizetype separator = fields.indexOf(QByteArrayLiteral("-"));
+        if (separator < 6 || fields.size() <= separator + 2
+            || fields.at(separator + 1) != QByteArrayLiteral("fuse.rclone")
+            || fields.at(separator + 2) != QByteArrayLiteral("explorer-google-drive:"))
+            continue;
+        const QList<QByteArray> options = fields.at(5).split(',');
+        validRcloneMount = options.contains(QByteArrayLiteral("ro"))
+            && !options.contains(QByteArrayLiteral("rw"));
+    }
+    return recordsAtMount == 1 && validRcloneMount;
+}
+
+// The bounded procfs read is metadata-only: unlike statfs/QStorageInfo it
+// cannot wait on a stalled FUSE mount.
+inline bool googleDriveMounted()
+{
+    constexpr qint64 kMaxMountInfoBytes = 1024 * 1024;
+    QFile mountInfo(QStringLiteral("/proc/self/mountinfo"));
+    if (!mountInfo.open(QIODevice::ReadOnly))
+        return false;
+    QByteArray data = mountInfo.read(kMaxMountInfoBytes);
+    // Reaching the cap leaves the record set potentially incomplete, so it
+    // cannot establish that there is exactly one mount at our target.
+    if (data.size() == kMaxMountInfoBytes)
+        return false;
+    return googleDriveMountedIn(data);
+}
 
 inline QUrl computer()
 {

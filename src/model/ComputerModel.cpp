@@ -1,5 +1,8 @@
 #include "ComputerModel.h"
 #include "DriveLabel.h"
+#include "GoogleDriveConnection.h"
+#include "Locations.h"
+#include "aero/icons.h"
 
 #include <KFilePlacesModel>
 #include <KIO/FileSystemFreeSpaceJob>
@@ -7,8 +10,15 @@
 #include <algorithm>
 
 ComputerModel::ComputerModel(KFilePlacesModel *places, QObject *parent)
+    : ComputerModel(places, GoogleDriveConnection::sharedConnection(), parent)
+{
+}
+
+ComputerModel::ComputerModel(KFilePlacesModel *places, GoogleDriveConnection *driveConnection,
+                             QObject *parent)
     : QAbstractTableModel(parent)
     , m_places(places)
+    , m_driveConnection(driveConnection)
 {
     // The places model populates asynchronously and on every plug or unplug,
     // so the drive list is rebuilt rather than patched
@@ -18,6 +28,10 @@ ComputerModel::ComputerModel(KFilePlacesModel *places, QObject *parent)
     // Mounting inserts no row, connecting only filling in the location, which
     // arrives as a data change on the row the drive already had
     connect(m_places, &QAbstractItemModel::dataChanged, this, &ComputerModel::rebuild);
+    if (m_driveConnection) {
+        connect(m_driveConnection, &GoogleDriveConnection::mountStateChanged,
+                this, &ComputerModel::rebuild);
+    }
 
     rebuild();
 }
@@ -30,6 +44,11 @@ void ComputerModel::rebuild()
     for (int row = 0; row < m_places->rowCount(); ++row) {
         const QModelIndex index = m_places->index(row, 0);
         if (m_places->isHidden(index))
+            continue;
+
+        // The managed cloud mount is represented once below, independently of
+        // bookmarks or Solid's classification of the FUSE filesystem.
+        if (Locations::isGoogleDriveMount(m_places->url(index)))
             continue;
 
         const KFilePlacesModel::GroupType group = m_places->groupType(index);
@@ -71,6 +90,18 @@ void ComputerModel::rebuild()
         devices.append(device);
     }
 
+    if (m_driveConnection && m_driveConnection->isConnected()) {
+        Device drive;
+        drive.name = tr("Google Drive (G:)");
+        drive.type = tr("Google Drive");
+        drive.fsType = tr("Google Drive");
+        drive.url = Locations::googleDriveMount();
+        drive.icon = Aero::googleDriveIcon();
+        // Remote quota is unknown. statfs on this FUSE mount must never supply
+        // the host disk's capacity or wait for an unavailable remote service.
+        devices.append(drive);
+    }
+
     applySort(devices);
 
     // Nothing the page draws has moved, which is the common case, and
@@ -85,7 +116,7 @@ void ComputerModel::rebuild()
 
     // Only the drives with no figure yet, the rest being carried over
     for (const Device &device : std::as_const(m_devices)) {
-        if (!device.sizeKnown)
+        if (!device.sizeKnown && !Locations::isGoogleDriveMount(device.url))
             queryFreeSpace(device.url);
     }
 }
@@ -95,8 +126,10 @@ void ComputerModel::refresh()
     rebuild();
 
     // A rebuild keeps the figures it has, and a drive filling up changes no row
-    for (const Device &device : std::as_const(m_devices))
-        queryFreeSpace(device.url);
+    for (const Device &device : std::as_const(m_devices)) {
+        if (!Locations::isGoogleDriveMount(device.url))
+            queryFreeSpace(device.url);
+    }
 }
 
 void ComputerModel::setSortKey(SortKey key, Qt::SortOrder order)
@@ -174,6 +207,11 @@ void ComputerModel::applySort(QList<Device> &devices) const
 
 QModelIndex ComputerModel::placeIndexFor(const QUrl &url) const
 {
+    // The virtual drive has no Solid device to mount, eject, or rename, even
+    // when the user also keeps a bookmark to its local mount path.
+    if (Locations::isGoogleDriveMount(url))
+        return {};
+
     for (const Device &device : m_devices) {
         if (device.url == url && device.placeRow >= 0)
             return m_places->index(device.placeRow, 0);
@@ -190,7 +228,7 @@ QModelIndex ComputerModel::placeIndexFor(const QUrl &url) const
 
 void ComputerModel::queryFreeSpace(const QUrl &url)
 {
-    if (!url.isValid())
+    if (!url.isValid() || Locations::isGoogleDriveMount(url))
         return;
 
     KIO::FileSystemFreeSpaceJob *job = KIO::fileSystemFreeSpace(url);

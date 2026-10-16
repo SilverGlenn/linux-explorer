@@ -1,19 +1,27 @@
 #include "BreadcrumbBar.h"
+#include "ComputerModel.h"
+#include "ComputerView.h"
 #include "DetailsPane.h"
 #include "DirectoryModel.h"
+#include "DriveLabel.h"
 #include "FileManagerService.h"
 #include "FileView.h"
+#include "FolderDragData.h"
 #include "Libraries.h"
 #include "LibrariesView.h"
 #include "Locations.h"
 #include "MainWindow.h"
+#include "ApplicationAppearance.h"
 #include "NavigationPane.h"
 #include "PreviewPane.h"
 #include "Settings.h"
 #include "SearchBox.h"
 #include "ViewModeMenu.h"
+#include "aero/contextmenu.h"
+#include "aero/fonts.h"
 #include <AeroQt/stylesheet.h>
 #include <AeroQt/navbuttons.h>
+#include <KFilePlacesModel>
 
 #include <QActionGroup>
 #include <QAbstractButton>
@@ -26,7 +34,11 @@
 #include <QDBusConnectionInterface>
 #include <QDir>
 #include <QDropEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDrag>
 #include <QFile>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLayout>
@@ -40,6 +52,7 @@
 #include <QScopeGuard>
 #include <QPointer>
 #include <QPushButton>
+#include <QProcess>
 #include <QScreen>
 #include <QSettings>
 #include <QSignalSpy>
@@ -52,9 +65,39 @@
 #include <QToolButton>
 #include <QTreeView>
 #include <QTreeWidget>
+#include <QWidgetAction>
+#include <QWindow>
 #include <memory>
 
 namespace {
+// Stable drives let the grouping tests run without depending on host devices.
+class TestComputerModel : public ComputerModel {
+public:
+    explicit TestComputerModel(KFilePlacesModel *places) : ComputerModel(places) {}
+    int rowCount(const QModelIndex &parent = {}) const override
+    {
+        return parent.isValid() ? 0 : (fixedPresent ? 2 : 1);
+    }
+    QVariant data(const QModelIndex &index, int role) const override
+    {
+        const bool removable = !fixedPresent || index.row() == 1;
+        if (role == RemovableRole) return removable;
+        if (role == UrlRole)
+            return QUrl::fromLocalFile(removable ? QStringLiteral("/media/test") : QStringLiteral("/"));
+        if (role == Qt::DisplayRole && index.column() == Name)
+            return removable ? QStringLiteral("USB Disk") : QStringLiteral("Local Disk (C:)");
+        return {};
+    }
+    void resetDrives(bool present = true)
+    {
+        beginResetModel();
+        fixedPresent = present;
+        endResetModel();
+    }
+private:
+    bool fixedPresent = true;
+};
+
 QAction *actionNamed(QWidget &window, const QString &name)
 {
     for (QAction *action : window.findChildren<QAction *>()) {
@@ -350,6 +393,456 @@ private Q_SLOTS:
         QCOMPARE(names, QStringList({"File", "Edit", "View", "Tools", "Help"}));
         QVERIFY(actionNamed(*win, QStringLiteral("View help")));
         QVERIFY(actionNamed(*win, QStringLiteral("About File Explorer")));
+    }
+
+    void addFoldersToFavoritesFromOutsideSidebar_data()
+    {
+        QTest::addColumn<QString>("source");
+        QTest::newRow("folder-menu") << QStringLiteral("folder");
+        QTest::newRow("multiple-folders") << QStringLiteral("multiple");
+        QTest::newRow("folder-background") << QStringLiteral("background");
+        QTest::newRow("favorites-heading") << QStringLiteral("heading");
+        QTest::newRow("file-menu") << QStringLiteral("file");
+        QTest::newRow("mixed-selection") << QStringLiteral("mixed");
+    }
+
+    void addFoldersToFavoritesFromOutsideSidebar()
+    {
+        QFETCH(QString, source);
+        auto win = window(m_folder);
+        auto *pane = win->findChild<NavigationPane *>();
+        auto *view = win->findChild<FileView *>();
+        auto *tree = pane->findChild<QTreeWidget *>(QStringLiteral("win7NavPane"));
+        KFilePlacesModel *places = pane->placesModel();
+        const QUrl photos = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos"));
+        const QUrl notes = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Project notes"));
+        QList<QUrl> targets;
+        if (source == QLatin1String("folder"))
+            targets = {photos};
+        else if (source == QLatin1String("multiple"))
+            targets = {photos, notes};
+        else if (source == QLatin1String("file"))
+            targets = {m_notes};
+        else if (source == QLatin1String("mixed"))
+            targets = {photos, m_notes};
+        else
+            targets = {m_folder};
+        const auto cleanup = qScopeGuard([&] {
+            for (int row = places->rowCount() - 1; row >= 0; --row) {
+                const QModelIndex index = places->index(row, 0);
+                if (targets.contains(places->url(index)))
+                    places->removePlace(index);
+            }
+        });
+        const auto favoriteCount = [&](const QUrl &url) {
+            int count = 0;
+            for (int row = 0; row < tree->topLevelItemCount(); ++row) {
+                QTreeWidgetItem *group = tree->topLevelItem(row);
+                if (group->text(0) != QLatin1String("Favorites")) continue;
+                for (int i = 0; i < group->childCount(); ++i)
+                    if (group->child(i)->data(0, Qt::UserRole).toUrl().matches(url, QUrl::StripTrailingSlash))
+                        ++count;
+            }
+            return count;
+        };
+        for (const QUrl &target : targets)
+            QCOMPARE(favoriteCount(target), 0);
+
+        const bool onItem = source != QLatin1String("background") && source != QLatin1String("heading");
+        if (onItem)
+            QTRY_VERIFY(view->selectUrls(targets).isEmpty());
+
+        bool sawMenu = false;
+        bool sawAdd = false;
+        const QString command = source == QLatin1String("heading")
+            ? QStringLiteral("Add current location to Favorites") : QStringLiteral("Add to Favorites");
+        QTimer::singleShot(0, win.get(), [&] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            sawMenu = true;
+            for (QAction *action : menu->actions()) {
+                if (action->text() != command) continue;
+                sawAdd = action->isEnabled();
+                if (sawAdd) action->trigger();
+                break;
+            }
+            menu->close();
+        });
+        if (source == QLatin1String("heading")) {
+            QTreeWidgetItem *favorites = nullptr;
+            for (int row = 0; row < tree->topLevelItemCount(); ++row)
+                if (tree->topLevelItem(row)->text(0) == QLatin1String("Favorites"))
+                    favorites = tree->topLevelItem(row);
+            QVERIFY(favorites);
+            tree->customContextMenuRequested(tree->visualItemRect(favorites).center());
+        } else {
+            view->contextMenuRequested(view->mapToGlobal(QPoint(50, 50)), onItem);
+        }
+        QVERIFY(sawMenu);
+        const bool shouldAdd = source != QLatin1String("file") && source != QLatin1String("mixed");
+        QCOMPARE(sawAdd, shouldAdd);
+        for (const QUrl &target : targets)
+            QTRY_COMPARE(favoriteCount(target), shouldAdd ? 1 : 0);
+    }
+
+    void dragMainViewFoldersIntoFavorites_data()
+    {
+        QTest::addColumn<QString>("scenario");
+        QTest::newRow("heading-details") << QStringLiteral("details");
+        QTest::newRow("heading-icons") << QStringLiteral("icons");
+        QTest::newRow("heading-grouped-details") << QStringLiteral("grouped");
+        QTest::newRow("insert-multiple") << QStringLiteral("multiple");
+        QTest::newRow("existing-favorite") << QStringLiteral("duplicate");
+        QTest::newRow("collapsed-heading") << QStringLiteral("collapsed");
+        QTest::newRow("file-rejected") << QStringLiteral("file");
+        QTest::newRow("mixed-rejected") << QStringLiteral("mixed");
+    }
+
+    void dragMainViewFoldersIntoFavorites()
+    {
+        QFETCH(QString, scenario);
+        const QStringList oldOrder = Settings::favoritesOrder();
+        Settings::setFavoritesOrder({});
+        const auto restoreOrder = qScopeGuard([&] { Settings::setFavoritesOrder(oldOrder); });
+        auto win = window(m_folder);
+        auto *pane = win->findChild<NavigationPane *>();
+        auto *view = win->findChild<FileView *>();
+        auto *tree = pane->findChild<QTreeWidget *>();
+        auto *places = pane->placesModel();
+        const QUrl photos = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos"));
+        const QUrl notes = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Project notes"));
+        const auto cleanup = qScopeGuard([&] {
+            for (int row = places->rowCount() - 1; row >= 0; --row) {
+                const QModelIndex index = places->index(row, 0);
+                if (places->url(index) == photos || places->url(index) == notes)
+                    places->removePlace(index);
+            }
+        });
+        if (scenario == QLatin1String("icons")) view->setViewMode(Settings::ViewMode::LargeIcons);
+        else view->setViewMode(Settings::ViewMode::Details);
+        if (scenario == QLatin1String("grouped")) view->setGroupColumn(DirectoryModel::Type);
+        if (scenario == QLatin1String("duplicate")) pane->addToFavorites(photos);
+        const auto favoriteGroup = [&] {
+            for (int row = 0; row < tree->topLevelItemCount(); ++row)
+                if (tree->topLevelItem(row)->text(0) == QLatin1String("Favorites"))
+                    return tree->topLevelItem(row);
+            return static_cast<QTreeWidgetItem *>(nullptr);
+        };
+        const auto favoriteUrls = [&] {
+            QList<QUrl> urls;
+            auto *group = favoriteGroup();
+            if (group)
+                for (int i = 0; i < group->childCount(); ++i)
+                    urls.append(group->child(i)->data(0, Qt::UserRole).toUrl());
+            return urls;
+        };
+        QList<QUrl> selection{photos};
+        if (scenario == QLatin1String("multiple")) selection.append(notes);
+        if (scenario == QLatin1String("file")) selection = {m_notes};
+        if (scenario == QLatin1String("mixed")) selection.append(m_notes);
+        QTRY_VERIFY(view->selectUrls(selection).isEmpty());
+        auto *source = view->currentView();
+        std::unique_ptr<QMimeData> mime(source->model()->mimeData(source->selectionModel()->selectedIndexes()));
+        QVERIFY(mime && mime->hasUrls());
+        const bool shouldAdd = scenario != QLatin1String("file") && scenario != QLatin1String("mixed");
+        QCOMPARE(mime->hasFormat(FolderDragData::mimeType), shouldAdd);
+        const QList<QUrl> before = favoriteUrls();
+        QVERIFY(!before.isEmpty());
+        if (scenario == QLatin1String("collapsed")) favoriteGroup()->setExpanded(false);
+        const QPoint pos = scenario == QLatin1String("multiple")
+            ? tree->visualItemRect(favoriteGroup()->child(0)).topLeft() + QPoint(40, 1)
+            : tree->visualItemRect(favoriteGroup()).center();
+        QSignalSpy filesystemDrop(pane, &NavigationPane::dropped);
+        QSignalSpy navigated(pane, &NavigationPane::urlActivated);
+        const Qt::DropActions actions = Qt::MoveAction | Qt::CopyAction | Qt::LinkAction;
+        QDragEnterEvent enter(pos, actions, mime.get(), Qt::LeftButton, Qt::ShiftModifier);
+        QApplication::sendEvent(tree->viewport(), &enter);
+        QDragMoveEvent move(pos, actions, mime.get(), Qt::LeftButton, Qt::ShiftModifier);
+        QApplication::sendEvent(tree->viewport(), &move);
+        QCOMPARE(move.isAccepted(), shouldAdd);
+        if (shouldAdd) {
+            QCOMPARE(move.dropAction(), Qt::LinkAction);
+            auto *hint = tree->findChild<QWidget *>(QStringLiteral("favoriteDragHint"));
+            QVERIFY(hint && hint->isVisible());
+            QCOMPARE(hint->accessibleName(), QStringLiteral("Create link in Favorites"));
+            const QString captureDir = qEnvironmentVariable("EXPLORER_FAVORITES_CAPTURE_DIR");
+            if (!captureDir.isEmpty()) {
+                QDir().mkpath(captureDir);
+                QPixmap capture = win->grab();
+                QPainter painter(&capture);
+                painter.drawPixmap(win->mapFromGlobal(hint->pos()), hint->grab());
+                painter.end();
+                capture.save(captureDir + QLatin1Char('/') + scenario + QStringLiteral(".png"));
+            }
+        }
+        QDropEvent drop(QPointF(pos), actions, mime.get(), Qt::LeftButton, Qt::ShiftModifier);
+        QApplication::sendEvent(tree->viewport(), &drop);
+        QCOMPARE(drop.isAccepted(), shouldAdd);
+        if (shouldAdd) QCOMPARE(drop.dropAction(), Qt::LinkAction);
+        QCOMPARE(filesystemDrop.count(), 0);
+        QCOMPARE(navigated.count(), 0);
+        QList<QUrl> expected = before;
+        if (shouldAdd) {
+            int at = scenario == QLatin1String("multiple") ? 0 : expected.size();
+            for (const QUrl &url : mime->urls()) {
+                const int previous = expected.indexOf(url);
+                if (previous >= 0) {
+                    expected.removeAt(previous);
+                    if (previous < at) --at;
+                }
+                expected.insert(at++, url);
+            }
+        }
+        QCOMPARE(favoriteUrls(), expected);
+        pane->refresh();
+        QCOMPARE(favoriteUrls(), expected);
+        QVERIFY(QFileInfo::exists(photos.toLocalFile()));
+        QVERIFY(QFileInfo::exists(notes.toLocalFile()));
+    }
+
+    void nativeMouseFavoriteDrag_data()
+    {
+        QTest::addColumn<bool>("fromMainView");
+        QTest::newRow("main-view-to-heading") << true;
+        QTest::newRow("reorder-shortcut") << false;
+    }
+
+    void nativeMouseFavoriteDrag()
+    {
+        if (!qEnvironmentVariableIsSet("EXPLORER_NATIVE_FAVORITES_DRAG")
+            || QGuiApplication::platformName() != QLatin1String("xcb"))
+            QSKIP("Optional physical mouse drag check; run in an isolated Xvfb session.");
+        QFETCH(bool, fromMainView);
+        Settings::setFavoritesOrder({});
+        auto win = window(m_folder);
+        win->resize(800, 600);
+        win->move(200, 75);
+        auto *pane = win->findChild<NavigationPane *>();
+        auto *view = win->findChild<FileView *>();
+        view->setViewMode(Settings::ViewMode::Details);
+        auto *tree = pane->findChild<QTreeWidget *>();
+        auto *places = pane->placesModel();
+        const QUrl photos = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos"));
+        const auto cleanup = qScopeGuard([&] {
+            for (int row = places->rowCount() - 1; row >= 0; --row)
+                if (places->url(places->index(row, 0)) == photos)
+                    places->removePlace(places->index(row, 0));
+            Settings::setFavoritesOrder({});
+        });
+        if (!fromMainView) pane->addToFavorites(photos);
+        QTRY_VERIFY(view->selectUrl(photos));
+        QCoreApplication::processEvents();
+        QTreeWidgetItem *favorites = nullptr;
+        for (int row = 0; row < tree->topLevelItemCount(); ++row)
+            if (tree->topLevelItem(row)->text(0) == QLatin1String("Favorites"))
+                favorites = tree->topLevelItem(row);
+        QVERIFY(favorites);
+        QAbstractItemView *sourceView = fromMainView ? view->currentView() : tree;
+        const QModelIndex sourceIndex = fromMainView ? view->currentView()->selectionModel()->selectedRows().first()
+            : tree->indexFromItem(favorites->child(favorites->childCount() - 1));
+        const QPoint source = sourceView->viewport()->mapToGlobal(sourceView->visualRect(sourceIndex).center());
+        const QPoint target = tree->viewport()->mapToGlobal(fromMainView
+            ? tree->visualItemRect(favorites).center()
+            : tree->visualItemRect(favorites->child(0)).topLeft() + QPoint(40, 1));
+        const QString captures = qEnvironmentVariable("EXPLORER_FAVORITES_CAPTURE_DIR");
+        bool captured = false;
+        QTimer::singleShot(800, win.get(), [&] {
+            auto *hint = tree->findChild<QWidget *>(QStringLiteral("favoriteDragHint"));
+            captured = hint && hint->isVisible();
+            if (!captures.isEmpty()) {
+                QDir().mkpath(captures);
+                const QString name = fromMainView ? QStringLiteral("native-add") : QStringLiteral("native-reorder");
+                win->screen()->grabWindow(0).save(captures + QLatin1Char('/') + name + QStringLiteral(".png"));
+                if (auto *drag = sourceView->findChild<QDrag *>())
+                    drag->pixmap().save(captures + QLatin1Char('/') + name + QStringLiteral("-drag-image.png"));
+            }
+        });
+        QTimer::singleShot(4500, win.get(), [] { QDrag::cancel(); });
+        QSignalSpy filesystemDrop(pane, &NavigationPane::dropped);
+        QSignalSpy navigated(pane, &NavigationPane::urlActivated);
+        QProcess mouse;
+        mouse.start(QStringLiteral("xdotool"), {QStringLiteral("mousemove"), QString::number(source.x()), QString::number(source.y()),
+            QStringLiteral("mousedown"), QStringLiteral("1"), QStringLiteral("sleep"), QStringLiteral("0.15"),
+            QStringLiteral("mousemove"), QString::number(source.x() + 15), QString::number(source.y()),
+            QStringLiteral("sleep"), QStringLiteral("0.15"), QStringLiteral("mousemove"), QString::number(target.x()),
+            QString::number(target.y()), QStringLiteral("sleep"), QStringLiteral("1.2"), QStringLiteral("mouseup"), QStringLiteral("1")});
+        QVERIFY(mouse.waitForStarted());
+        QTRY_VERIFY_WITH_TIMEOUT(captured, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(mouse.state() == QProcess::NotRunning, 3000);
+        QCOMPARE(mouse.exitCode(), 0);
+        QCOMPARE(filesystemDrop.count(), 0);
+        QCOMPARE(navigated.count(), 0);
+        favorites = nullptr;
+        for (int row = 0; row < tree->topLevelItemCount(); ++row)
+            if (tree->topLevelItem(row)->text(0) == QLatin1String("Favorites"))
+                favorites = tree->topLevelItem(row);
+        QVERIFY(favorites);
+        QCOMPARE(favorites->child(fromMainView ? favorites->childCount() - 1 : 0)->data(0, Qt::UserRole).toUrl(), photos);
+        QVERIFY(QFileInfo::exists(photos.toLocalFile()));
+    }
+
+    void itemContextMenuUsesCompactWindowsCommandGroups_data()
+    {
+        QTest::addColumn<bool>("folder");
+        QTest::addColumn<bool>("extended");
+        QTest::newRow("folder") << true << false;
+        QTest::newRow("folder-shift") << true << true;
+        QTest::newRow("file") << false << false;
+    }
+
+    void itemContextMenuUsesCompactWindowsCommandGroups()
+    {
+        QFETCH(bool, folder);
+        QFETCH(bool, extended);
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        const QUrl target = folder
+            ? QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Project notes")) : m_notes;
+        QTRY_VERIFY(model->indexForUrl(target).isValid());
+        QVERIFY(view->selectUrl(target));
+        if (extended) {
+            QTest::keyPress(win->windowHandle(), Qt::Key_Shift, Qt::ShiftModifier);
+            QCoreApplication::processEvents();
+        }
+        const auto releaseShift = qScopeGuard([&] {
+            if (extended) QTest::keyRelease(win->windowHandle(), Qt::Key_Shift);
+        });
+        QStringList commands;
+        bool sawMenu = false;
+        bool hasWidgetRows = false;
+        bool hasShortcutCaptions = false;
+        QString defaultCommand;
+        QTimer::singleShot(0, win.get(), [&] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            const auto close = qScopeGuard([menu] { menu->close(); });
+            sawMenu = true;
+            if (menu->defaultAction()) {
+                defaultCommand = menu->defaultAction()->text();
+                QVERIFY(menu->defaultAction()->font().bold());
+            }
+            for (QAction *action : menu->actions()) {
+                if (action->isSeparator()) continue;
+                // Shell popups reserve the icon gutter even when no action has
+                // an icon, plus generous space to the right of their labels.
+                QVERIFY(menu->width() >= QFontMetrics(menu->font()).horizontalAdvance(
+                    action->text().remove(QLatin1Char('&'))) + 84);
+                QVERIFY(menu->actionGeometry(action).height() >= 22);
+                commands.append(action->text().remove(QLatin1Char('&')));
+                hasWidgetRows |= qobject_cast<QWidgetAction *>(action) != nullptr;
+                hasShortcutCaptions |= !action->shortcut().isEmpty();
+            }
+            const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+            if (!snapshots.isEmpty()) {
+                QVERIFY(QDir().mkpath(snapshots));
+                QVERIFY(menu->grab().save(snapshots + QStringLiteral("/context-")
+                    + QLatin1String(QTest::currentDataTag()) + QStringLiteral(".png")));
+            }
+            for (QAction *action : menu->actions())
+                if (action->text() == QLatin1String("Copy")) action->trigger();
+        });
+        view->contextMenuRequested(view->mapToGlobal(QPoint(50, 50)), true);
+        QVERIFY(sawMenu);
+        QCOMPARE(defaultCommand, QStringLiteral("Open"));
+        QCOMPARE(commands.first(), QStringLiteral("Open"));
+        QCOMPARE(commands.last(), QStringLiteral("Properties"));
+        QVERIFY(commands.indexOf(QStringLiteral("Send to")) < commands.indexOf(QStringLiteral("Cut")));
+        QVERIFY(commands.indexOf(QStringLiteral("Copy")) < commands.indexOf(QStringLiteral("Create shortcut")));
+        QVERIFY(commands.indexOf(QStringLiteral("Delete")) < commands.indexOf(QStringLiteral("Rename")));
+        QCOMPARE(commands.contains(QStringLiteral("Copy as path")), extended);
+        QCOMPARE(commands.contains(QStringLiteral("Open with")), !folder);
+        QVERIFY(!hasWidgetRows);
+        QVERIFY(!hasShortcutCaptions);
+        QVERIFY(!commands.contains(QStringLiteral("Assign Tags")));
+        QVERIFY(!commands.contains(QStringLiteral("Activities")));
+        QVERIFY(QApplication::clipboard()->mimeData()->urls().contains(target));
+        QApplication::clipboard()->clear();
+        // The context copy has no caption; the actual keyboard action remains bound.
+        QCOMPARE(actionNamed(*win, QStringLiteral("Copy"))->shortcut(), QKeySequence(QKeySequence::Copy));
+    }
+
+    void backgroundContextMenuKeepsSecondaryCommandsInMoreOptions()
+    {
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_VERIFY(model->indexForUrl(m_notes).isValid());
+        QStringList commands;
+        QStringList secondary;
+        QTimer::singleShot(0, win.get(), [&] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            const auto close = qScopeGuard([menu] { menu->close(); });
+            for (QAction *action : menu->actions()) {
+                if (!action->isSeparator()) commands.append(action->text().remove(QLatin1Char('&')));
+                if (action->text() == QLatin1String("More options") && action->menu())
+                    for (QAction *extra : action->menu()->actions())
+                        if (!extra->isSeparator()) secondary.append(extra->text());
+            }
+        });
+        view->contextMenuRequested(view->mapToGlobal(QPoint(50, 50)), false);
+        QCOMPARE(commands.first(), QStringLiteral("View"));
+        QCOMPARE(commands.last(), QStringLiteral("Properties"));
+        QVERIFY(!commands.contains(QStringLiteral("Select all")));
+        QVERIFY(!commands.contains(QStringLiteral("Invert selection")));
+        QVERIFY(secondary.contains(QStringLiteral("Select all")));
+        QVERIFY(secondary.contains(QStringLiteral("Invert selection")));
+    }
+
+    void contextMenuMatchesMeasuredWindowsGeometry()
+    {
+        QMenu menu;
+        QFont font = Aero::shellFont();
+        menu.setFont(font);
+        auto *open = menu.addAction(QStringLiteral("Open"));
+        auto *next = menu.addAction(QStringLiteral("Open in new window"));
+        auto *separator = menu.addSeparator();
+        auto *more = menu.addMenu(QStringLiteral("Send to"));
+        auto *child = more->addAction(QStringLiteral("Documents"));
+        Aero::styleContextMenu(&menu);
+        menu.popup(QPoint(100, 100));
+        const auto close = qScopeGuard([&] { more->close(); menu.close(); });
+        QTRY_VERIFY(menu.isVisible());
+        const QRect first = menu.actionGeometry(open);
+        const QRect second = menu.actionGeometry(next);
+        QCOMPARE(first.topLeft(), QPoint(3, 3));
+        QCOMPARE(first.height(), 22);
+        QCOMPARE(second.top(), first.bottom() + 1);
+        QCOMPARE(second.height(), 22);
+        QCOMPARE(menu.actionGeometry(separator).height(), 8);
+        // Different labels determine the width; Windows has no fixed minimum.
+        const int labelWidth = QFontMetrics(font).horizontalAdvance(next->text());
+        QVERIFY(qAbs(menu.width() - labelWidth - 90) <= 1);
+        const QImage image = menu.grab().toImage();
+        const qreal dpr = image.devicePixelRatio();
+        QCOMPARE(image.pixelColor(qFloor(29 * dpr), qFloor(10 * dpr)), QColor(0xe2e3e3));
+        QCOMPARE(image.pixelColor(qFloor(30 * dpr), qFloor(10 * dpr)), QColor(Qt::white));
+        const QRect submenuRow = menu.actionGeometry(more->menuAction());
+        const QPoint arrowTop(submenuRow.right() - 12, submenuRow.center().y() - 3);
+        for (int column = 0; column < 4; ++column)
+            for (int row = 0; row < 7; ++row) {
+                const QPoint sample = arrowTop + QPoint(column, row);
+                const QColor pixel = image.pixelColor(qFloor((sample.x() + 0.5) * dpr),
+                                                      qFloor((sample.y() + 0.5) * dpr));
+                QCOMPARE(pixel == QColor(Qt::black), row >= column && row < 7 - column);
+            }
+        menu.setActiveAction(more->menuAction());
+        QTest::keyClick(&menu, Qt::Key_Right);
+        QTRY_VERIFY(more->isVisible());
+        QCOMPARE(more->actionGeometry(child).height(), 22);
+        QVERIFY(qAbs(more->width() - QFontMetrics(font).horizontalAdvance(child->text()) - 75) <= 1);
+        more->close();
+        menu.close();
+
+        // Long translations and larger text expand the menu rather than clip.
+        next->setText(QString(12, QLatin1Char('W')));
+        font.setPixelSize(24);
+        menu.setFont(font);
+        menu.popup(QPoint(100, 100));
+        QTRY_VERIFY(menu.isVisible());
+        QVERIFY(menu.width() > QFontMetrics(font).horizontalAdvance(next->text()) + 90);
+        QVERIFY(menu.actionGeometry(next).height() > QFontMetrics(font).height());
     }
 
     void f6SkipsHiddenAndDisabledPanes()
@@ -1074,6 +1567,123 @@ private Q_SLOTS:
         QTRY_VERIFY(!overflow->isVisible());
     }
 
+    void openWithMenuStaysAPopupWhenCommandsAreRebuilt()
+    {
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_VERIFY(model->indexForUrl(m_notes).isValid());
+        QVERIFY(view->selectUrl(m_notes));
+        QToolButton *openWith = nullptr;
+        for (auto *button : win->findChildren<QToolButton *>())
+            if (button->text() == QLatin1String("Open with")) openWith = button;
+        QVERIFY(openWith);
+        QPointer<QMenu> menu = openWith->menu();
+        QVERIFY(menu);
+        QCOMPARE(menu->parentWidget(), openWith);
+        QCOMPARE(menu->windowType(), Qt::Popup);
+        QVERIFY(menu->isWindow());
+        QCoreApplication::processEvents();
+        QVERIFY(!menu->isVisible());
+        const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        if (!snapshots.isEmpty()) {
+            QDir().mkpath(snapshots);
+            QVERIFY(win->grab().save(snapshots + QStringLiteral("/command-bar-file-selected.png")));
+        }
+        QVERIFY(view->selectUrl(m_readme));
+        QTRY_VERIFY(menu.isNull());
+        for (auto *button : win->findChildren<QToolButton *>()) {
+            if (button->text() == QLatin1String("Open with")) {
+                QCOMPARE(button->menu()->windowType(), Qt::Popup);
+                QVERIFY(!button->menu()->isVisible());
+            }
+        }
+    }
+
+    void systemDriveNameIsOnlyADisplayAlias()
+    {
+        KFilePlacesModel places;
+        const QUrl root = QUrl::fromLocalFile(QStringLiteral("/"));
+        places.addPlace(QStringLiteral("Original system label"), root);
+        places.addPlace(QStringLiteral("Other volume"), QUrl::fromLocalFile(QStringLiteral("/mnt/other")));
+        places.addPlace(QStringLiteral("Remote root"), QUrl(QStringLiteral("sftp://example.test/")));
+        int checked = 0;
+        for (int row = 0; row < places.rowCount(); ++row) {
+            const QModelIndex index = places.index(row, 0);
+            const QString original = places.text(index);
+            if (original == QLatin1String("Original system label")) {
+                QCOMPARE(DriveLabel::forPlace(&places, index), QStringLiteral("Local Disk (C:)"));
+                QCOMPARE(places.text(index), original);
+                QCOMPARE(places.url(index), root);
+                ++checked;
+            } else if (original == QLatin1String("Other volume") || original == QLatin1String("Remote root")) {
+                QCOMPARE(DriveLabel::forPlace(&places, index), original);
+                ++checked;
+            }
+        }
+        QCOMPARE(checked, 3);
+        QVERIFY(DriveLabel::forPlace(nullptr, {}).isEmpty());
+    }
+
+    void driveGroupsCollapseIndependentlyAndSurviveRefresh()
+    {
+        KFilePlacesModel places;
+        TestComputerModel model(&places);
+        ComputerView view(&model);
+        view.resize(700, 420);
+        view.show();
+        auto *fixed = view.findChild<QToolButton *>(QStringLiteral("fixedDriveHeading"));
+        auto *removable = view.findChild<QToolButton *>(QStringLiteral("removableDriveHeading"));
+        auto *fixedList = view.findChild<QListView *>(QStringLiteral("fixedDriveList"));
+        auto *removableList = view.findChild<QListView *>(QStringLiteral("removableDriveList"));
+        QVERIFY(fixed && removable && fixedList && removableList);
+        QTRY_VERIFY(fixedList->isVisible() && removableList->isVisible());
+        QCOMPARE(fixed->text(), QStringLiteral("Hard Disk Drives (1)"));
+        const QString snapshots = qEnvironmentVariable("EXPLORER_SNAPSHOTS");
+        if (!snapshots.isEmpty()) {
+            QDir().mkpath(snapshots);
+            QVERIFY(view.grab().save(snapshots + QStringLiteral("/drive-groups-expanded.png")));
+        }
+        const int removableTop = removable->mapTo(&view, QPoint()).y();
+        fixedList->setCurrentIndex(fixedList->model()->index(0, 0));
+        QVERIFY(view.selectedIndex().isValid());
+        QTest::mouseClick(fixed, Qt::LeftButton);
+        QVERIFY(!fixed->isChecked());
+        QVERIFY(!fixedList->isVisible());
+        QVERIFY(removableList->isVisible());
+        QVERIFY(!view.selectedIndex().isValid());
+        QTRY_VERIFY(removable->mapTo(&view, QPoint()).y() < removableTop);
+        if (!snapshots.isEmpty())
+            QVERIFY(view.grab().save(snapshots + QStringLiteral("/drive-groups-collapsed.png")));
+        QTest::keyClick(fixed, Qt::Key_Space);
+        QVERIFY(fixedList->isVisible());
+        QTest::keyClick(fixed, Qt::Key_Left);
+        QVERIFY(!fixedList->isVisible());
+        QTest::keyClick(fixed, Qt::Key_Right);
+        QVERIFY(fixedList->isVisible());
+        QTest::mouseClick(fixed, Qt::LeftButton);
+        model.resetDrives();
+        QVERIFY(!fixedList->isVisible());
+        for (int mode = 0; mode <= int(Settings::ViewMode::Content); ++mode) {
+            view.setViewMode(Settings::ViewMode(mode));
+            if (Settings::ViewMode(mode) != Settings::ViewMode::Details) {
+                QVERIFY(!fixedList->isVisible());
+                QVERIFY(removableList->isVisible());
+            }
+        }
+        model.resetDrives(false);
+        QVERIFY(!fixed->isVisible());
+        model.resetDrives(true);
+        QVERIFY(fixed->isVisible());
+        QVERIFY(!fixedList->isVisible());
+        removable->click();
+        view.focusView();
+        QVERIFY(fixed->hasFocus());
+        fixed->click();
+        QVERIFY(fixedList->isVisible());
+        QVERIFY(!removableList->isVisible());
+    }
+
     void previewToolbarSharesTheAltPAction()
     {
         auto win = window(m_folder);
@@ -1225,6 +1835,13 @@ private Q_SLOTS:
         win->resize(700, 500);
         QTest::qWait(200);
         QVERIFY(win->grab().save(path + QStringLiteral("/computer.png")));
+        auto *computer = win->findChild<ComputerView *>();
+        QVERIFY(computer);
+        const auto computerMode = computer->viewMode();
+        computer->setViewMode(Settings::ViewMode::Content);
+        QTest::qWait(100);
+        QVERIFY(win->grab().save(path + QStringLiteral("/computer-content.png")));
+        computer->setViewMode(computerMode);
         win->resize(500, 400);
         QTest::qWait(100);
         QVERIFY(win->grab().save(path + QStringLiteral("/narrow-computer.png")));
@@ -1239,6 +1856,7 @@ int main(int argc, char **argv)
     const bool nativeTheme = qEnvironmentVariableIsSet("EXPLORER_NATIVE_THEME");
     const QString originalConfig = qEnvironmentVariable("EXPLORER_NATIVE_CONFIG_DIR",
         qEnvironmentVariable("XDG_CONFIG_HOME", QDir::homePath() + QStringLiteral("/.config")));
+    const QString referenceFonts = qEnvironmentVariable("EXPLORER_NATIVE_REFERENCE_FONTS");
     const QString root = environment.path();
     for (const auto &name : {"home", "config", "cache", "data", "runtime"})
         QDir().mkpath(root + QLatin1Char('/') + QLatin1String(name));
@@ -1256,9 +1874,17 @@ int main(int argc, char **argv)
                     root + QStringLiteral("/config/kdeglobals"));
         QFile::copy(originalConfig + QStringLiteral("/Kvantum/kvantum.kvconfig"),
                     root + QStringLiteral("/config/Kvantum/kvantum.kvconfig"));
+        const QString fonts = root + QStringLiteral("/data/linux-explorer-win7/reference-fonts");
+        QDir().mkpath(fonts);
+        if (!referenceFonts.isEmpty())
+            for (const char *name : {"segoeui.ttf", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf",
+                                     "micross.ttf", "tahoma.ttf", "lucon.ttf"})
+                QFile::copy(referenceFonts + QLatin1Char('/') + QLatin1String(name),
+                            fonts + QLatin1Char('/') + QLatin1String(name));
     }
     QApplication app(argc, argv);
-    if (nativeTheme) Aero::registerStylesheet(&app);
+    if (nativeTheme) Explorer::configureApplicationAppearance(&app);
+    else Aero::configureFonts(&app);
     app.setOrganizationName(QStringLiteral("linux-explorer-win7-tests"));
     app.setApplicationName(QStringLiteral("explorer-ui-tests"));
     if (!nativeTheme || qEnvironmentVariableIsSet("EXPLORER_ICON_THEME"))

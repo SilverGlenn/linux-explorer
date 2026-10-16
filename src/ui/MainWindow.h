@@ -144,11 +144,13 @@ private:
     void applyPendingSelection(bool listingFinished);
 
     void renameSelection();
+    void showItemProperties(const QList<KFileItem> &items);
     void applyRename(const QUrl &url, const QString &newName);
     void createNewFolder();
     void openNewWindow(const QUrl &url);
     void showMountDialog();
     void showMapDriveDialog();
+    void showGoogleDriveDialog();
 
     // For the Computer view's command bar, saying so when nothing is installed
     void openSystemApplication(const QStringList &desktopNames);
@@ -303,6 +305,7 @@ private:
     QAction *m_actUp = nullptr;
     QAction *m_actConnectDrives = nullptr;
     QAction *m_actMapDrive = nullptr;
+    QAction *m_actGoogleDrive = nullptr;
     QAction *m_actPreviewPane = nullptr;
     QAction *m_actHelp = nullptr;
     QAction *m_actExtract = nullptr;

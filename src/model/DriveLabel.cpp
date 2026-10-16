@@ -6,6 +6,7 @@
 #include <Solid/Device>
 #include <Solid/StorageVolume>
 
+#include <QDir>
 #include <QHash>
 #include <QModelIndex>
 #include <QObject>
@@ -64,6 +65,10 @@ QString forPlace(const KFilePlacesModel *places, const QModelIndex &index)
 {
     if (!places || !index.isValid())
         return {};
+
+    const QUrl url = places->url(index);
+    if (url.isLocalFile() && QDir::cleanPath(url.toLocalFile()) == QLatin1String("/"))
+        return QObject::tr("Local Disk (C:)");
 
     const QString label = places->text(index);
     const QString node = deviceNode(places, index);

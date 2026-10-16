@@ -3,6 +3,7 @@
 #include "aero/icons.h"
 #include "Settings.h"
 #include "aero/text.h"
+#include "aero/fonts.h"
 #include "aero/palette.h"
 
 #include <QCheckBox>
@@ -29,7 +30,7 @@ constexpr int kGroupIndent = 4;
 QGroupBox *group(const QString &title)
 {
     auto *box = new QGroupBox(title);
-    Aero::setPointSize(box, 9);
+    box->setFont(Aero::classicDialogFont());
     auto *layout = new QVBoxLayout(box);
     layout->setContentsMargins(10, 8, 10, 10);
     layout->setSpacing(6);
@@ -39,14 +40,14 @@ QGroupBox *group(const QString &title)
 QRadioButton *radio(const QString &text)
 {
     auto *button = new QRadioButton(text);
-    Aero::setPointSize(button, 9);
+    button->setFont(Aero::classicDialogFont());
     return button;
 }
 
 QCheckBox *check(const QString &text)
 {
     auto *box = new QCheckBox(text);
-    Aero::setPointSize(box, 9);
+    box->setFont(Aero::classicDialogFont());
     return box;
 }
 
@@ -96,7 +97,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     root->setSpacing(10);
 
     m_tabs = new QTabWidget;
-    Aero::setPointSize(m_tabs, 9);
+    m_tabs->setFont(Aero::classicDialogFont());
     m_tabs->addTab(buildGeneralTab(), tr("General"));
     m_tabs->addTab(buildViewTab(), tr("View"));
     m_tabs->addTab(buildSearchTab(), tr("Search"));
@@ -114,7 +115,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     // Win7 starts with Apply greyed and enables it once something is touched
     m_apply->setEnabled(false);
     for (QPushButton *button : {ok, cancel, m_apply}) {
-        Aero::setPointSize(button, 9);
+        button->setFont(Aero::classicDialogFont());
         button->setMinimumWidth(80);
         buttons->addWidget(button);
     }
@@ -133,6 +134,7 @@ OptionsDialog::OptionsDialog(QWidget *parent)
     });
 
     load();
+    Aero::applyClassicDialogFont(this);
 
     // After loading, so filling the controls in does not count as a change
     const auto touched = [this] { m_apply->setEnabled(true); };
@@ -181,7 +183,7 @@ QWidget *OptionsDialog::buildGeneralTab()
 QLayout *OptionsDialog::buildRestoreDefaultsRow()
 {
     auto *restore = new QPushButton(tr("Restore Defaults"));
-    Aero::setPointSize(restore, 9);
+    restore->setFont(Aero::classicDialogFont());
     connect(restore, &QPushButton::clicked, this, &OptionsDialog::restoreDefaults);
 
     auto *row = new QHBoxLayout;
@@ -222,7 +224,7 @@ QWidget *OptionsDialog::buildViewTab()
         tr("You can apply the view (such as Details or Icons) that you are "
            "using for this folder to all folders of this type."));
     viewsText->setWordWrap(true);
-    Aero::setPointSize(viewsText, 9);
+    viewsText->setFont(Aero::classicDialogFont());
 
     auto *viewsButtons = new QHBoxLayout;
     viewsButtons->setContentsMargins(0, 6, 0, 0);
@@ -230,7 +232,7 @@ QWidget *OptionsDialog::buildViewTab()
     auto *applyToFolders = new QPushButton(tr("Apply to Folders"));
     auto *resetFolders = new QPushButton(tr("Reset Folders"));
     for (QPushButton *button : {applyToFolders, resetFolders}) {
-        Aero::setPointSize(button, 9);
+        button->setFont(Aero::classicDialogFont());
         button->setMinimumWidth(120);
         viewsButtons->addWidget(button);
     }
@@ -263,7 +265,7 @@ QWidget *OptionsDialog::buildViewTab()
     m_advanced->setUniformRowHeights(true);
     m_advanced->setSelectionMode(QAbstractItemView::NoSelection);
     m_advanced->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    Aero::setPointSize(m_advanced, 9);
+    m_advanced->setFont(Aero::classicDialogFont());
 
     auto *files = new QTreeWidgetItem(m_advanced);
     files->setText(0, tr("Files and Folders"));
@@ -352,7 +354,7 @@ QWidget *OptionsDialog::buildSearchTab()
         tr("Searching contents reads every file it walks past, so it can take "
            "several minutes over a large folder."));
     cost->setWordWrap(true);
-    Aero::setPointSize(cost, 9);
+    cost->setFont(Aero::classicDialogFont());
     cost->setStyleSheet(QStringLiteral("color: %1;")
                         .arg(QLatin1String(Aero::Palette::MutedText)));
 

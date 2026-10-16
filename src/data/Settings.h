@@ -93,6 +93,9 @@ void clearRememberedViewModes();
 std::optional<bool> navigationGroupExpanded(const QString &groupId);
 void setNavigationGroupExpanded(const QString &groupId, bool expanded);
 
+QStringList favoritesOrder();
+void setFavoritesOrder(const QStringList &urls);
+
 // Computer needs the difference, its own fallback being Tiles, and the mode
 // alone cannot say whether the default applied
 bool hasViewModeFor(const QUrl &url);

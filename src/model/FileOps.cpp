@@ -1,6 +1,7 @@
 #include "FileOps.h"
 #include "AccessDialogs.h"
 #include "FileProgressDialog.h"
+#include "PropertiesDialog.h"
 
 #include <KIO/ApplicationLauncherJob>
 #include <KIO/AskUserActionInterface>
@@ -30,6 +31,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QStringList>
+#include <algorithm>
 #include <functional>
 
 namespace {
@@ -623,14 +625,22 @@ bool openApplication(const QStringList &desktopNames, QWidget *window)
     return false;
 }
 
-void showProperties(const QList<KFileItem> &items, QWidget *window)
+QDialog *showProperties(const QList<KFileItem> &items, QWidget *window)
 {
     if (items.isEmpty())
-        return;
+        return nullptr;
 
-    auto *dialog = new KPropertiesDialog(KFileItemList(items), window);
+    // KIO keeps the specialized editors for links, desktop launchers, trash,
+    // and remote protocols. Ordinary local items use Explorer's property sheet.
+    const bool specialized = std::any_of(items.cbegin(), items.cend(), [](const KFileItem &item) {
+        return !item.url().isLocalFile() || item.isLink() || item.isDesktopFile();
+    });
+    QDialog *dialog = specialized
+        ? static_cast<QDialog *>(new KPropertiesDialog(KFileItemList(items), window))
+        : static_cast<QDialog *>(new PropertiesDialog(KFileItemList(items), window));
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
+    return dialog;
 }
 
 void undo()

@@ -1,0 +1,9 @@
+#pragma once
+
+// Registered native-app credentials belong to the distributor. Desktop OAuth
+// client values are extractable from a native binary; S256 PKCE protects the
+// authorization exchange. These are not user tokens or an encryption key.
+namespace GoogleDriveBuildConfig {
+inline constexpr char ClientId[] = "@EXPLORER_GOOGLE_CLIENT_ID@";
+inline constexpr char ClientSecret[] = "@EXPLORER_GOOGLE_CLIENT_SECRET@";
+}

@@ -1,11 +1,11 @@
 #include "PreviewPane.h"
 #include "PdfPreviewRenderer.h"
 #include "aero/text.h"
+#include "aero/fonts.h"
 #include "aero/artwork.h"
 
 #include <KIO/PreviewJob>
 #include <QFile>
-#include <QFontDatabase>
 #include <QFutureWatcher>
 #include <QHideEvent>
 #include <QLabel>
@@ -69,9 +69,7 @@ PreviewPane::PreviewPane(QWidget *parent) : QWidget(parent)
     m_text->setObjectName(QStringLiteral("textPreview"));
     m_text->setReadOnly(true);
     m_text->setFrameShape(QFrame::NoFrame);
-    QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    font.setPointSize(10);
-    m_text->setFont(font);
+    m_text->setFont(Aero::textPreviewFont());
     m_text->setStyleSheet(QStringLiteral("QPlainTextEdit { background: white; color: black; }"));
     m_stack->addWidget(m_text);
     m_pdfCaption = Aero::label(tr("PDF — first page only"), 9, Aero::Palette::HeadingText);

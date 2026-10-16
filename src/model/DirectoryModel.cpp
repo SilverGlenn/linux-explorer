@@ -1,6 +1,7 @@
 #include "DirectoryModel.h"
 #include "Branding.h"
 #include "Settings.h"
+#include "FolderDragData.h"
 #include "aero/palette.h"
 
 #include <KDirLister>
@@ -88,6 +89,28 @@ public:
             m_nameCollator.setLocale(QLocale(QLocale::English, QLocale::UnitedStates));
         m_nameCollator.setCaseSensitivity(Qt::CaseInsensitive);
         m_nameCollator.setNumericMode(true);
+    }
+
+    QMimeData *mimeData(const QModelIndexList &indexes) const override
+    {
+        QMimeData *mime = KDirSortFilterProxyModel::mimeData(indexes);
+        if (!mime) return nullptr;
+        QList<QUrl> folders;
+        for (const QModelIndex &index : indexes) {
+            const KFileItem item = fileItem(mapToSource(index));
+            if (item.isNull()) continue;
+            if (!item.isDir()) return mime;
+            if (!folders.contains(item.url())) folders.append(item.url());
+        }
+        if (!folders.isEmpty()) FolderDragData::setFolders(mime, folders);
+        return mime;
+    }
+
+    QStringList mimeTypes() const override
+    {
+        QStringList types = KDirSortFilterProxyModel::mimeTypes();
+        types.append(FolderDragData::mimeType);
+        return types;
     }
 
     QList<int> columns() const { return m_columns; }
@@ -432,6 +455,7 @@ DirectoryModel::DirectoryModel(QObject *parent)
     connect(lister, &KCoreDirLister::started, this, &DirectoryModel::loadingStarted);
     connect(lister, &KCoreDirLister::completed, this, &DirectoryModel::loadingFinished);
     connect(lister, &KCoreDirLister::percent, this, &DirectoryModel::loadingProgress);
+    connect(lister, &KCoreDirLister::redirection, this, &DirectoryModel::urlRedirected);
     connect(lister, &KCoreDirLister::jobError, this, [this](KIO::Job *job) {
         // The failing job names the directory it was reading, which is not
         // always the lister's own

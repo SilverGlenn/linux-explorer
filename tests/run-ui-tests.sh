@@ -6,6 +6,7 @@ binary="${1:-$root/build/explorer_ui_tests}"
 if (($#)); then shift; fi
 if [[ -n "${EXPLORER_NATIVE_THEME:-}" ]]; then
     export EXPLORER_NATIVE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+    export EXPLORER_NATIVE_REFERENCE_FONTS="${XDG_DATA_HOME:-$HOME/.local/share}/linux-explorer-win7/reference-fonts"
 fi
 sandbox="$(mktemp -d -t explorer-tests.XXXXXXXX)"
 trap 'rm -rf -- "$sandbox"' EXIT
@@ -23,6 +24,14 @@ if [[ -n "${EXPLORER_NATIVE_THEME:-}" ]]; then
     for preference in kdeglobals Kvantum/kvantum.kvconfig; do
         if [[ -f "$EXPLORER_NATIVE_CONFIG_DIR/$preference" ]]; then
             cp -- "$EXPLORER_NATIVE_CONFIG_DIR/$preference" "$XDG_CONFIG_HOME/$preference"
+        fi
+    done
+    # User-supplied fonts are visual fixtures, never package/repository assets.
+    task_fonts="$XDG_DATA_HOME/linux-explorer-win7/reference-fonts"
+    mkdir -p "$task_fonts"
+    for task_font in segoeui.ttf segoeuib.ttf segoeuii.ttf segoeuiz.ttf micross.ttf tahoma.ttf lucon.ttf; do
+        if [[ -f "$EXPLORER_NATIVE_REFERENCE_FONTS/$task_font" ]]; then
+            cp -- "$EXPLORER_NATIVE_REFERENCE_FONTS/$task_font" "$task_fonts/$task_font"
         fi
     done
 fi

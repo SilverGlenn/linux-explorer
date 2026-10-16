@@ -7,6 +7,10 @@ on:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      require_google_drive_client: true
+    secrets:
+      google_drive_client_json: ${{ secrets.GOOGLE_DRIVE_DESKTOP_CLIENT_JSON }}
     permissions:
       contents: read
 
@@ -26,6 +30,8 @@ jobs:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
             dist/build/explorer-win7-x86_64
+            dist/build/explorer-win7-google-drive
+            dist/docs/google-drive.md
             dist/LICENSE
           fail_on_unmatched_files: true
 

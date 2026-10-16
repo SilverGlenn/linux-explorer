@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.19)
 project(Explorer LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -13,7 +13,9 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 # DBus tells KDED to load or unload its automounter module
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Multimedia DBus UiPlugin)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets Concurrent Multimedia DBus UiPlugin NetworkAuth)
+find_package(Qt6Keychain REQUIRED)
+include(cmake/GoogleDriveOAuth.cmake)
 find_package(KF6FrameworkIntegration REQUIRED)
 # Every file operation goes through KIO, nothing is reimplemented here
 find_package(KF6KIO REQUIRED)
@@ -37,6 +39,8 @@ add_library(explorer_ui OBJECT
     src/aero/artwork.cpp
     src/aero/arrows.cpp
     src/aero/capacitybar.cpp
+    src/aero/contextmenu.cpp
+    src/aero/fonts.cpp
     src/aero/icons.cpp
     src/aero/listview.cpp
     src/aero/sounds.cpp
@@ -53,18 +57,26 @@ add_library(explorer_ui OBJECT
     src/data/Branding.cpp
     src/data/FileManagerService.cpp
     src/data/Settings.cpp
+    src/data/GoogleDriveService.cpp
+    src/data/GoogleDriveAuth.cpp
+    src/data/GoogleDriveConnection.cpp
     src/model/Archives.cpp
     src/model/ComputerModel.cpp
     src/model/DirectoryModel.cpp
     src/model/DriveLabel.cpp
+    src/model/PropertiesData.cpp
+    src/model/FolderAllocation.cpp
     src/model/FileOps.cpp
     src/model/GroupingProxy.cpp
     src/ui/ComputerView.cpp
     src/ui/FileProgressDialog.cpp
     src/ui/FileView.cpp
     src/ui/MapDriveDialog.cpp
+    src/ui/GoogleDriveDialog.cpp
+    src/ui/GoogleDriveSignInDialog.cpp
     src/ui/MountDialog.cpp
     src/ui/OptionsDialog.cpp
+    src/ui/PropertiesDialog.cpp
     src/ui/FileChooserDialog.cpp
     src/ui/BrowserNavigation.cpp
     src/ui/MainWindow.cpp
@@ -83,6 +95,7 @@ target_include_directories(explorer_ui PUBLIC
     src/model
     src/ui
     src
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
 target_link_libraries(explorer_ui PUBLIC
@@ -90,6 +103,8 @@ target_link_libraries(explorer_ui PUBLIC
     Qt6::Concurrent
     Qt6::Multimedia
     Qt6::DBus
+    Qt6::NetworkAuth
+    qt6keychain
     KF6::KIOCore
     KF6::KIOGui
     KF6::KIOWidgets
@@ -147,6 +162,10 @@ set_target_properties(explorer PROPERTIES
 )
 
 install(TARGETS explorer RUNTIME DESTINATION bin)
+install(PROGRAMS scripts/google-drive-rclone.py
+        DESTINATION bin RENAME explorer-win7-google-drive)
+configure_file(scripts/google-drive-rclone.py
+    ${CMAKE_CURRENT_BINARY_DIR}/explorer-win7-google-drive COPYONLY)
 install(FILES linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
         linux-explorer-win7-chooser-dialog.desktop
         DESTINATION share/applications)
@@ -158,12 +177,21 @@ install(FILES LICENSE DESTINATION share/licenses/linux-explorer-win7)
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+    include(tests/properties-tests.cmake)
+    add_executable(font_tests tests/FontTest.cpp)
+    target_link_libraries(font_tests PRIVATE explorer_ui Qt6::Test)
+    add_test(NAME font_tests COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-ui-tests.sh $<TARGET_FILE:font_tests>)
+    set_tests_properties(font_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=Fusion;QT_FONT_DPI=96"
+        TIMEOUT 60)
     include(tests/address-tests.cmake)
     include(tests/thumbnail-tests.cmake)
     include(tests/details-tests.cmake)
     include(tests/list-tests.cmake)
     include(tests/navigation-tests.cmake)
     include(tests/browser-navigation-tests.cmake)
+    include(tests/google-drive-tests.cmake)
     include(tests/file-chooser-tests.cmake)
     include(tests/chooser-service-tests.cmake)
     include(tests/portal-chooser-tests.cmake)

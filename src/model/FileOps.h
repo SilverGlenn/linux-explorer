@@ -8,6 +8,7 @@
 #include <KFileItem>
 
 class QDropEvent;
+class QDialog;
 class QWidget;
 
 // Every destructive or data moving operation, each a thin call into KIO
@@ -88,7 +89,7 @@ void openTerminalAt(const QUrl &directory, QWidget *window);
 // without the .desktop ending, and false when none of them are
 bool openApplication(const QStringList &desktopNames, QWidget *window);
 
-void showProperties(const QList<KFileItem> &items, QWidget *window);
+QDialog *showProperties(const QList<KFileItem> &items, QWidget *window);
 
 void undo();
 bool isUndoAvailable();

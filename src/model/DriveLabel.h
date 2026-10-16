@@ -5,8 +5,8 @@
 class KFilePlacesModel;
 class QModelIndex;
 
-// Win7 names a drive by its label and then its drive letter, and with no drive
-// letters here the kernel's device node stands in
+// The system root is displayed as Local Disk (C:). Other volumes use their
+// label and kernel device node. These names never change a mount or volume.
 //
 // Rename dialogs prefill the bare label, or committing the node back would make
 // the suffix permanent and append a second one next time

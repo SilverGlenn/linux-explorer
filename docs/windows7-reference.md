@@ -224,6 +224,137 @@ These are QWidget grabs of the complete client, **not native framed/glass visual
 acceptance**. Narrow footer fields intentionally elide; their full accessible
 names and tooltips remain available.
 
+## Properties reference pass
+
+The Windows 7 VM was started in temporary QEMU snapshot mode for this pass and
+cleanly shut down afterward. The ten captures are local development evidence in
+`build/references/windows7-properties/`; the VM disk and configuration were not
+changed persistently. The guest used Basic frames at normal text size.
+
+The folder General sheet has an approximately 361 × 449 px client, the file
+sheet 361 × 477 px, and drive sheet 361 × 467 px. General content is white,
+with a 32 px icon beside the name, left-aligned labels and values about 73 px
+apart, horizontal separators, and OK/Cancel/Apply buttons at the bottom right.
+Folder metadata rows have about 26 px pitch. Drive General uses blue/magenta
+used/free-space keys, byte and human-readable capacity values, and an oval pie.
+
+The Linux sheet exposes supported General, Security, and Details information.
+KIO still performs changes, directory-size queries, and full permission editing.
+The UI-only system-drive caption does not change the volume or mount name.
+
+### Properties fonts
+
+A follow-up queried `WM_GETFONT`/`LOGFONT` on the native General, Security and
+Details pages, their text fields, lists, headers, tabs and footer buttons. All
+request `MS Shell Dlg`, height **−11 logical pixels**, weight **400**, nonitalic.
+At 96 DPI this is the rounded **8 pt** classic dialog font. The guest's
+`FontSubstitutes` registry maps `MS Shell Dlg` to **Microsoft Sans Serif**;
+`MS Shell Dlg 2` maps to Tahoma and is not the font these controls request.
+Text-only evidence is in
+`build/references/windows7-properties-fonts/native-control-fonts.txt`.
+
+The sheet previously inherited Explorer's Segoe UI 9 pt. It now requests
+Microsoft Sans Serif 8 pt, with Arial/Liberation Sans fallbacks. Its tabs, fields,
+labels, lists and buttons receive explicit fonts because Aero and desktop style
+class defaults can survive reparenting independently of the dialog's font.
+The caption remains system-managed. The footer uses Windows
+button order even when the desktop platform theme supplies another order.
+
+For this user's local installation, the reference font comes from their own
+VM and is installed in their user font directory. It is not a repository asset
+and is not bundled with application packages. The snapshot VM was shut down
+cleanly and its base disk was unchanged.
+
+### Whole-application font audit
+
+The subsequent VM pass queried system menu/message fonts and native control
+fonts. DirectUI headings were compared with native GDI text widths where no
+font handle was exposed. Full evidence, including those inference limits, is in
+`build/references/windows7-app-fonts/README.md`.
+
+| Surface | Windows 7 font |
+| --- | --- |
+| Menus, submenus, sidebar, address/search, command bar, lists/headers, status | Segoe UI 9 pt regular |
+| Default menu command | Segoe UI 9 pt bold |
+| Computer/file group headings and Content file/drive names | Segoe UI 11 pt regular |
+| Green Libraries and individual-library headings | Segoe UI 14 pt regular |
+| Map Network Drive main instruction | Segoe UI 12 pt regular |
+| Folder Options, all three tabs | Microsoft Sans Serif 8 pt regular |
+| About body and button | Tahoma 8 pt regular |
+| Plain-text preview | Lucida Console 9.75 pt regular (195 twips, 13 px at 96 DPI) |
+
+Search placeholders are italic; entered text is regular. Libraries tile labels
+remain 9 pt; their green headings now use the measured 14 pt size. Modern Linux-specific task dialogs retain the
+shell's Segoe UI roles. The official Google sign-in artwork is unchanged.
+
+The installed ReactXP Segoe UI was version 5.55; the guest's regular face is
+5.01. Private user-supplied regular, bold, italic, Microsoft Sans Serif, Tahoma,
+and Lucida Console files live in
+`$XDG_DATA_HOME/linux-explorer-win7/reference-fonts`. Qt loads them for this app
+before selecting shell fonts, so existing desktop font choices and other apps
+are unaffected. No Microsoft fonts are repository or package assets. Hosts
+without these optional files use the installed family or declared fallbacks.
+
+The app pins shell class fonts after installing the Aero style, and context
+menus set their own fonts recursively, including submenus added on demand.
+Tests inspect rendered menu style options, every classic-dialog tab, preview
+character formatting, and the raw font name tables of selected faces; a
+matching family name alone does not establish that the reference face loaded.
+
+## Context menu follow-up
+
+Ordinary and Shift item-menu captures were taken in an offline snapshot VM,
+then Windows was shut down cleanly. Local screenshots are in
+`build/references/windows7-context/`. The ordinary folder menu begins with bold
+Open and Open in new window. Send to precedes Cut/Copy; Create shortcut,
+Delete, and Rename form the next group; Properties is last. Copy as path is
+present in the Shift menu. File application choices use an Open with submenu.
+
+The Linux menu retains these command groups. Desktop service extensions stay
+inside More options, rather than appending application commands, tagging
+controls, or widget rows to the main menu. Unsupported shell commands are not
+displayed as placeholders. Context captions omit shortcut text; the original
+actions retain their keyboard bindings.
+
+### Context menu geometry at 100% scaling
+
+A fresh offline snapshot pass on 2026-10-16 verified **Smaller – 100% (default)**
+in the Windows Display control panel. The guest display was 1280 × 768 with
+Basic frames. Full captures, border-exact crops and machine-readable measurements
+are in `build/references/windows7-context-sizing/`; popup sizes below exclude
+their drop shadows.
+
+| Ordinary Explorer menu | Width × height (px) | Capture |
+| --- | --- | --- |
+| Folder | 250 × 329 | `06-folder-menu.png` |
+| Text file | 223 × 332 | `05-file-menu.png` |
+| Folder background | 250 × 285 | `04-background-menu.png` |
+| Same folder through Documents library, background | 165 × 266 | `20-library-background-menu.png` |
+| Send to child | 222 × 138 | `16-send-submenu.png` |
+| Include in library child | 171 × 124 | `13-folder-send-hover.png` |
+| Share with child | 225 × 102 | `11-folder-sync-hover.png` |
+
+Normal commands allocate exactly **22 px vertically**. Separators allocate
+**8 px**, with a grey/white two-pixel rule at offsets 4 and 5. The installed
+Shared Folder Synchronization shell extension uses a shorter 19 px item; it is
+not the standard command-row height. Hover captures establish these bounds,
+rather than estimating height from glyph baselines.
+
+The menu has a **3 px frame/content inset**. The icon gutter fills horizontal
+offsets 3–28 from the left edge, followed by a grey divider at 29 and a white
+edge at 30. Text starts at **35 px**. Hover spans from left+3 to right−3 and
+includes the gutter. Separator rules start at left+30. Submenu arrows occupy
+roughly four pixels horizontally, with their rightmost ink 12 px before the
+right border.
+
+Width follows content: the root captures leave approximately **55 px after
+the longest label**, in addition to the 35 px left inset. Longest label advance
+plus approximately **90 px** reproduces their widths; a universal 224/250 px
+minimum does not. The library background is narrower because it omits the long
+Shared Folder Synchronization command. Simple Send to/Include in library child
+menus leave approximately 40 px after their longest label (about 75 px total
+overhead); shell-provided child-menu sizing can vary.
+
 ## Native decoration dependency
 
 The app's transparent navigation row does not own the compositor's caption or
@@ -271,6 +402,33 @@ application and installers do not change SMOD settings. Ordinary Explorer
 dialogs retain `linux-explorer-win7-dialog`, so the picker rule does not alter
 their frame or inherit the browser's hidden caption. Native before/after picker
 captures are `build/picker-border-before.png` and `build/picker-border-after.png`.
+
+### Sharp background text through an XWayland picker's address bar
+
+The Wayland build of Aero Glass Blur installed on the development desktop has
+its X11 blur-property handling disabled. Its native decoration still blurs, but
+an XWayland picker's transparent navigation row shows sharp background content.
+The chooser already requests blur through `KWindowEffects`; changing breadcrumb
+painting or making the strip opaque does not fix this compositor integration.
+Native Wayland pickers send the supported `org_kde_kwin_blur_manager` protocol.
+
+Pickers for X11 parents must stay on X11 to retain native transient parenting and
+modality. For this Aero effect version, the scoped workaround is to add the exact
+`linux-explorer-win7-chooser-dialog` token to the effect's **force-blur window
+classes**, with matching-window blur enabled. In `kwinrc`, these are
+`WindowClasses` (newline-separated) and `BlurMatching=true` under
+`[Effect-aeroglassblur]`. Preserve existing classes and other effect settings,
+then reconfigure only `aeroglassblur`. The opaque file list and footer remain
+opaque; the compositor blurs the backdrop visible through the navigation row.
+This setting is separate from the SMOD inner-border exception. The application
+and installers do not apply it automatically.
+
+The workaround was verified with the installed picker and Aero effect in a
+private OpenGL KWin session with an X11 parent and a synthetic text backdrop.
+`build/picker-aero-check/before.png` reproduces sharp text across the navigation
+row; `after.png` shows the row blurred after reconfiguring only the effect. The
+same exact-class rule was then applied to the development desktop, with its
+previous `kwinrc` saved as `build/picker-aero-check/kwinrc.before-live`.
 
 ## Follow-up: controls, navigation, and PDF
 
@@ -321,6 +479,47 @@ Whole-client evidence is under `build/screenshots-followup-themed/`, including
 `pdf-preview-window.png`, `search-focused-input.png` and navigation images.
 These are not compositor-frame captures. Existing user default-manager,
 Meta+E and approved SMOD configuration must be preserved when installing updates.
+
+## Favorites drag reference pass
+
+An offline Windows 7 SP1 snapshot was inspected on 2026-10-16 at 1280 × 768,
+100% scaling, with Basic frames. The original disk was not modified and this
+temporary guest was shut down cleanly; a separately running VM was untouched.
+Captures are in `build/references/windows7-favorites/`.
+
+- Dragging a main-view folder onto the Favorites heading highlights the heading,
+  says **Create link in Favorites**, and appends a shortcut. The original folder
+  stays in place (`10-added-folder.png`, `11-folder-over-heading-active.png`).
+- The narrow gaps between shortcuts show a **black, one-pixel insertion line**
+  starting at the shortcut icon indentation, ending a few pixels before the
+  pane boundary, with short vertical endcaps. The whole row is not an insertion
+  zone (`08-folder-between-favorites.png`, `13-custom-favorite-between.png`).
+- Reordering an existing user-added shortcut says **Move here**, including when
+  hovering the Favorites heading (`13-custom-favorite-between.png`,
+  `14-custom-favorite-heading.png`). Heading drops append; they do not insert first.
+- Hovering a folder's center highlights that folder and changes the operation
+  label to **Move to Desktop** in this example (`09-folder-on-favorite.png`).
+- The drag image is a large, translucent icon above the pointer, approximately
+  96 logical pixels, with a small white action label and blue text just below
+  the pointer. Multiple-folder drags stack icons and put a blue count badge near
+  the center (`15-multiple-folder-drag.png`).
+
+The Linux client now uses those insertion zones, marker geometry, action labels,
+heading behavior and drag images. Main-view directories carry their known folder
+type with the normal URI list, including remote directories and grouped Details
+views. Header/gap drops create bookmarks and return a Link action, rather than
+moving folders. Existing-folder center drops still use KIO file operations.
+Saved Favorites are bookmarks rather than physical Windows `.lnk` files, so
+dragging a saved shortcut itself is restricted to reordering; its center-drop
+cannot move the original folder.
+Reordering uses a layout change on the existing shortcut rows, preserving their
+selection, expansion state and scroll position instead of rebuilding the sidebar.
+
+Physical mouse drags were also exercised in an isolated Xvfb display, using the
+actual main view and navigation widgets. Local captures and drag-image PNGs are
+in `build/references/linux-favorites/`. Those headless captures validate client
+feedback and input delivery; they do not establish compositor-frame or Aero
+Glass parity, and drag-image alpha is rendered by the live desktop compositor.
 
 ## Remaining fidelity work
 

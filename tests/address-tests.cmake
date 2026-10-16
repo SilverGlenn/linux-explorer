@@ -3,6 +3,7 @@ add_executable(address_controls_tests
     tests/AddressControlsTest.cpp
     src/ui/BreadcrumbBar.cpp
     src/ui/SearchBox.cpp
+    src/aero/fonts.cpp
     src/aero/text.cpp
 )
 target_include_directories(address_controls_tests PRIVATE src src/ui)

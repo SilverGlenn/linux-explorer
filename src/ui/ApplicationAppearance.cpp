@@ -2,6 +2,7 @@
 #include "Assets.h"
 #include "aero/buttons.h"
 #include "aero/icons.h"
+#include "aero/fonts.h"
 #include <AeroQt/stylesheet.h>
 
 #include <QApplication>
@@ -104,7 +105,9 @@ private:
 
 void Explorer::configureApplicationAppearance(QApplication *app)
 {
+    Aero::loadReferenceFonts();
     Aero::registerStylesheet(app);
+    Aero::configureFonts(app);
     new ScrollBarUnstyler(app);
 
     // The chrome has no opinion on what its icons degrade to.

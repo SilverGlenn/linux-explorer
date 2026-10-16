@@ -1,9 +1,11 @@
 #include "icons.h"
 
+#include <QApplication>
 #include <QFont>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPixmap>
+#include <QStyle>
 #include <functional>
 
 namespace Aero {
@@ -67,6 +69,28 @@ QIcon previewPaneIcon()
         painter.drawLine(QPointF(2, 5.5), QPointF(14, 5.5));
         painter.drawLine(QPointF(8.5, 5), QPointF(8.5, 13));
     });
+    return icon;
+}
+
+QIcon googleDriveIcon()
+{
+    QIcon base = tryIconName(QStringLiteral("drive-harddisk"));
+    if (base.isNull())
+        base = QApplication::style()->standardIcon(QStyle::SP_DriveHDIcon);
+    const QIcon badge(QStringLiteral(":/google/drive-logo.png"));
+    QIcon icon;
+    for (int side : {16, 20, 24, 32, 48, 64, 96, 128, 256}) {
+        QPixmap pixmap(side, side);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        base.paint(&painter, QRect(0, 0, side, side));
+        // Place, resize, and keep clear space around Google's original image;
+        // no recoloring or reconstruction of the product logo.
+        const int extent = qMax(9, qRound(side * 0.46));
+        badge.paint(&painter, QRect(side - extent, side - extent, extent, extent));
+        painter.end();
+        icon.addPixmap(pixmap);
+    }
     return icon;
 }
 

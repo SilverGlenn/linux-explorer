@@ -229,6 +229,18 @@ void setNavigationGroupExpanded(const QString &groupId, bool expanded)
     s.setValue(QStringLiteral("Navigation/Groups/") + groupId, expanded);
 }
 
+QStringList favoritesOrder()
+{
+    return QSettings().value(QStringLiteral("Navigation/FavoritesOrder")).toStringList();
+}
+
+void setFavoritesOrder(const QStringList &urls)
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("Navigation/FavoritesOrder"), urls);
+    settings.sync();
+}
+
 QStringList recentPaths()
 {
     return QSettings().value(key("RecentPaths")).toStringList();

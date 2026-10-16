@@ -1,4 +1,5 @@
 #include "text.h"
+#include "fonts.h"
 
 #include <QFrame>
 #include <QMouseEvent>
@@ -7,9 +8,7 @@ namespace Aero {
 
 void setPointSize(QWidget *w, int pt)
 {
-    QFont font = w->font();
-    font.setPointSize(pt);
-    w->setFont(font);
+    w->setFont(shellFont(pt));
 }
 
 QLabel *label(const QString &text, int pt, const char *color)

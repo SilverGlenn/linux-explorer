@@ -49,6 +49,16 @@ Windows 7-era principles are used without overriding Explorer fidelity.
   the address editor really takes focus. F1 opens local help rather than About.
 - Rename invalidates cached selected-item URLs, so Copy/Properties uses the
   new filename. Real KIO rename/copy/cut-paste/move and Undo have regression coverage.
+- Properties uses a compact Windows 7 property sheet for local files, folders,
+  and drives, with General, Security, and Details pages. Permission and advanced
+  editing remains available through KIO's full editor; links, launchers, and
+  remote items keep their specialized KIO pages.
+- Folder Size on disk is calculated asynchronously from allocated filesystem
+  blocks, including directory storage. Hard links count once and symlink targets
+  are not traversed. Unreadable or changing directories are marked as partial.
+- Context menus keep the Windows 7 command groups and default Open action.
+  Installed desktop extensions are grouped under More options; Copy as path
+  appears in the Shift menu while its keyboard shortcut remains available.
 
 File operations still go through KIO. Linux paths, device identities, mount
 permissions, and installed sharing services remain real; unsupported Windows
@@ -57,7 +67,8 @@ by default, as in upstream, rather than copying Windows' hidden-extension defaul
 
 ## Build and run
 
-Requires CMake, a C++17 compiler, Qt6 Widgets/Concurrent/Multimedia/DBus/UiPlugin,
+Requires CMake 3.19+, a C++17 compiler, Qt 6.8+ Widgets/Concurrent/Multimedia/DBus/UiPlugin/NetworkAuth,
+Qt6Keychain,
 KDE Frameworks 6 (KIO, CoreAddons, Config, WidgetsAddons, WindowSystem, Solid,
 FrameworkIntegration), and [libAeroQt](https://gitgud.io/atmk/libaero-qt).
 
@@ -65,6 +76,15 @@ PDF preview optionally uses `/usr/bin/pdftoppm` (`poppler-utils` on Debian/Ubunt
 `poppler` on Arch). Without it, the pane explains that the renderer is unavailable.
 This is a local-file, first-page raster preview, not a full PDF viewer: no page
 navigation, PDF text search, password entry, or automatic remote download.
+
+Google Drive uses **Tools → Connect Google Drive... → Sign in with Google**
+with an application-owned Desktop OAuth client, system-browser consent, and the
+secure desktop keychain. Users do not create Cloud projects or import credentials.
+The connected read-only mount appears as **Google Drive (G:)** under Computer's
+Hard Disk Drives and in the Computer sidebar. A maintainer must register/configure the app's
+client and complete applicable Google verification before shipping enabled sign-in;
+unconfigured development builds explain that sign-in is unavailable. See the
+[connection and release notes](docs/google-drive.md).
 
 With dependencies installed:
 
@@ -77,7 +97,7 @@ cmake --build build -j2
 On Arch, the Qt/KDE development dependencies are:
 
 ```bash
-sudo pacman -S cmake ninja qt6-base qt6-tools qt6-multimedia kio kcoreaddons \
+sudo pacman -S cmake ninja qt6-base qt6-tools qt6-multimedia qt6-networkauth qtkeychain-qt6 kio kcoreaddons \
   kconfig kwidgetsaddons kwindowsystem solid frameworkintegration
 ```
 

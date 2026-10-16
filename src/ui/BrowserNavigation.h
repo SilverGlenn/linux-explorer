@@ -9,6 +9,7 @@
 #include <utility>
 
 class ComputerModel;
+class GoogleDriveConnection;
 class KFilePlacesModel;
 class QHBoxLayout;
 class QLineEdit;
@@ -18,6 +19,7 @@ class QPropertyAnimation;
 class QPushButton;
 class QTimer;
 class QWidget;
+namespace KIO { class StatJob; }
 
 // The shared Explorer navigation/address surface and its single history.
 // Populates the supplied navigation-row layout; does not create a window, file
@@ -33,6 +35,10 @@ public:
 
     BrowserNavigation(KFilePlacesModel *places, ComputerModel *computer,
                       QHBoxLayout *layout, QObject *parent = nullptr);
+    BrowserNavigation(KFilePlacesModel *places, ComputerModel *computer,
+                      QHBoxLayout *layout, GoogleDriveConnection *driveConnection,
+                      QObject *parent);
+    ~BrowserNavigation() override;
 
     // Call once per host. MainWindow already has Up/Refresh menu actions.
     void installShortcuts(QWidget *host, bool includeUpAndRefresh = true);
@@ -50,6 +56,9 @@ public:
     QUrl currentUrl() const;
     // Silent spring-loaded navigation still records history and changes location.
     bool navigateTo(const QUrl &url, bool announceNavigation = true);
+    // A worker redirect replaces the current entry instead of recording a
+    // second user navigation. Ignore stale responses from a previous folder.
+    bool redirectTo(const QUrl &from, const QUrl &to);
     void goBack();
     void goForward();
     void goUp();
@@ -88,6 +97,8 @@ protected:
 
 private:
     bool accepts(const QUrl &url);
+    void cancelPathProbe();
+    void finishTypedNavigation(QUrl target, const QString &text);
     void goToHistoryIndex(int index);
     void pushHistory(const QUrl &url);
     void updateNavButtons();
@@ -101,6 +112,7 @@ private:
 
     KFilePlacesModel *m_places;
     ComputerModel *m_computerModel;
+    QPointer<GoogleDriveConnection> m_driveConnection;
     QWidget *m_host;
     UrlPolicy m_urlPolicy;
     std::function<bool()> m_showHiddenFiles;
@@ -110,6 +122,7 @@ private:
     QHBoxLayout *m_pathLayout = nullptr;
     QPointer<QMenu> m_crumbMenu;
     QLineEdit *m_pathEdit = nullptr;
+    QPointer<KIO::StatJob> m_pathProbe;
     QPushButton *m_backBtn = nullptr;
     QPushButton *m_forwardBtn = nullptr;
     QProgressBar *m_pathProgress = nullptr;

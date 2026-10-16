@@ -2,6 +2,7 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QTextStream>
 #include <QStringList>
 #include <QUrl>
 #include "FileManagerService.h"
@@ -9,6 +10,8 @@
 #include "ApplicationAppearance.h"
 #include "aero/icons.h"
 #include "Locations.h"
+#include "GoogleDriveService.h"
+#include <KFilePlacesModel>
 
 // Bare paths are accepted alongside locations, an argument from a shell being
 // far more likely to be a relative path
@@ -64,6 +67,9 @@ int main(int argc, char *argv[]) {
         QStringLiteral("Also claim org.freedesktop.FileManager1 for this session. "
                        "By default this preview leaves your existing file manager alone."));
     parser.addOption(registerOption);
+    QCommandLineOption mountOption(QStringLiteral("map-google-drive-mount"),
+        QStringLiteral("Add the verified personal Google Drive mount to Network and open it."));
+    parser.addOption(mountOption);
     parser.addPositionalArgument(
         QStringLiteral("url"),
         QStringLiteral("Folders to open, or files to reveal with --select."),
@@ -71,7 +77,19 @@ int main(int argc, char *argv[]) {
     parser.process(app);
 
     const bool reveal = parser.isSet(selectOption);
-    const QList<QUrl> urls = urlsFrom(parser.positionalArguments());
+    QList<QUrl> urls = urlsFrom(parser.positionalArguments());
+    if (parser.isSet(mountOption)) {
+        if (reveal || !parser.positionalArguments().isEmpty()) {
+            QTextStream(stderr) << "--map-google-drive-mount cannot be combined with a selection or path.\n";
+            return 2;
+        }
+        KFilePlacesModel places;
+        if (!GoogleDriveService::rememberMountedDrive(&places)) {
+            QTextStream(stderr) << "Google Drive is not mounted. No shortcut was added.\n";
+            return 1;
+        }
+        urls = {Locations::googleDriveMount()};
+    }
 
     // Normalised before anything else sees them, the handoff and the bus
     // interface both speaking locations, and this process's working directory

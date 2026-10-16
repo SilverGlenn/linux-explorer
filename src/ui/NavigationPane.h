@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QPointer>
 #include <QSet>
 #include <QStringList>
 #include <QUrl>
@@ -8,8 +9,10 @@
 
 class KDirWatch;
 class KFilePlacesModel;
+class GoogleDriveConnection;
 class QDropEvent;
 class QModelIndex;
+class QMimeData;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -25,8 +28,16 @@ class NavigationPane : public QWidget {
 public:
     explicit NavigationPane(QWidget *parent = nullptr);
 
+    // Supplies verified mount state without starting sign-in or probing Drive.
+    NavigationPane(GoogleDriveConnection *driveConnection, QWidget *parent);
+
     // Shared with the address bar, which resolves its icon from these entries
     KFilePlacesModel *placesModel() const;
+
+    // Explicit favorites use persistent places bookmarks, reusing an existing
+    // bookmark (and unhiding it) when the same folder is added again.
+    static bool canAddToFavorites(const QUrl &url);
+    void addToFavorites(const QUrl &url, const QString &name = QString());
 
     // Follows navigation that started elsewhere without reporting it back, and
     // the tree is never opened up to it, the highlight landing on the deepest
@@ -48,6 +59,9 @@ Q_SIGNALS:
 
     // From the network heading's context menu
     void mapDriveRequested();
+    void googleDriveRequested();
+
+    void favoritesOrderChanged();
 
     // The event is still live and must be used before returning
     void dropped(QDropEvent *event, const QUrl &destination);
@@ -84,10 +98,16 @@ private:
     QTreeWidgetItem *highlightTarget() const;
 
     void showContextMenu(const QPoint &pos);
+    bool moveFavorite(const QUrl &url, int insertionIndex);
+    void applyFavoritesOrder();
+    int favoriteDropIndex(const QPoint &pos, int *lineY = nullptr) const;
+    bool addDroppedFavorites(QList<QUrl> urls, int insertionIndex);
+    void rememberDrag(const QMimeData *mime);
     QTreeWidgetItem *itemForUrl(const QUrl &url) const;
     QUrl urlForItem(QTreeWidgetItem *item) const;
 
     KFilePlacesModel *m_places = nullptr;
+    QPointer<GoogleDriveConnection> m_driveConnection;
     QTreeWidget      *m_tree = nullptr;
 
     // Watches every expanded folder, so changes made elsewhere show up here,
@@ -103,6 +123,9 @@ private:
     // Reopened after a rebuild
     QSet<QUrl> m_expanded;
     bool m_restoringTree = false;
+
+    QPointer<const QMimeData> m_dragMime;
+    QList<QUrl> m_dragFolders;
 
     // Scans in flight, so reexpanding a folder starts no duplicate
     QSet<QUrl> m_scanning;

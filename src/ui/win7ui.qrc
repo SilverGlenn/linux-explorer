@@ -11,4 +11,11 @@
         <file alias="drivefillblue.png">../../assets/images/drivefillblue.png</file>
         <file alias="drivefillred.png">../../assets/images/drivefillred.png</file>
     </qresource>
+    <qresource prefix="/google">
+        <file alias="drive-logo.png">../../assets/google/drive-logo.png</file>
+        <file alias="google-signin.png">../../assets/google/google-signin.png</file>
+        <file alias="google-signin@2x.png">../../assets/google/google-signin@2x.png</file>
+        <file alias="google-signin@3x.png">../../assets/google/google-signin@3x.png</file>
+        <file alias="google-signin@4x.png">../../assets/google/google-signin@4x.png</file>
+    </qresource>
 </RCC>

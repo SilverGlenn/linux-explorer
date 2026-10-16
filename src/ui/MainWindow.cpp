@@ -15,10 +15,12 @@
 #include "LibrariesView.h"
 #include "ViewModeMenu.h"
 #include "FileOps.h"
+#include "PropertiesDialog.h"
 #include "FileView.h"
 #include "aero/icons.h"
 #include "Locations.h"
 #include "MapDriveDialog.h"
+#include "GoogleDriveSignInDialog.h"
 #include "MountDialog.h"
 #include "OptionsDialog.h"
 #include "NavigationPane.h"
@@ -26,6 +28,7 @@
 #include "Settings.h"
 #include "aero/arrows.h"
 #include "aero/buttons.h"
+#include "aero/contextmenu.h"
 #include "aero/splitter.h"
 #include "aero/strips.h"
 #include "aero/text.h"
@@ -89,6 +92,31 @@ constexpr int kNotificationSlideDuration = 180;
 
 // In creation order, and owning nothing, windows deleting themselves on close
 QList<MainWindow *> g_windows;
+
+// Context menus omit shortcut captions, while the original actions keep their
+// keyboard bindings in the file view and classic menus.
+QAction *contextAction(QMenu &menu, QAction *source)
+{
+    auto *action = menu.addAction(source->icon(), source->text());
+    action->setEnabled(source->isEnabled());
+    QObject::connect(source, &QAction::changed, action, [source, action] {
+        action->setEnabled(source->isEnabled());
+        action->setText(source->text());
+    });
+    QObject::connect(action, &QAction::triggered, source, &QAction::trigger);
+    return action;
+}
+
+void finishContextMenu(QMenu &menu)
+{
+    Aero::styleContextMenu(&menu);
+    // Some styles ignore QMenu's DefaultItem flag.
+    if (QAction *action = menu.defaultAction()) {
+        QFont font = menu.font();
+        font.setBold(true);
+        action->setFont(font);
+    }
+}
 
 } // namespace
 
@@ -207,6 +235,14 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
             this, &MainWindow::showMountDialog);
     connect(m_places, &NavigationPane::mapDriveRequested,
             this, &MainWindow::showMapDriveDialog);
+    connect(m_places, &NavigationPane::googleDriveRequested,
+            this, &MainWindow::showGoogleDriveDialog);
+    // Queue until the lister has finished switching its URL. Replace the
+    // setup location in history, so Back cannot replay account creation.
+    connect(m_model, &DirectoryModel::urlRedirected, this,
+            [this](const QUrl &from, const QUrl &to) {
+        m_navigation->redirectTo(from, to);
+    }, Qt::QueuedConnection);
     connect(m_places, &NavigationPane::dropped, this, &MainWindow::handleDrop);
 
     m_loadingTimer = new QTimer(this);
@@ -446,9 +482,9 @@ void MainWindow::buildActions()
         // With nothing selected Win7 reports on the current folder
         if (selection.isEmpty()) {
             if (!isComputerView() && !isLibrariesView())
-                FileOps::showProperties({KFileItem(operationFolder())}, this);
+                showItemProperties({KFileItem(operationFolder())});
         } else {
-            FileOps::showProperties(selection, this);
+            showItemProperties(selection);
         }
     }, QKeySequence(Qt::ALT | Qt::Key_Return));
     m_actRestore = fileAction(tr("Restore"), [this] {
@@ -493,6 +529,8 @@ void MainWindow::buildActions()
                                       &MainWindow::showMountDialog);
     m_actMapDrive = windowAction(tr("Map network drive..."),
                                  &MainWindow::showMapDriveDialog);
+    m_actGoogleDrive = windowAction(tr("Connect Google Drive..."),
+                                    &MainWindow::showGoogleDriveDialog);
     m_actExtract = windowAction(tr("Extract All..."), &MainWindow::extractSelection);
     m_actOptions = windowAction(tr("Folder and search options"),
                                 &MainWindow::showOptionsDialog);
@@ -688,6 +726,7 @@ void MainWindow::buildMenuBar()
     QMenu *tools = bar->addMenu(tr("&Tools"));
     tools->addAction(m_actConnectDrives);
     tools->addAction(m_actMapDrive);
+    tools->addAction(m_actGoogleDrive);
     tools->addSeparator();
     tools->addAction(m_actOpenTerminal);
     tools->addAction(m_actOpenAsAdmin);
@@ -991,7 +1030,9 @@ void MainWindow::rebuildContextualCommands()
         if (menu) {
             // These menus are rebuilt with the contextual buttons. Give the
             // button ownership so selection changes do not accumulate menus.
-            menu->setParent(button);
+            // QWidget's one-argument setParent drops Qt::Popup, turning the
+            // menu into a tiny child painted over the command bar.
+            menu->setParent(button, menu->windowFlags());
             button->setMenu(menu);
         } else {
             button->setPopupMode(QToolButton::DelayedPopup);
@@ -1017,6 +1058,8 @@ void MainWindow::rebuildContextualCommands()
 
         addButton(tr("Map network drive"), nullptr,
                   [this] { m_actMapDrive->trigger(); });
+        addButton(tr("Connect Google Drive"), nullptr,
+                  [this] { m_actGoogleDrive->trigger(); });
         addButton(tr("Mount drives"), nullptr,
                   [this] { m_actConnectDrives->trigger(); });
 
@@ -1342,7 +1385,7 @@ QWidget *MainWindow::buildBody()
     auto *libraryLayout = new QVBoxLayout(m_libraryHeader);
     libraryLayout->setContentsMargins(10, 8, 8, 8);
     libraryLayout->setSpacing(0);
-    m_libraryHeading = Aero::label(QString(), 12, "#006600");
+    m_libraryHeading = Aero::label(QString(), 14, "#006600");
     libraryLayout->addWidget(m_libraryHeading);
     libraryLayout->addWidget(Aero::label(tr("Includes: 1 location"), 9, Aero::Palette::LinkText));
     m_libraryHeader->hide();
@@ -1509,7 +1552,8 @@ void MainWindow::showLocation(const QUrl &url)
         m_computerView->setViewMode(mode);
     } else {
         m_stack->setCurrentWidget(m_listPage);
-        m_model->setUrl(url);
+        if (!m_model->url().matches(url, QUrl::StripTrailingSlash))
+            m_model->setUrl(url);
         const auto library = Libraries::forUrl(url);
         m_libraryHeader->setVisible(library.url.isValid());
         m_libraryHeading->setText(tr("%1 library").arg(library.name));
@@ -1709,6 +1753,15 @@ void MainWindow::showMapDriveDialog()
     navigateTo(dialog.mappedUrl());
 }
 
+void MainWindow::showGoogleDriveDialog()
+{
+    GoogleDriveSignInDialog dialog(m_places->placesModel(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    m_places->refresh();
+    navigateTo(dialog.mappedUrl());
+}
+
 void MainWindow::setViewMode(Settings::ViewMode mode)
 {
     if (isComputerView()) {
@@ -1815,6 +1868,8 @@ void MainWindow::updateDetailsPane()
 
 bool MainWindow::isFolderWritable(const QUrl &folder) const
 {
+    if (Locations::isGoogleDriveMount(folder))
+        return false;
     if (!folder.isLocalFile())
         return true;   // not our question to answer, KIO reports what it finds
 
@@ -1839,9 +1894,9 @@ void MainWindow::updateActionStates()
     const bool trash = isTrashView();
     const QUrl folder = operationFolder();
 
-    // The archive workers are read only, so everything that would write has to
-    // stand down
-    const bool readOnly = Archives::isInsideArchive(folder);
+    // Archives and the Google Drive mount cannot accept mutations.
+    const bool personalDrive = Locations::isGoogleDriveMount(folder);
+    const bool readOnly = Archives::isInsideArchive(folder) || personalDrive;
 
     // Only what can be browsed, a file having no window of its own to open in
     const bool anyBrowsable = std::any_of(selection.cbegin(), selection.cend(),
@@ -1852,10 +1907,10 @@ void MainWindow::updateActionStates()
     m_actOpen->setEnabled(any || librarySelected);
     m_actOpenNewWindow->setEnabled((anyBrowsable && !trash) || librarySelected);
     m_actOpenWith->setEnabled(any && !trash);
-    m_actCut->setEnabled(any && !trash);
+    m_actCut->setEnabled(any && !trash && !personalDrive);
     m_actCopy->setEnabled(any && !trash);
     m_actCopyPath->setEnabled(any);
-    m_actCreateLink->setEnabled(any && !trash && folder.isLocalFile());
+    m_actCreateLink->setEnabled(any && !trash && !readOnly && folder.isLocalFile());
     m_actPaste->setEnabled(!shellRoot && !trash && !readOnly && FileOps::canPaste());
     m_actDelete->setEnabled(any && !trash && !readOnly);
     m_actDeleteForever->setEnabled(any && !readOnly);
@@ -1884,7 +1939,7 @@ void MainWindow::updateActionStates()
     // Only where the user cannot already write, or elevation becomes something
     // people click by reflex, and the admin worker is local only
     const bool alreadyAdmin = currentUrl().scheme() == QLatin1String("admin");
-    m_actOpenAsAdmin->setEnabled(folder.isLocalFile() && !alreadyAdmin
+    m_actOpenAsAdmin->setEnabled(folder.isLocalFile() && !alreadyAdmin && !personalDrive
                                  && !isFolderWritable(folder));
 
     // The modes apply to the drives page too, but not the ordering, this menu
@@ -2030,7 +2085,7 @@ void MainWindow::reportListingFailure(int error, const QUrl &url)
     // nothing above it and a server refusing on its own account, so both of
     // those get Windows' flat refusal instead
     const bool alreadyAdmin = folder.scheme() == QLatin1String("admin");
-    if (alreadyAdmin || !folder.isLocalFile()) {
+    if (alreadyAdmin || !folder.isLocalFile() || Locations::isGoogleDriveMount(folder)) {
         AccessDialogs::showLocationUnavailable(this, path);
         return;
     }
@@ -2074,6 +2129,7 @@ void MainWindow::showContextMenu(const QPoint &globalPos, bool onItem)
     updateActionStates();
 
     QMenu menu(this);
+    Aero::setPointSize(&menu, 9);
 
     // The views clear the selection when a click misses, so an empty selection
     // means the same as a click on the background
@@ -2082,61 +2138,87 @@ void MainWindow::showContextMenu(const QPoint &globalPos, bool onItem)
     else
         buildFolderContextMenu(menu);
 
+    finishContextMenu(menu);
     menu.exec(globalPos);
 }
 
 void MainWindow::buildItemContextMenu(QMenu &menu,
                                       const QList<KFileItem> &selection)
 {
-    menu.addAction(m_actOpen);
+    menu.setObjectName(QStringLiteral("itemContextMenu"));
+    menu.setDefaultAction(contextAction(menu, m_actOpen));
     if (m_actOpenNewWindow->isEnabled() && !isTrashView())
-        menu.addAction(m_actOpenNewWindow);
+        contextAction(menu, m_actOpenNewWindow);
 
     const bool anyFiles = std::any_of(selection.cbegin(), selection.cend(),
                                       [](const KFileItem &item) { return !item.isDir(); });
     if (anyFiles) {
-        // Also where installed service menus come from
+        // Keep all application choices inside one Open with submenu.
         m_itemActions->setItemListProperties(
             KFileItemListProperties(KFileItemList(selection)));
-        m_itemActions->insertOpenWithActionsTo(nullptr, &menu, {});
+        QMenu *openWith = menu.addMenu(tr("Open with"));
+        m_itemActions->insertOpenWithActionsTo(nullptr, openWith, {});
     }
     menu.addSeparator();
 
     if (isTrashView()) {
-        menu.addAction(m_actRestore);
-        menu.addAction(m_actDeleteForever);
+        contextAction(menu, m_actRestore);
+        contextAction(menu, m_actDeleteForever);
         menu.addSeparator();
-        menu.addAction(m_actProperties);
+        contextAction(menu, m_actProperties);
         return;
+    }
+
+    if (!selection.isEmpty()
+        && std::all_of(selection.cbegin(), selection.cend(), [](const KFileItem &item) {
+            return item.isDir() && NavigationPane::canAddToFavorites(item.url());
+        })) {
+        menu.addAction(tr("Add to Favorites"), this, [this, selection] {
+            for (const KFileItem &item : selection)
+                m_places->addToFavorites(item.url(), item.text());
+        });
+        menu.addSeparator();
     }
 
     // Right above cut, where Win7's archive menu puts it
     if (selection.size() == 1 && Archives::isBrowsable(selection.first())) {
-        menu.addAction(m_actExtract);
+        contextAction(menu, m_actExtract);
         menu.addSeparator();
     }
 
-    menu.addAction(m_actCut);
-    menu.addAction(m_actCopy);
-    menu.addAction(m_actCopyPath);
-    menu.addAction(m_actCreateLink);
-    buildSendToMenu(menu.addMenu(tr("Send to")));
-
-    menu.addSeparator();
-    menu.addAction(m_actRename);
-    menu.addAction(m_actDelete);
-
-    menu.addSeparator();
-    menu.addAction(m_actProperties);
-
-    // Service menus attach to the selection, which a folder menu has none of
+    // Installed desktop integrations stay accessible without expanding the
+    // main menu into application commands, tagging widgets, and toolbars.
+    auto *more = new QMenu(tr("More options"), &menu);
+    more->setObjectName(QStringLiteral("desktopContextActions"));
     m_itemActions->setItemListProperties(
         KFileItemListProperties(KFileItemList(selection)));
-    m_itemActions->addActionsTo(&menu);
+    m_itemActions->addActionsTo(more);
+    const QList<QAction *> extraActions = more->actions();
+    if (std::any_of(extraActions.cbegin(), extraActions.cend(), [](QAction *action) {
+            return action->isVisible() && !action->isSeparator();
+        })) {
+        menu.addMenu(more);
+        menu.addSeparator();
+    }
+
+    buildSendToMenu(menu.addMenu(tr("Send to")));
+    menu.addSeparator();
+    contextAction(menu, m_actCut);
+    contextAction(menu, m_actCopy);
+    if (QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier))
+        contextAction(menu, m_actCopyPath);
+
+    menu.addSeparator();
+    contextAction(menu, m_actCreateLink);
+    contextAction(menu, m_actDelete);
+    contextAction(menu, m_actRename);
+    menu.addSeparator();
+    contextAction(menu, m_actProperties);
 }
 
 void MainWindow::buildFolderContextMenu(QMenu &menu)
 {
+    menu.setObjectName(QStringLiteral("folderContextMenu"));
     // Win7's order, arrangement, then clipboard, then what can be created
     QMenu *view = menu.addMenu(tr("View"));
     for (QAction *action : m_viewModeGroup->actions())
@@ -2153,33 +2235,39 @@ void MainWindow::buildFolderContextMenu(QMenu &menu)
     for (QAction *action : m_groupGroup->actions())
         group->addAction(action);
 
-    menu.addAction(m_actRefresh);
+    contextAction(menu, m_actRefresh);
+
+    const QUrl folder = currentUrl();
+    if (NavigationPane::canAddToFavorites(folder)) {
+        menu.addAction(tr("Add to Favorites"), this,
+                       [this, folder] { m_places->addToFavorites(folder); });
+    }
 
     menu.addSeparator();
-    menu.addAction(m_actPaste);
+    contextAction(menu, m_actPaste);
 
     menu.addSeparator();
     m_newFileMenu->setWorkingDirectory(operationFolder());
     m_newFileMenu->checkUpToDate();
     menu.addAction(m_newFileMenu);
 
-    menu.addSeparator();
-    menu.addAction(m_actSelectAll);
-    menu.addAction(m_actInvertSelection);
+    auto *more = new QMenu(tr("More options"), &menu);
+    contextAction(*more, m_actSelectAll);
+    contextAction(*more, m_actInvertSelection);
 
     // Extracting the archive being browsed, from inside it
     if (Archives::isInsideArchive(currentUrl())) {
-        menu.addSeparator();
-        menu.addAction(m_actExtract);
+        more->addSeparator();
+        contextAction(*more, m_actExtract);
     }
 
     if (operationFolder().isLocalFile()) {
-        menu.addSeparator();
-        menu.addAction(m_actOpenTerminal);
+        more->addSeparator();
+        contextAction(*more, m_actOpenTerminal);
         // Only where it would help, offering it on a writable folder teaching
         // the user to reach for elevation by reflex
         if (m_actOpenAsAdmin->isEnabled())
-            menu.addAction(m_actOpenAsAdmin);
+            contextAction(*more, m_actOpenAsAdmin);
     }
 
     if (isTrashView()) {
@@ -2189,18 +2277,24 @@ void MainWindow::buildFolderContextMenu(QMenu &menu)
     }
 
     menu.addSeparator();
-    menu.addAction(m_actProperties);
+    menu.addMenu(more);
+    menu.addSeparator();
+    contextAction(menu, m_actProperties);
 }
 
 void MainWindow::showComputerContextMenu(const QUrl &url, const QPoint &globalPos)
 {
     QMenu menu(this);
+    Aero::setPointSize(&menu, 9);
 
     const bool mounted = url.isValid();
     if (mounted) {
-        menu.addAction(tr("Open"), this, [this, url] { navigateTo(url); });
+        menu.setDefaultAction(menu.addAction(tr("Open"), this, [this, url] { navigateTo(url); }));
         menu.addAction(tr("Open in new window"), this,
                        [this, url] { openNewWindow(url); });
+        if (NavigationPane::canAddToFavorites(url))
+            menu.addAction(tr("Add to Favorites"), this,
+                           [this, url] { m_places->addToFavorites(url); });
         menu.addSeparator();
     }
 
@@ -2257,10 +2351,11 @@ void MainWindow::showComputerContextMenu(const QUrl &url, const QPoint &globalPo
     if (mounted) {
         menu.addSeparator();
         menu.addAction(tr("Properties"), this, [this, url] {
-            FileOps::showProperties({KFileItem(url)}, this);
+            showItemProperties({KFileItem(url)});
         });
     }
 
+    finishContextMenu(menu);
     menu.exec(globalPos);
 }
 
@@ -2326,6 +2421,24 @@ void MainWindow::buildSendToMenu(QMenu *menu)
                         index.data(Qt::DisplayRole).toString(), this,
                         [this, urls, target] { FileOps::copy(urls, target, this); });
     }
+}
+
+void MainWindow::showItemProperties(const QList<KFileItem> &items)
+{
+    auto *dialog = qobject_cast<PropertiesDialog *>(FileOps::showProperties(items, this));
+    if (!dialog)
+        return;
+    connect(dialog, &PropertiesDialog::renamed, this, [this](const QUrl &oldUrl, const QUrl &newUrl) {
+        if (operationFolder().matches(oldUrl, QUrl::StripTrailingSlash)) {
+            navigateTo(newUrl);
+        } else if (operationFolder().matches(KIO::upUrl(oldUrl), QUrl::StripTrailingSlash)) {
+            selectOnArrival({newUrl});
+        }
+    });
+    connect(dialog, &PropertiesDialog::applied, this, [this](const QUrl &) {
+        updateActionStates();
+        updateDetailsPane();
+    });
 }
 
 void MainWindow::selectOnArrival(const QList<QUrl> &urls)
@@ -2405,8 +2518,9 @@ void MainWindow::applyRename(const QUrl &url, const QString &newName)
 
 void MainWindow::createNewFolder()
 {
-    if (isComputerView() || isLibrariesView())
-        return;   // shell roots must never reach a writable KIO operation
+    if (isComputerView() || isLibrariesView()
+        || Locations::isGoogleDriveMount(operationFolder()))
+        return;   // these locations must never reach a writable KIO operation
 
     m_newFileMenu->setWorkingDirectory(operationFolder());
     m_newFileMenu->createDirectory();

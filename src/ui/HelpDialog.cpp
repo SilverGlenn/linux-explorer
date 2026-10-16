@@ -47,6 +47,16 @@ HelpDialog::HelpDialog(QWidget *parent) : QDialog(parent)
         subfolders if enabled in Folder and search options. Recursive search
         requires kio-extras. Search is not available on the synthetic Libraries
         and Computer pages.</p>
+        <h2 style="font-size:11pt">Connect Google Drive</h2>
+        <p>Choose Tools → Connect Google Drive, or right-click Network and choose
+        Connect Google Drive. Select Sign in with Google and complete consent in
+        your browser. Your desktop credential wallet remembers the account.</p>
+        <p>Google Drive appears under Network after a successful connection.
+        This connection is read-only: browse files and copy them locally.
+        Uploading, renaming, deleting, and offline synchronization are unavailable.</p>
+        <p>Disconnect closes the mount while remembering the account. Sign out
+        disconnects and removes the saved account, and attempts to revoke its
+        Google access. Removing a shortcut does not sign out.</p>
         <h2 style="font-size:11pt">Use the keyboard</h2>
         <table cellpadding="4">
           <tr><td>Alt+Left / Alt+Right</td><td>Back / forward</td></tr>

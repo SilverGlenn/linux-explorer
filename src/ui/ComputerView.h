@@ -9,12 +9,12 @@
 
 class ComputerModel;
 class QAbstractItemView;
-class QLabel;
 class QListView;
 class QScrollArea;
 class QSortFilterProxyModel;
 class QStackedWidget;
 class QTreeView;
+class QToolButton;
 class QVBoxLayout;
 
 // Win7's Computer page, drives grouped under headings for the fixed and the
@@ -56,7 +56,7 @@ private:
     // Hidden wholesale when its filter matches nothing
     struct Section {
         QWidget *container = nullptr;
-        QLabel *heading = nullptr;
+        QToolButton *heading = nullptr;
         QListView *view = nullptr;
         QSortFilterProxyModel *filter = nullptr;
         QString title;

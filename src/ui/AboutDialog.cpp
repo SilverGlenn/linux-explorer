@@ -1,4 +1,5 @@
 #include "AboutDialog.h"
+#include "aero/fonts.h"
 
 #include <QCoreApplication>
 #include <QFrame>
@@ -9,8 +10,7 @@
 
 namespace {
 
-// Plain labels at the application font, the chrome's text helpers being avoided
-// here since they set a size and colour of their own
+// About uses the classic Tahoma body font rather than the shell's Segoe UI.
 constexpr int kDialogWidth = 340;
 constexpr int kIconSize = 64;
 
@@ -85,5 +85,6 @@ AboutDialog::AboutDialog(QWidget *parent)
     mainLayout->addSpacing(4);
     mainLayout->addLayout(buttonLayout);
 
+    Aero::applyClassicDialogFont(this, Aero::ClassicFont::Tahoma);
     layout()->setSizeConstraint(QLayout::SetFixedSize);
 }

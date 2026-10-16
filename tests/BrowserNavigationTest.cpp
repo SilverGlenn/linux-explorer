@@ -1,6 +1,8 @@
 #include "BrowserNavigation.h"
 #include "BreadcrumbBar.h"
 #include "ComputerModel.h"
+#include "GoogleDriveConnection.h"
+#include "GoogleDriveService.h"
 #include "Libraries.h"
 #include "Locations.h"
 #include "Settings.h"
@@ -14,21 +16,31 @@
 #include <QMenu>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
 
+namespace {
+class FixtureDriveConnection final : public GoogleDriveConnection {
+public:
+    bool mounted = false;
+    bool isConnected() const override { return mounted; }
+};
+}
+
 class BrowserNavigationTest : public QObject {
     Q_OBJECT
 private:
     struct Browser {
         KFilePlacesModel places;
-        ComputerModel computer{&places};
+        FixtureDriveConnection driveConnection;
+        ComputerModel computer{&places, &driveConnection, nullptr};
         QWidget host;
         QHBoxLayout *layout = new QHBoxLayout(&host);
-        BrowserNavigation navigation{&places, &computer, layout};
+        BrowserNavigation navigation{&places, &computer, layout, &driveConnection, nullptr};
 
         Browser()
         {
@@ -41,6 +53,365 @@ private:
     };
 
 private slots:
+    void managedDriveNeverInheritsAdministratorIdentity()
+    {
+        Browser browser;
+        browser.driveConnection.mounted = true;
+        auto &nav = browser.navigation;
+        QVERIFY(nav.initialize(QUrl(QStringLiteral("admin:///tmp"))));
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(QStringLiteral("gdrive:/google2"));
+        nav.submitPathEdit();
+        QCOMPARE(nav.currentUrl(), Locations::googleDriveMount());
+        const QUrl folder = QUrl::fromLocalFile(
+            Locations::googleDriveMount().toLocalFile() + QStringLiteral("/Folder"));
+        QUrl elevated = folder;
+        elevated.setScheme(QStringLiteral("admin"));
+        QVERIFY(nav.navigateTo(elevated));
+        QCOMPARE(nav.currentUrl(), folder);
+        browser.driveConnection.mounted = false;
+        QVERIFY(nav.navigateTo(Locations::computer()));
+        QSignalSpy errors(&nav, &BrowserNavigation::errorOccurred);
+        QVERIFY(!nav.navigateTo(elevated));
+        QCOMPARE(errors.size(), 1);
+        QCOMPARE(nav.currentUrl(), Locations::computer());
+    }
+
+    void typedManagedDriveDescendantsResolveAsynchronouslyAndCancelStaleResults()
+    {
+        const QString root = Locations::googleDriveMount().toLocalFile();
+        if (!root.startsWith(QDir::tempPath() + QStringLiteral("/explorer-tests.")))
+            QSKIP("This filesystem fixture requires run-ui-tests.sh isolation.");
+        QVERIFY(QDir().mkpath(root + QStringLiteral("/Folder")));
+        const auto cleanup = qScopeGuard([&] { QDir(root).removeRecursively(); });
+        QFile fixture(root + QStringLiteral("/file.txt"));
+        QVERIFY(fixture.open(QIODevice::WriteOnly));
+        fixture.close();
+        Browser browser;
+        browser.driveConnection.mounted = true;
+        auto &nav = browser.navigation;
+        const QUrl initial = Locations::computer();
+        const QUrl folder = QUrl::fromLocalFile(root + QStringLiteral("/Folder"));
+        QVERIFY(nav.initialize(initial));
+        QSignalSpy files(&nav, &BrowserNavigation::typedFileActivated);
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(folder.toLocalFile());
+        nav.submitPathEdit();
+        QCOMPARE(nav.currentUrl(), initial); // worker has not returned yet
+        QTRY_COMPARE(nav.currentUrl(), folder);
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(fixture.fileName());
+        nav.submitPathEdit();
+        QCOMPARE(files.size(), 0);
+        QTRY_COMPARE(files.size(), 1);
+        QCOMPARE(files.first().first().toUrl(), QUrl::fromLocalFile(fixture.fileName()));
+        QCOMPARE(nav.currentUrl(), folder);
+
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(folder.toLocalFile());
+        nav.submitPathEdit();
+        QVERIFY(nav.navigateTo(initial));
+        QTest::qWait(50);
+        QCOMPARE(nav.currentUrl(), initial);
+        QCOMPARE(files.size(), 1);
+    }
+
+    void managedDriveBreadcrumbMenuListsFoldersAsynchronously()
+    {
+        const QString root = Locations::googleDriveMount().toLocalFile();
+        if (!root.startsWith(QDir::tempPath() + QStringLiteral("/explorer-tests.")))
+            QSKIP("This filesystem fixture requires run-ui-tests.sh isolation.");
+        QVERIFY(QDir().mkpath(root + QStringLiteral("/Folder")));
+        QVERIFY(QDir().mkpath(root + QStringLiteral("/.Hidden")));
+        const auto cleanup = qScopeGuard([&] { QDir(root).removeRecursively(); });
+        QFile fixture(root + QStringLiteral("/file.txt"));
+        QVERIFY(fixture.open(QIODevice::WriteOnly));
+        fixture.close();
+        Browser browser;
+        browser.driveConnection.mounted = true;
+        QVERIFY(browser.navigation.initialize(Locations::googleDriveMount()));
+        auto *bar = browser.host.findChild<BreadcrumbBar *>();
+        QVERIFY(bar);
+        QStringList labels;
+        QTimer poll;
+        poll.setInterval(10);
+        connect(&poll, &QTimer::timeout, &browser.host, [&] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) return;
+            labels.clear();
+            for (QAction *action : menu->actions())
+                if (action->isVisible()) labels.append(action->text());
+            if (labels.contains(QStringLiteral("Folder"))) menu->close();
+        });
+        QTimer::singleShot(3000, &browser.host, [] {
+            if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget())) menu->close();
+        });
+        poll.start();
+        Q_EMIT bar->menuRequested(Locations::googleDriveMount(), QPoint(20, 20));
+        poll.stop();
+        QVERIFY(labels.contains(QStringLiteral("Folder")));
+        QVERIFY(!labels.contains(QStringLiteral("file.txt")));
+        QVERIFY(!labels.contains(QStringLiteral(".Hidden")));
+        QCOMPARE(browser.navigation.currentUrl(), Locations::googleDriveMount());
+    }
+
+    void legacyGoogleEntryPointsUseManagedDriveAndHistory()
+    {
+        Browser browser;
+        auto &nav = browser.navigation;
+        browser.driveConnection.mounted = true;
+        const QUrl mount = Locations::googleDriveMount();
+        const QUrl legacy(QStringLiteral("gdrive:/google2"));
+        QVERIFY(nav.initialize(Locations::computer()));
+        QSignalSpy locations(&nav, &BrowserNavigation::locationChanged);
+        QVERIFY(nav.navigateTo(legacy));
+        QCOMPARE(nav.currentUrl(), mount);
+        QCOMPARE(locations.last().first().toUrl(), mount);
+        QVERIFY(!nav.navigateTo(QUrl(QStringLiteral("gdrive:/"))));
+        nav.goUp();
+        QCOMPARE(nav.currentUrl(), Locations::computer());
+        nav.goBack();
+        QCOMPARE(nav.currentUrl(), mount);
+        browser.driveConnection.mounted = false;
+        nav.goBack();
+        QCOMPARE(nav.currentUrl(), Locations::computer());
+        QSignalSpy errors(&nav, &BrowserNavigation::errorOccurred);
+        nav.goForward();
+        QCOMPARE(errors.size(), 1);
+        QCOMPARE(nav.currentUrl(), Locations::computer());
+        QVERIFY(!nav.navigateTo(legacy));
+        QCOMPARE(errors.size(), 2);
+    }
+
+    void destroyingNavigationClosesPendingDriveMenu()
+    {
+        Browser browser;
+        browser.driveConnection.mounted = true;
+        auto *nav = new BrowserNavigation(&browser.places, &browser.computer,
+            browser.layout, &browser.driveConnection, &browser.host);
+        QVERIFY(nav->initialize(Locations::googleDriveMount()));
+        auto *bar = browser.layout->itemAt(browser.layout->count() - 1)->widget()
+            ->findChild<BreadcrumbBar *>();
+        // BreadcrumbBar itself can be the last layout widget.
+        if (!bar)
+            bar = qobject_cast<BreadcrumbBar *>(browser.layout->itemAt(browser.layout->count() - 1)->widget());
+        QVERIFY(bar);
+        QTimer::singleShot(0, &browser.host, [nav] { delete nav; });
+        Q_EMIT bar->menuRequested(Locations::googleDriveMount(), QPoint(20, 20));
+        QTest::qWait(20);
+        QVERIFY(!QApplication::activePopupWidget());
+    }
+
+    void legacyGoogleEntryPointsRespectDestinationPolicyAndOfflineGuard()
+    {
+        Browser browser;
+        auto &nav = browser.navigation;
+        const QUrl initial = Locations::computer();
+        const QUrl legacy(QStringLiteral("gdrive:/google2"));
+        QVERIFY(nav.initialize(initial));
+        QSignalSpy errors(&nav, &BrowserNavigation::errorOccurred);
+        QSignalSpy files(&nav, &BrowserNavigation::typedFileActivated);
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(legacy.toString());
+        nav.submitPathEdit();
+        QCOMPARE(errors.size(), 1);
+        QCOMPARE(files.size(), 0);
+        QCOMPARE(nav.currentUrl(), initial);
+        browser.driveConnection.mounted = true;
+        nav.setUrlPolicy([](const QUrl &url) {
+            return Locations::isGoogleDriveMount(url) ? QStringLiteral("Drive blocked") : QString();
+        });
+        QVERIFY(!nav.initialize(legacy));
+        QCOMPARE(errors.last().first().toString(), QStringLiteral("Drive blocked"));
+        QCOMPARE(nav.currentUrl(), initial);
+        nav.setUrlPolicy({});
+        QVERIFY(nav.navigateTo(QUrl(QStringLiteral("gdrive:/new-account"))));
+        QVERIFY(nav.redirectTo(QUrl(QStringLiteral("gdrive:/new-account")), legacy));
+        QCOMPARE(nav.currentUrl(), Locations::googleDriveMount());
+        nav.goBack();
+        QCOMPARE(nav.currentUrl(), initial);
+    }
+
+    void googleDriveTrailPreservesProviderIds()
+    {
+        Browser browser;
+        const QUrl target(QStringLiteral("gdrive:/person+test@example.com/Reports/Q4?id=opaque%2Fid"));
+        const auto trail = browser.navigation.crumbsFor(target);
+        QCOMPARE(trail.size(), 5);
+        QCOMPARE(trail.at(0).label, QStringLiteral("Network"));
+        QCOMPARE(trail.at(0).target, QUrl(QStringLiteral("remote:/")));
+        QCOMPARE(trail.at(1).label, QStringLiteral("Google Drive"));
+        QCOMPARE(trail.at(1).target, QUrl(QStringLiteral("gdrive:/")));
+        QCOMPARE(trail.at(2).label, QStringLiteral("person+test@example.com"));
+        QCOMPARE(trail.at(2).target, QUrl(QStringLiteral("gdrive:/person+test@example.com")));
+        QCOMPARE(trail.at(3).target, QUrl(QStringLiteral("gdrive:/person+test@example.com/Reports")));
+        QCOMPARE(trail.last().target, target);
+    }
+
+    void googleDriveMountRecognitionUsesAPathBoundary()
+    {
+        const QUrl mount = Locations::googleDriveMount();
+        QVERIFY(mount.isLocalFile());
+        QVERIFY(Locations::isGoogleDriveMount(mount));
+        QVERIFY(Locations::isGoogleDriveMount(
+            QUrl::fromLocalFile(mount.toLocalFile() + QStringLiteral("/Projects"))));
+        QVERIFY(!Locations::isGoogleDriveMount(
+            QUrl::fromLocalFile(mount.toLocalFile() + QStringLiteral("-backup"))));
+        QVERIFY(!Locations::isGoogleDriveMount(
+            QUrl::fromLocalFile(mount.toLocalFile() + QStringLiteral("/../google-drive-old"))));
+        QVERIFY(!Locations::isGoogleDriveMount(QUrl(QStringLiteral("gdrive:/account"))));
+    }
+
+    void mountInfoEscapesDecodeKernelPathBytes()
+    {
+        QCOMPARE(Locations::detail::decodeMountInfoField(
+                     QByteArrayLiteral("space\\040tab\\011line\\012slash\\134")),
+                 QByteArray("space tab\tline\nslash\\"));
+        QCOMPARE(Locations::detail::decodeMountInfoField(QByteArrayLiteral("unknown\\777")),
+                 QByteArrayLiteral("unknown\\777"));
+    }
+
+    void googleDriveMountedParserRequiresExactReadOnlyRcloneRecord_data()
+    {
+        QTest::addColumn<QByteArray>("record");
+        QTest::addColumn<bool>("mounted");
+        const QByteArray mountPath = Locations::googleDriveMount().toLocalFile().toUtf8();
+        const auto escape = [](const QByteArray &path) {
+            QByteArray escaped;
+            for (char ch : path) {
+                switch (ch) {
+                case ' ': escaped += QByteArrayLiteral("\\040"); break;
+                case '\t': escaped += QByteArrayLiteral("\\011"); break;
+                case '\n': escaped += QByteArrayLiteral("\\012"); break;
+                case '\\': escaped += QByteArrayLiteral("\\134"); break;
+                default: escaped.append(ch); break;
+                }
+            }
+            return escaped;
+        };
+        const QByteArray encodedMountPath = escape(mountPath);
+        const auto record = [](const QByteArray &mountPoint,
+                               const QByteArray &options,
+                               const QByteArray &fsType,
+                               const QByteArray &source) {
+            return QByteArrayLiteral("41 1 0:42 / ") + mountPoint + ' '
+                + options + QByteArrayLiteral(" - ") + fsType + ' '
+                + source + QByteArrayLiteral(" rw,user_id=1000\n");
+        };
+
+        QTest::newRow("valid")
+            << record(encodedMountPath, QByteArrayLiteral("ro,nosuid,nodev"), QByteArrayLiteral("fuse.rclone"),
+                      QByteArrayLiteral("explorer-google-drive:")) << true;
+        QTest::newRow("foreign-source")
+            << record(encodedMountPath, QByteArrayLiteral("ro,nosuid"), QByteArrayLiteral("fuse.rclone"),
+                      QByteArrayLiteral("other-rclone:")) << false;
+        QTest::newRow("read-write")
+            << record(encodedMountPath, QByteArrayLiteral("rw,nosuid"), QByteArrayLiteral("fuse.rclone"),
+                      QByteArrayLiteral("explorer-google-drive:")) << false;
+        QTest::newRow("wrong-filesystem")
+            << record(encodedMountPath, QByteArrayLiteral("ro,nosuid"), QByteArrayLiteral("fuse.sshfs"),
+                      QByteArrayLiteral("explorer-google-drive:")) << false;
+        QTest::newRow("sibling-path")
+            << record(escape(mountPath + "-backup"), QByteArrayLiteral("ro,nosuid"),
+                      QByteArrayLiteral("fuse.rclone"), QByteArrayLiteral("explorer-google-drive:"))
+            << false;
+        QTest::newRow("stacked-mount-records")
+            << (record(encodedMountPath, QByteArrayLiteral("ro,nosuid"),
+                       QByteArrayLiteral("fuse.rclone"), QByteArrayLiteral("explorer-google-drive:"))
+                + record(encodedMountPath, QByteArrayLiteral("rw,nosuid"),
+                         QByteArrayLiteral("fuse.rclone"), QByteArrayLiteral("other-rclone:")))
+            << false;
+    }
+
+    void googleDriveMountedParserRequiresExactReadOnlyRcloneRecord()
+    {
+        QFETCH(QByteArray, record);
+        QFETCH(bool, mounted);
+        QCOMPARE(Locations::googleDriveMountedIn(record), mounted);
+    }
+
+    void disconnectedPersonalMountBreadcrumbsHideBackingPath()
+    {
+        Browser browser;
+        const QUrl mount = Locations::googleDriveMount();
+        const auto root = browser.navigation.crumbsFor(mount);
+        QCOMPARE(root.size(), 2);
+        QCOMPARE(root.at(0).label, QStringLiteral("Computer"));
+        QCOMPARE(root.at(0).target, Locations::computer());
+        QCOMPARE(root.at(1).label, QStringLiteral("Google Drive (G:)"));
+        QCOMPARE(root.at(1).target, mount);
+
+        const QUrl descendant = QUrl::fromLocalFile(
+            mount.toLocalFile() + QStringLiteral("/Projects/Reports"));
+        const auto trail = browser.navigation.crumbsFor(descendant);
+        QCOMPARE(trail.size(), 4);
+        QCOMPARE(trail.at(0).label, QStringLiteral("Computer"));
+        QCOMPARE(trail.at(1).label, QStringLiteral("Google Drive (G:)"));
+        QCOMPARE(trail.at(2).label, QStringLiteral("Projects"));
+        QCOMPARE(trail.at(2).target,
+                 QUrl::fromLocalFile(mount.toLocalFile() + QStringLiteral("/Projects")));
+        QCOMPARE(trail.at(3).label, QStringLiteral("Reports"));
+        QCOMPARE(trail.at(3).target, descendant);
+        for (const auto &crumb : trail)
+            QVERIFY(!crumb.label.contains(QStringLiteral(".local/share")));
+    }
+
+    void offlineGoogleDrivePathIsRejectedBeforeHistoryOrFileDispatch()
+    {
+        Browser browser;
+        auto &nav = browser.navigation;
+        const QUrl initial = QUrl::fromLocalFile(QStringLiteral("/tmp"));
+        QVERIFY(nav.initialize(initial));
+        QSignalSpy errors(&nav, &BrowserNavigation::errorOccurred);
+        QSignalSpy locations(&nav, &BrowserNavigation::locationChanged);
+        QSignalSpy files(&nav, &BrowserNavigation::typedFileActivated);
+        const QString mount = Locations::googleDriveMount().toLocalFile();
+
+        QVERIFY(!nav.navigateTo(QUrl::fromLocalFile(mount + QStringLiteral("/Projects"))));
+        QCOMPARE(nav.currentUrl(), initial);
+        QCOMPARE(errors.count(), 1);
+        QCOMPARE(errors.last().first().toString(),
+                 QStringLiteral("Google Drive is not connected. Connect it before opening this folder."));
+        QCOMPARE(locations.count(), 0);
+
+        const QString recentBefore = Settings::recentPaths().join(QLatin1Char('\n'));
+        nav.focusPathEdit();
+        nav.pathEditor()->setText(mount + QStringLiteral("/missing.txt"));
+        nav.submitPathEdit();
+        QCOMPARE(files.count(), 0);
+        QCOMPARE(nav.currentUrl(), initial);
+        QCOMPARE(errors.count(), 2);
+        QCOMPARE(locations.count(), 0);
+        QCOMPARE(Settings::recentPaths().join(QLatin1Char('\n')), recentBefore);
+    }
+
+    void workerRedirectReplacesHistoryAndIgnoresStaleResults()
+    {
+        Browser browser;
+        auto &nav = browser.navigation;
+        const QUrl start = Locations::computer();
+        const QUrl setup(QStringLiteral("gdrive:/new-account"));
+        const QUrl account(QStringLiteral("gdrive:/person@example.com/Reports?id=fixture"));
+        QVERIFY(nav.initialize(start));
+        QVERIFY(nav.navigateTo(setup));
+        QSignalSpy locations(&nav, &BrowserNavigation::locationChanged);
+        QSignalSpy sounds(&nav, &BrowserNavigation::navigated);
+        QVERIFY(nav.redirectTo(setup, account));
+        QCOMPARE(nav.currentUrl(), account);
+        QCOMPARE(locations.count(), 1);
+        QCOMPARE(sounds.count(), 0);
+        QVERIFY(!nav.redirectTo(setup, QUrl(QStringLiteral("gdrive:/different@example.com"))));
+        nav.goBack();
+        QCOMPARE(nav.currentUrl(), start);
+        nav.goForward();
+        QCOMPARE(nav.currentUrl(), account);
+        nav.setUrlPolicy([](const QUrl &url) {
+            return url.scheme() == QLatin1String("gdrive") ? QString() : QStringLiteral("Rejected");
+        });
+        QVERIFY(!nav.redirectTo(account, QUrl(QStringLiteral("sftp://example.invalid/"))));
+        QCOMPARE(nav.currentUrl(), account);
+    }
+
     void historyBranchesAndSilentNavigation()
     {
         Browser browser;

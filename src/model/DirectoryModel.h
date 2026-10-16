@@ -93,6 +93,7 @@ Q_SIGNALS:
 
     // Not emitted at all for a directory that lists in one go
     void loadingProgress(int percent);
+    void urlRedirected(const QUrl &from, const QUrl &to);
 
     // The window selects a newly created folder from here, since creating one
     // returns before the lister has seen it

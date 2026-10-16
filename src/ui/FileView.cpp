@@ -1,4 +1,7 @@
 #include "FileView.h"
+#include "aero/fonts.h"
+#include "aero/drag.h"
+
 #include "DirectoryModel.h"
 #include "GroupingProxy.h"
 #include "aero/text.h"
@@ -12,6 +15,7 @@
 #include <QAbstractProxyModel>
 #include <QApplication>
 #include <QDateTime>
+#include <QDrag>
 #include <QLocale>
 #include <QBasicTimer>
 #include <QDragEnterEvent>
@@ -204,14 +208,12 @@ void paintContentText(QPainter *painter, const QRect &area, const QFontMetrics &
     const int rightWidth = qMax(0, area.width() / 2);
     const int leftWidth = qMax(0, area.width() - rightWidth - 12);
     const QRect nameRect(area.left(), top, leftWidth, lineHeight * 2);
-    QFont nameFont = painter->font();
-    nameFont.setPointSize(10);
+    QFont nameFont = Aero::shellFont(11);
     painter->setFont(nameFont);
     painter->setPen(item.primary);
     painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
                       QFontMetrics(nameFont).elidedText(item.name, Qt::ElideRight, leftWidth));
-    nameFont.setPointSize(9);
-    painter->setFont(nameFont);
+    painter->setFont(Aero::shellFont());
     painter->setPen(item.secondary);
     const int right = area.right() - rightWidth + 1;
     painter->drawText(QRect(right, top, rightWidth, lineHeight), Qt::AlignLeft | Qt::AlignVCenter,
@@ -456,6 +458,24 @@ public:
     std::function<void(const QModelIndex &)> onHoverOpen;
 
 protected:
+    void startDrag(Qt::DropActions actions) override
+    {
+        const QModelIndexList indexes = Base::selectedIndexes();
+        if (indexes.isEmpty()) return;
+        QMimeData *mime = Base::model()->mimeData(indexes);
+        if (!mime) return;
+        QDrag drag(this);
+        drag.setMimeData(mime);
+        QList<QIcon> icons;
+        for (const QModelIndex &index : indexes)
+            if (index.column() == 0)
+                icons.append(qvariant_cast<QIcon>(index.data(Qt::DecorationRole)));
+        drag.setPixmap(Aero::shellDragPixmap(icons, Base::devicePixelRatioF()));
+        drag.setHotSpot(Aero::shellDragHotSpot());
+        // KIO owns file operations; do not let Qt remove source model rows.
+        drag.exec(actions | Qt::LinkAction, Base::defaultDropAction());
+    }
+
     void dragEnterEvent(QDragEnterEvent *event) override
     {
         Base::dragEnterEvent(event);
