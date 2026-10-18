@@ -14,6 +14,9 @@ void setPointSize(QWidget *w, int pt)
 QLabel *label(const QString &text, int pt, const char *color)
 {
     auto *textLabel = new QLabel(text);
+    // These carry file names and volume labels, which must not render as HTML,
+    // and a caller that wants markup sets Qt::RichText itself
+    textLabel->setTextFormat(Qt::PlainText);
     setPointSize(textLabel, pt);
     textLabel->setStyleSheet(
         QStringLiteral("color: %1; background: transparent;").arg(QLatin1String(color)));
@@ -30,6 +33,7 @@ QLabel *bodyLabel(const QString &text, bool link)
     }
 
     auto *textLabel = new QLabel(text);
+    textLabel->setTextFormat(Qt::PlainText);
     setPointSize(textLabel, 9);
     // Not through addWidget, where an alignment flag suppresses height for
     // width and clips a word wrapped label to one line
@@ -52,6 +56,7 @@ QFrame *hairline(const char *color)
 LinkLabel::LinkLabel(const QString &text, QWidget *parent)
     : QLabel(text, parent)
 {
+    setTextFormat(Qt::PlainText);
     setCursor(Qt::PointingHandCursor);
     setColors(Palette::LinkText, Palette::LinkHover);
 }

@@ -89,7 +89,10 @@ void openTerminalAt(const QUrl &directory, QWidget *window);
 // without the .desktop ending, and false when none of them are
 bool openApplication(const QStringList &desktopNames, QWidget *window);
 
-QDialog *showProperties(const QList<KFileItem> &items, QWidget *window);
+// Read only for the file picker, which must not change file-type
+// associations, permissions or launchers on behalf of the requesting app
+QDialog *showProperties(const QList<KFileItem> &items, QWidget *window,
+                        bool readOnly = false);
 
 void undo();
 bool isUndoAvailable();

@@ -1575,9 +1575,13 @@ private Q_SLOTS:
         QTRY_VERIFY(model->indexForUrl(m_notes).isValid());
         QVERIFY(view->selectUrl(m_notes));
         QToolButton *openWith = nullptr;
-        for (auto *button : win->findChildren<QToolButton *>())
-            if (button->text() == QLatin1String("Open with")) openWith = button;
-        QVERIFY(openWith);
+        // The command bar follows a selection after a short coalescing delay
+        const auto findOpenWith = [&] {
+            for (auto *button : win->findChildren<QToolButton *>())
+                if (button->text() == QLatin1String("Open with")) openWith = button;
+            return openWith != nullptr;
+        };
+        QTRY_VERIFY(findOpenWith());
         QPointer<QMenu> menu = openWith->menu();
         QVERIFY(menu);
         QCOMPARE(menu->parentWidget(), openWith);
@@ -1728,7 +1732,8 @@ private Q_SLOTS:
         QCOMPARE(placeholder->text(), QStringLiteral("2 items selected."));
         QVERIFY(writeFile(QStringLiteral("Large.txt"), QByteArray(300 * 1024, 'x')));
         pane.setItems({KFileItem(QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Large.txt")))});
-        QTRY_COMPARE(text->toPlainText().size(), 256 * 1024);
+        // Bounded at 256 KiB of content; very long lines are broken for layout
+        QTRY_COMPARE(text->toPlainText().remove(QLatin1Char('\n')).size(), 256 * 1024);
         QVERIFY(!text->toolTip().isEmpty());
         QVERIFY(QFile::remove(m_folder.toLocalFile() + QStringLiteral("/Large.txt")));
     }

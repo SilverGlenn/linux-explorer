@@ -33,6 +33,13 @@ public:
     virtual QString statusMessage() const;
     virtual QJsonArray pairs() const;
 
+    // Status is polled every few seconds only while something is showing it,
+    // and otherwise once a minute. Each view calls watch() when it appears and
+    // unwatch() when it goes, and the calls are counted so views may overlap.
+    void watch();
+    void unwatch();
+    bool isWatched() const { return m_watchers > 0; }
+
 public Q_SLOTS:
     virtual void refresh();
     // Saved-account-only restoration: never opens a browser or wallet prompt.
@@ -88,7 +95,10 @@ private:
     QPointer<GoogleDriveAuth> m_syncAuth;
     QPointer<QProcess> m_process;
     std::shared_ptr<QLockFile> m_authorizationLock;
+    void applyPollInterval();
+
     QTimer *m_poll = nullptr;
+    int m_watchers = 0;
     QJsonObject m_status;
     QString m_message;
     QString m_browsePassword;

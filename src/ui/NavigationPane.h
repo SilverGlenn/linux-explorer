@@ -36,7 +36,8 @@ public:
 
     // Explicit favorites use persistent places bookmarks, reusing an existing
     // bookmark (and unhiding it) when the same folder is added again.
-    static bool canAddToFavorites(const QUrl &url);
+    // knownDirectory skips the stat for a caller that already has the answer
+    static bool canAddToFavorites(const QUrl &url, bool knownDirectory = false);
     void addToFavorites(const QUrl &url, const QString &name = QString());
 
     // Follows navigation that started elsewhere without reporting it back, and
@@ -83,7 +84,10 @@ private:
 
     // A placeholder child makes the triangle appear without reading the
     // subfolders, since scanning up front would stall on an unresponsive mount
-    void addPlaceholderIfExpandable(QTreeWidgetItem *item, const QUrl &url);
+    // knownDirectory skips the stat for a caller that already knows the url is
+    // a directory, such as a child the background scan just listed
+    void addPlaceholderIfExpandable(QTreeWidgetItem *item, const QUrl &url,
+                                    bool knownDirectory = false);
     void populateChildren(QTreeWidgetItem *item);
 
     // Scans run off the main thread, so the item may be gone by the time one

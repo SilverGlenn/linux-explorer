@@ -192,7 +192,9 @@ def binary_version(home):
         return None, "unavailable", False
     try:
         info = Path(binary).lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+        # Owned by root or this user, and not writable by anyone else
+        if (not stat.S_ISREG(info.st_mode) or MOUNT.writable_by_others(info)
+                or info.st_uid not in (0, os.getuid())):
             raise ValueError()
         result = subprocess.run([binary, "version"], env=MOUNT.clean_environment(),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -1325,6 +1327,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if os.getuid() == 0:
         parser.error("Run the sync helper as your normal desktop user.")
+    MOUNT.harden_process()
     os.umask(0o077)
     paths = Paths()
     try:

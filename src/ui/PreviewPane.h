@@ -9,6 +9,7 @@
 class QLabel;
 class QPlainTextEdit;
 class QStackedWidget;
+class QTimer;
 class PdfPreviewRenderer;
 namespace KIO { class PreviewJob; }
 
@@ -30,6 +31,7 @@ protected:
 private:
     void showPlaceholder(const QString &text);
     void cancelPreview();
+    void loadPreview();
     void updateImage();
     QStackedWidget *m_stack = nullptr;
     QLabel *m_placeholder = nullptr;
@@ -41,5 +43,6 @@ private:
     QList<KFileItem> m_items;
     bool m_resumeOnShow = false;
     quint64 m_generation = 0;
+    QTimer *m_debounce = nullptr;
     QPointer<KIO::PreviewJob> m_job;
 };

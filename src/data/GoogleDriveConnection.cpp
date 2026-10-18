@@ -14,8 +14,10 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QSet>
+#include <QSocketNotifier>
 #include <QSettings>
 #include <utility>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
@@ -25,9 +27,10 @@ constexpr qsizetype kMaxPrivateOutput = 64 * 1024;
 
 GoogleDriveConnection::GoogleDriveConnection(QObject *parent) : QObject(parent)
 {
-    m_lastMountState = Locations::googleDriveMounted();
+    const auto initialMount = Locations::googleDriveMountState();
+    m_lastMountState = initialMount.mounted;
     m_connectionState = m_lastMountState ? ConnectionState::Connected : ConnectionState::Disconnected;
-    m_observedMountId = Locations::googleDriveMountId();
+    m_observedMountId = initialMount.mountId;
     m_quotaTimeout = new QTimer(this);
     m_quotaTimeout->setSingleShot(true);
     m_quotaTimeout->setInterval(15000);
@@ -36,9 +39,27 @@ GoogleDriveConnection::GoogleDriveConnection(QObject *parent) : QObject(parent)
         clearStorageQuota();
     });
     m_mountTimer = new QTimer(this);
-    m_mountTimer->setInterval(2000);
     m_mountTimer->setTimerType(Qt::CoarseTimer);
     connect(m_mountTimer, &QTimer::timeout, this, &GoogleDriveConnection::refreshMountState);
+
+    // The kernel raises an exceptional condition (POLLPRI) on the mount table
+    // whenever it changes, so watching that replaces polling it. A burst of
+    // changes, as at login, is folded into one refresh.
+    m_mountDebounce = new QTimer(this);
+    m_mountDebounce->setSingleShot(true);
+    m_mountDebounce->setInterval(100);
+    connect(m_mountDebounce, &QTimer::timeout, this, &GoogleDriveConnection::refreshMountState);
+    m_mountInfoFd = ::open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+    if (m_mountInfoFd >= 0) {
+        m_mountNotifier = new QSocketNotifier(m_mountInfoFd, QSocketNotifier::Exception, this);
+        connect(m_mountNotifier, &QSocketNotifier::activated, this, [this] {
+            if (!m_mountDebounce->isActive())
+                m_mountDebounce->start();
+        });
+    }
+    // Only a safety net when the notifier is working, and the old two second
+    // poll when it could not be set up
+    m_mountTimer->setInterval(m_mountNotifier ? 30000 : 2000);
     m_mountTimer->start();
     m_reconnectTimer = new QTimer(this);
     m_reconnectTimer->setSingleShot(true);
@@ -70,6 +91,10 @@ GoogleDriveConnection::GoogleDriveConnection(QObject *parent) : QObject(parent)
 
 GoogleDriveConnection::~GoogleDriveConnection()
 {
+    delete m_mountNotifier;
+    m_mountNotifier = nullptr;
+    if (m_mountInfoFd >= 0)
+        ::close(m_mountInfoFd);
     cancelStorageQuery();
     cancel();
     if (m_auth && m_auth->isBusy()) {
@@ -122,7 +147,7 @@ bool GoogleDriveConnection::isAvailable() const
 
 bool GoogleDriveConnection::isConnected() const
 {
-    return Locations::googleDriveMounted();
+    return m_mountSnapshot ? m_mountSnapshot->first : Locations::googleDriveMounted();
 }
 
 GoogleDriveConnection::ConnectionState GoogleDriveConnection::connectionState() const { return m_connectionState; }
@@ -239,8 +264,12 @@ void GoogleDriveConnection::finishAutomaticFailure(ConnectionState state)
 
 void GoogleDriveConnection::refreshMountState()
 {
+    // One parse of the mount table for both questions
+    const auto state = Locations::googleDriveMountState();
+    m_mountSnapshot.emplace(state.mounted, state.mountId);
     const bool mounted = isConnected();
     const QString mountId = storageMountId();
+    m_mountSnapshot.reset();
     const bool replaced = mountId != m_observedMountId;
     if (replaced) {
         m_observedMountId = mountId;
@@ -263,7 +292,9 @@ void GoogleDriveConnection::refreshMountState()
 
 QString GoogleDriveConnection::storageMountId() const
 {
-    return isConnected() ? Locations::googleDriveMountId() : QString();
+    // The ID is only ever set for a valid mount, so no separate mounted check
+    return m_mountSnapshot ? m_mountSnapshot->second
+                           : Locations::googleDriveMountState().mountId;
 }
 
 bool GoogleDriveConnection::hasStorageQuota() const

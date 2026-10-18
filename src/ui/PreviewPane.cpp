@@ -3,6 +3,7 @@
 #include "aero/text.h"
 #include "aero/fonts.h"
 #include "aero/artwork.h"
+#include "Locations.h"
 
 #include <KIO/PreviewJob>
 #include <QFile>
@@ -13,23 +14,77 @@
 #include <QShowEvent>
 #include <QStackedWidget>
 #include <QStringConverter>
+#include <QThreadPool>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace {
 constexpr qint64 kTextPreviewLimit = 256 * 1024;
+// QPlainTextEdit lays out a line as one block, so one enormous line stalls it
+constexpr qsizetype kMaxPreviewLine = 4096;
 struct TextPreview {
     QString text;
     bool readable = false;
     bool truncated = false;
 };
 
+// Own pool, so a preview stuck on a dead mount cannot starve the global one
+QThreadPool *previewPool()
+{
+    static QThreadPool *pool = [] {
+        auto *created = new QThreadPool;
+        created->setMaxThreadCount(2);
+        return created;
+    }();
+    return pool;
+}
+
+// Breaks lines past the cap so the widget never lays out one huge block
+QString capLongLines(const QString &text)
+{
+    QString out;
+    out.reserve(text.size());
+    qsizetype run = 0;
+    for (const QChar ch : text) {
+        if (ch == QLatin1Char('\n')) {
+            run = 0;
+        } else if (++run > kMaxPreviewLine) {
+            out.append(QLatin1Char('\n'));
+            run = 1;
+        }
+        out.append(ch);
+    }
+    return out;
+}
+
 TextPreview readText(const QString &path)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) return {};
-    QByteArray bytes = file.read(kTextPreviewLimit + 1);
+    // Non-blocking and checked after opening: a FIFO or device swapped in for
+    // the file would otherwise block this thread forever
+    const int fd = ::open(QFile::encodeName(path).constData(),
+                          O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return {};
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        return {};
+    }
+    QByteArray bytes(kTextPreviewLimit + 1, Qt::Uninitialized);
+    qint64 total = 0;
+    while (total < bytes.size()) {
+        const ssize_t got = ::read(fd, bytes.data() + total, size_t(bytes.size() - total));
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) break;
+        total += got;
+    }
+    ::close(fd);
+    bytes.truncate(total);
     const bool truncated = bytes.size() > kTextPreviewLimit;
     bytes.truncate(kTextPreviewLimit);
     const auto encoding = QStringConverter::encodingForData(bytes);
@@ -37,7 +92,7 @@ TextPreview readText(const QString &path)
     // into a text widget. UTF-16/32 with a BOM is handled by the decoder below.
     if (!encoding && bytes.contains('\0')) return {};
     QStringDecoder decoder(encoding.value_or(QStringConverter::Utf8));
-    return {decoder(bytes), true, truncated};
+    return {capLongLines(decoder(bytes)), true, truncated};
 }
 } // namespace
 
@@ -104,6 +159,12 @@ PreviewPane::PreviewPane(QWidget *parent) : QWidget(parent)
         }
     });
     showPlaceholder(tr("Select a file to preview."));
+
+    // Arrowing through a folder would otherwise start a job per item passed
+    m_debounce = new QTimer(this);
+    m_debounce->setSingleShot(true);
+    m_debounce->setInterval(150);
+    connect(m_debounce, &QTimer::timeout, this, &PreviewPane::loadPreview);
 }
 
 PreviewPane::~PreviewPane()
@@ -116,6 +177,7 @@ PreviewPane::~PreviewPane()
 void PreviewPane::cancelPreview()
 {
     ++m_generation;
+    if (m_debounce) m_debounce->stop();
     if (m_job) m_job->kill();
     m_job = nullptr;
     if (m_pdf) m_pdf->cancel();
@@ -142,12 +204,20 @@ void PreviewPane::setItems(const QList<KFileItem> &items)
         return;
     }
     const KFileItem item = items.first();
-    if (item.isDir()) {
+    if (item.isDir() || Locations::isGoogleDriveMount(item.url())) {
+        // Previewing reads the file, which on the Drive mount means a download
         showPlaceholder(tr("No preview available."));
         return;
     }
-    const quint64 generation = m_generation;
     showPlaceholder(tr("Loading preview..."));
+    m_debounce->start();
+}
+
+void PreviewPane::loadPreview()
+{
+    if (m_items.size() != 1) return;
+    const KFileItem item = m_items.first();
+    const quint64 generation = m_generation;
     const QString mime = item.mimetype();
     if (mime == QLatin1String("application/pdf")) {
         if (!item.url().isLocalFile()) {
@@ -175,7 +245,7 @@ void PreviewPane::setItems(const QList<KFileItem> &items)
             m_text->setToolTip(preview.truncated ? tr("Preview limited to the first 256 KiB.") : QString());
             m_stack->setCurrentWidget(m_text);
         });
-        watcher->setFuture(QtConcurrent::run(readText, item.url().toLocalFile()));
+        watcher->setFuture(QtConcurrent::run(previewPool(), readText, item.url().toLocalFile()));
         return;
     }
 

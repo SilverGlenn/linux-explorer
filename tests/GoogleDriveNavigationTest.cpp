@@ -281,6 +281,8 @@ private Q_SLOTS:
     {
         FixtureConnection connection(true);
         NavigationPane pane(&connection, nullptr);
+        // A host window handles it; the pane offers only what its host can do
+        QObject::connect(&pane, &NavigationPane::newWindowRequested, &pane, [](const QUrl &) {});
         pane.resize(270, 600);
         pane.show();
         QCoreApplication::processEvents();

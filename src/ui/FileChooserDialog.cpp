@@ -24,6 +24,7 @@
 #include "aero/strips.h"
 #include "aero/splitter.h"
 
+#include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QActionGroup>
 #include <QApplication>
@@ -132,6 +133,34 @@ bool localFileUrl(const QUrl &url)
     return url.isValid() && url.isLocalFile() && url.host().isEmpty()
         && !url.hasQuery() && !url.hasFragment()
         && QDir::isAbsolutePath(url.toLocalFile()) && !url.toLocalFile().contains(QChar::Null);
+}
+
+// Save and folder picks are returned to a sandboxed caller. Starting inside a
+// hidden directory under home (autostart, .ssh, .local/bin, .config...) invites
+// a Save there without the user noticing where it lands, so such requests start
+// at home instead. Decided here, not per protocol, so the portal, the private
+// service and the presenter child all share it; open-file picks are unaffected.
+bool sensitiveStart(const QUrl &url)
+{
+    if (!localFileUrl(url))
+        return false;
+    const QString home = QDir::cleanPath(QDir::homePath());
+    QStringList paths{QDir::cleanPath(url.toLocalFile())};
+    QStringList roots{home};
+    if (!Locations::isGoogleDriveMount(url)) {
+        const QString canonical = QFileInfo(url.toLocalFile()).canonicalFilePath();
+        if (!canonical.isEmpty()) paths.append(canonical);
+        const QString canonicalHome = QFileInfo(home).canonicalFilePath();
+        if (!canonicalHome.isEmpty()) roots.append(canonicalHome);
+    }
+    for (const QString &path : paths) {
+        for (const QString &root : roots) {
+            const QString prefix = root.endsWith(QLatin1Char('/')) ? root : root + QLatin1Char('/');
+            if (path.startsWith(prefix) && path.mid(prefix.size()).startsWith(QLatin1Char('.')))
+                return true;
+        }
+    }
+    return false;
 }
 }
 
@@ -434,7 +463,10 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     });
     connect(m_navigation, &BrowserNavigation::locationChanged, this, &FileChooserDialog::showLocation);
     connect(m_navigation, &BrowserNavigation::errorOccurred, this, &FileChooserDialog::showError);
-    connect(m_navigation, &BrowserNavigation::typedFileActivated, this, &FileChooserDialog::activateUrl);
+    // Typed into the address bar and confirmed with Enter, so guarded as Enter is
+    connect(m_navigation, &BrowserNavigation::typedFileActivated, this, [this](const QUrl &url) {
+        if (!inputGuardActive()) activateUrl(url);
+    });
     connect(m_navigation, &BrowserNavigation::refreshRequested, this, [this] {
         const QString error = locationError(currentUrl());
         if (!error.isEmpty()) { showError(error); return; }
@@ -447,7 +479,17 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     connect(m_libraries, &LibrariesView::urlActivated, this, &FileChooserDialog::navigateTo);
     connect(m_computer, &ComputerView::urlActivated, this, &FileChooserDialog::navigateTo);
     connect(m_files, &FileView::activated, this, [this](const QModelIndex &index) {
-        activateUrl(m_model->itemForIndex(index).url());
+        const KFileItem item = m_model->itemForIndex(index);
+        // The model already knows; do not stat a Drive folder just to open it
+        if (item.isDir() && Locations::isGoogleDriveMount(item.url())) {
+            navigateTo(item.url());
+            return;
+        }
+        // A double click or the list's Enter shortcut, which arrives as a
+        // shortcut rather than the key press the filter guards, accepts a file;
+        // a click on the button itself is a deliberate choice and never guarded
+        if (!item.isDir() && inputGuardActive()) return;
+        activateUrl(item.url());
     });
     connect(m_files, &FileView::selectionChanged, this, [this] {
         const auto items = m_model->itemsForIndexes(m_files->selectedIndexes());
@@ -477,15 +519,9 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
         return action;
     };
     const auto selection = [this] { return m_model->itemsForIndexes(m_files->selectedIndexes()); };
-    m_actCut = fileAction(tr("Cut"), QKeySequence::Cut, [selection] {
-        FileOps::cutToClipboard(selection());
-    });
+    // No Cut or Paste here: see the class comment.
     m_actCopy = fileAction(tr("Copy"), QKeySequence::Copy, [selection] {
         FileOps::copyToClipboard(selection());
-    });
-    m_actPaste = fileAction(tr("Paste"), QKeySequence::Paste, [this] {
-        if (canModifyFolder() && FileOps::canPaste())
-            FileOps::pasteFromClipboard(currentUrl(), this);
     });
     m_actDelete = fileAction(tr("Delete"), QKeySequence::Delete, [this, selection] {
         const auto items = selection();
@@ -501,9 +537,9 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     });
     m_actProperties = fileAction(tr("Properties"), QKeySequence(Qt::ALT | Qt::Key_Return), [this, selection] {
         const auto items = selection();
-        if (!items.isEmpty()) FileOps::showProperties(items, this);
+        if (!items.isEmpty()) FileOps::showProperties(items, this, /*readOnly*/ true);
         else if (localFileUrl(currentUrl()))
-            FileOps::showProperties({KFileItem(currentUrl())}, this);
+            FileOps::showProperties({KFileItem(currentUrl())}, this, /*readOnly*/ true);
     });
     connect(m_files, &FileView::contextMenuRequested, this, &FileChooserDialog::showContextMenu);
     connect(m_files, &FileView::renameRequested, this, [this](const QUrl &url, const QString &name) {
@@ -561,8 +597,10 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
         || hasControl(extension))
         m_optionsSupported = false;
     choose->setEnabled(m_optionsSupported);
-    const QUrl start = options.startingLocation.isEmpty()
+    QUrl start = options.startingLocation.isEmpty()
         ? QUrl::fromLocalFile(QDir::homePath()) : options.startingLocation;
+    if ((options.mode != ChooserMode::OpenFile || options.directory) && sensitiveStart(start))
+        start = QUrl::fromLocalFile(QDir::homePath());
     if (!m_navigation->initialize(start)) {
         const QString error = errorMessage();
         m_navigation->initialize(QUrl::fromLocalFile(QDir::homePath()));
@@ -584,6 +622,18 @@ FileChooserDialog::~FileChooserDialog()
 {
     qApp->removeEventFilter(this);
     dismissOverwrite();
+}
+
+bool FileChooserDialog::event(QEvent *event)
+{
+    if (event->type() == QEvent::Show || event->type() == QEvent::WindowActivate)
+        m_inputGuard.start();
+    return QDialog::event(event);
+}
+
+bool FileChooserDialog::inputGuardActive() const
+{
+    return m_inputGuard.isValid() && !m_inputGuard.hasExpired(inputGuardMs);
 }
 
 void FileChooserDialog::setVisible(bool visible)
@@ -639,6 +689,10 @@ QString FileChooserDialog::locationError(const QUrl &url) const
         return {};
     if (!localFileUrl(url))
         return tr("Only local files and folders can be selected.");
+    // Each stat on the rclone FUSE mount can take seconds on the GUI thread. It is
+    // a read-only 0700 mount we own; the directory lister reports real failures.
+    if (Locations::isGoogleDriveMount(url))
+        return {};
     const QFileInfo info(url.toLocalFile());
     if (!info.exists())
         return tr("The location does not exist: %1").arg(url.toLocalFile());
@@ -654,7 +708,8 @@ void FileChooserDialog::navigateTo(const QUrl &url)
     // Library entries already carry their actual XDG folder URL.
     const auto library = Libraries::forUrl(url);
     const QUrl target = library.url.isValid() ? library.url : url;
-    if (target.isLocalFile() && QFileInfo(target.toLocalFile()).isFile()) {
+    if (target.isLocalFile() && !Locations::isGoogleDriveMount(target)
+        && QFileInfo(target.toLocalFile()).isFile()) {
         activateUrl(target);
         return;
     }
@@ -746,7 +801,6 @@ void FileChooserDialog::showContextMenu(const QPoint &globalPos, bool onItem)
             select = menu.addAction(tr("Select"), this, &FileChooserDialog::accept);
         menu.setDefaultAction(select ? select : open);
         menu.addSeparator();
-        add(m_actCut, modifiable);
         add(m_actCopy, true);
         menu.addAction(tr("Copy as path"), this, [items] { FileOps::copyPathToClipboard(items); });
         menu.addSeparator();
@@ -787,8 +841,6 @@ void FileChooserDialog::showContextMenu(const QPoint &globalPos, bool onItem)
             sortOrders->addAction(action);
         }
         menu.addAction(tr("Refresh"), m_navigation, &BrowserNavigation::refreshRequested);
-        menu.addSeparator();
-        add(m_actPaste, modifiable && FileOps::canPaste());
         menu.addSeparator();
         QMenu *create = menu.addMenu(tr("New"));
         create->addAction(Aero::themeIcon({"folder-new", "folder"}), tr("Folder"),
@@ -1090,24 +1142,35 @@ void FileChooserDialog::restrictViews(QWidget *container)
 
 bool FileChooserDialog::eventFilter(QObject *watched, QEvent *event)
 {
+    // This filter sits on the whole application: leave everything else alone first.
+    const QEvent::Type type = event->type();
+    if (type != QEvent::KeyPress && type != QEvent::ContextMenu && type != QEvent::DragEnter
+        && type != QEvent::DragMove && type != QEvent::Drop && type != QEvent::MouseButtonPress)
+        return QDialog::eventFilter(watched, event);
     const auto *widget = qobject_cast<QWidget *>(watched);
     if (!widget || (widget != this && !isAncestorOf(widget)))
         return QDialog::eventFilter(watched, event);
-    const bool places = widget && m_places->isAncestorOf(widget);
-    const bool browserPane = places || (widget && (m_libraries->isAncestorOf(widget)
-        || m_computer->isAncestorOf(widget)));
-    if (browserPane && event->type() == QEvent::MouseButtonPress
+    const bool places = m_places->isAncestorOf(widget);
+    const bool browserPane = places || m_libraries->isAncestorOf(widget)
+        || m_computer->isAncestorOf(widget);
+    if (browserPane && type == QEvent::MouseButtonPress
         && static_cast<QMouseEvent *>(event)->button() == Qt::MiddleButton)
         return true;
     // The places tree keeps its own menu of favorites and bookmark commands
-    if (browserPane && ((event->type() == QEvent::ContextMenu && !places) || event->type() == QEvent::DragEnter
-        || event->type() == QEvent::DragMove || event->type() == QEvent::Drop)) {
+    if (browserPane && ((type == QEvent::ContextMenu && !places) || type == QEvent::DragEnter
+        || type == QEvent::DragMove || type == QEvent::Drop)) {
         event->ignore();
         return true;
     }
-    if (event->type() == QEvent::KeyPress) {
+    if (type == QEvent::KeyPress) {
         const auto *key = static_cast<QKeyEvent *>(event);
-        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+        const bool enter = key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter;
+        // A caller can pop this window up under someone typing elsewhere. Enter (and
+        // Space on a focused button) would accept or press whatever has focus.
+        if (inputGuardActive()
+            && (enter || (key->key() == Qt::Key_Space && qobject_cast<QAbstractButton *>(watched))))
+            return true;
+        if (enter) {
             if (watched == m_search) return true;
             if (m_preview->isAncestorOf(widget)) return true;
             auto *editor = m_navigation->pathEditor();

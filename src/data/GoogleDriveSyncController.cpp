@@ -47,12 +47,39 @@ QJsonObject credentialEnvelope(const QByteArray &token, const QString &password)
 }
 }
 
+namespace {
+constexpr int kWatchedPollMs = 5000;
+constexpr int kIdlePollMs = 60000;
+}
+
 GoogleDriveSyncController::GoogleDriveSyncController(QObject *parent) : QObject(parent)
 {
     m_poll = new QTimer(this);
-    m_poll->setInterval(5000);
+    // Nobody is watching until a view says so, and every tick spawns a helper
+    m_poll->setInterval(kIdlePollMs);
     m_poll->setTimerType(Qt::CoarseTimer);
     connect(m_poll, &QTimer::timeout, this, &GoogleDriveSyncController::refresh);
+}
+
+void GoogleDriveSyncController::watch()
+{
+    ++m_watchers;
+    applyPollInterval();
+}
+
+void GoogleDriveSyncController::unwatch()
+{
+    if (m_watchers > 0)
+        --m_watchers;
+    applyPollInterval();
+}
+
+void GoogleDriveSyncController::applyPollInterval()
+{
+    const int interval = m_watchers > 0 ? kWatchedPollMs : kIdlePollMs;
+    // Setting an interval restarts a running timer, so only when it differs
+    if (m_poll->interval() != interval)
+        m_poll->setInterval(interval);
 }
 
 GoogleDriveSyncController::~GoogleDriveSyncController()

@@ -2,12 +2,21 @@
 
 #include <QLabel>
 #include <QPainter>
+#include <QPixmapCache>
 #include <QPolygonF>
 
 namespace Aero {
 
 QPixmap arrowPixmap(Qt::ArrowType dir, const QColor &color, int width)
 {
+    // Painted widgets ask on every paint, and the answer never changes. The
+    // fixed 2x device ratio is part of the artwork, so it is not in the key.
+    const QString key = QStringLiteral("aero-arrow/%1/%2/%3")
+        .arg(int(dir)).arg(color.rgba(), 0, 16).arg(width);
+    QPixmap cached;
+    if (QPixmapCache::find(key, &cached))
+        return cached;
+
     // The base runs across the arrow and the depth is how far its tip sticks out
     const int base = width;
     const int depth = qMax(3, (base * 4 + 3) / 7);
@@ -40,6 +49,8 @@ QPixmap arrowPixmap(Qt::ArrowType dir, const QColor &color, int width)
         break;
     }
     painter.drawPolygon(triangle);
+    painter.end();
+    QPixmapCache::insert(key, pixmap);
     return pixmap;
 }
 

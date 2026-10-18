@@ -10,6 +10,8 @@
 #include <QDir>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
+#include <QSignalBlocker>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -64,8 +66,27 @@ MountDialog::MountDialog(KFilePlacesModel *places, QWidget *parent)
     auto *close = addButton(tr("OK"));
 
     connect(m_drives, &QComboBox::currentIndexChanged, this, &MountDialog::updateButtons);
-    // On the spot rather than on OK, as the other two buttons are
-    connect(m_autoMount, &QCheckBox::toggled, this, [](bool on) {
+    // On the spot rather than on OK, as the other two buttons are, but turning
+    // it on is confirmed first: it applies to every drive ever attached, a
+    // stranger's USB stick included, and loads a module in the desktop service
+    connect(m_autoMount, &QCheckBox::toggled, this, [this](bool on) {
+        if (on) {
+            QMessageBox confirm(this);
+            confirm.setIcon(QMessageBox::Warning);
+            confirm.setWindowTitle(tr("Mount drives automatically"));
+            confirm.setTextFormat(Qt::PlainText);
+            confirm.setText(tr("Every drive you attach, including drives that belong to "
+                               "someone else, will be mounted automatically as soon as it "
+                               "is connected. Do you want to turn this on?"));
+            confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+            confirm.setDefaultButton(QMessageBox::No);
+            if (confirm.exec() != QMessageBox::Yes) {
+                // Back to off without writing anything, or asking again
+                const QSignalBlocker blocker(m_autoMount);
+                m_autoMount->setChecked(false);
+                return;
+            }
+        }
         AutoMount::setOnAttachEnabled(on);
     });
     connect(m_mount, &QPushButton::clicked, this, &MountDialog::mountSelected);

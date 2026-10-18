@@ -77,7 +77,8 @@ private:
     {
         dialog.show();
         dialog.activateWindow();
-        QTest::qWait(30);
+        // Enter/Space/activation are ignored briefly after show or activation
+        QTest::qWait(FileChooserDialog::inputGuardMs + 50);
     }
 
     static auto watchForLaunch(const QString &script, const QString &marker)
@@ -199,12 +200,64 @@ private slots:
                 QCOMPARE(shown, QStringLiteral("chooserItemContextMenu"));
                 QVERIFY(captions.contains(QStringLiteral("Select")));
                 QVERIFY(captions.contains(QStringLiteral("Rename")));
+                QVERIFY(captions.contains(QStringLiteral("Copy")));
             } else {
                 QCOMPARE(shown, QStringLiteral("chooserFolderContextMenu"));
                 QVERIFY(captions.contains(QStringLiteral("New")));
             }
+            // Pasting would move whatever another application left on the clipboard
+            QVERIFY(!captions.contains(QStringLiteral("Cut")));
+            QVERIFY(!captions.contains(QStringLiteral("Paste")));
         }
         QVERIFY(QFileInfo::exists(file));
+    }
+
+    void enterIsIgnoredBrieflyAfterShowAndActivation()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.filePath(QStringLiteral("a.txt")));
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        QSignalSpy accepted(&dialog, &QDialog::accepted);
+        dialog.show();
+        dialog.activateWindow();
+        QTest::qWait(30);
+        auto *files = dialog.findChild<FileView *>();
+        auto *model = dialog.findChild<DirectoryModel *>();
+        QTRY_VERIFY(model->indexForUrl(QUrl::fromLocalFile(dir.filePath(QStringLiteral("a.txt")))).isValid());
+        QVERIFY(files->selectUrl(QUrl::fromLocalFile(dir.filePath(QStringLiteral("a.txt")))));
+        files->focusView();
+        QTest::keyClick(files->currentView(), Qt::Key_Return);
+        QTest::keyClick(name(dialog), Qt::Key_Enter);
+        QTest::qWait(30);
+        QCOMPARE(accepted.count(), 0);
+        QTest::qWait(FileChooserDialog::inputGuardMs + 50);
+        QTest::keyClick(files->currentView(), Qt::Key_Return);
+        QTRY_COMPARE(accepted.count(), 1);
+    }
+
+    void saveStartingInHiddenHomeDirectoryFallsBackToHome()
+    {
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        QVERIFY(QDir(home.path()).mkpath(QStringLiteral(".ssh")));
+        QVERIFY(QDir(home.path()).mkpath(QStringLiteral("docs")));
+        const QByteArray previous = qgetenv("HOME");
+        qputenv("HOME", QFile::encodeName(home.path()));
+        const auto restore = qScopeGuard([previous] { qputenv("HOME", previous); });
+        const QString hidden = home.filePath(QStringLiteral(".ssh"));
+        FileChooserDialog save(optionsFor(hidden, ChooserMode::SaveFile));
+        QCOMPARE(save.currentUrl(), QUrl::fromLocalFile(home.path()));
+        auto folderOptions = optionsFor(hidden);
+        folderOptions.directory = true;
+        FileChooserDialog folder(folderOptions);
+        QCOMPARE(folder.currentUrl(), QUrl::fromLocalFile(home.path()));
+        // Opening a file there, or saving to an ordinary folder, is unchanged
+        FileChooserDialog open(optionsFor(hidden));
+        QCOMPARE(open.currentUrl(), QUrl::fromLocalFile(hidden));
+        const QString docs = home.filePath(QStringLiteral("docs"));
+        FileChooserDialog ordinary(optionsFor(docs, ChooserMode::SaveFile));
+        QCOMPARE(ordinary.currentUrl(), QUrl::fromLocalFile(docs));
     }
 
     void filterGlobsOrMimeKeepsFoldersAndSearchIndependent()

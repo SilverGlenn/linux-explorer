@@ -2,6 +2,7 @@
 
 #include "ChooserOptions.h"
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QMap>
 #include <QPointer>
 
@@ -26,7 +27,11 @@ class QTimer;
 class QToolButton;
 
 // A common file dialog. Like Win7's, it offers the shell's basic file
-// operations (new folder, rename, delete, clipboard), but never launches applications.
+// operations (new folder, rename, delete to trash, copy, copy as path, read-only
+// properties), but never launches applications. There is deliberately no Cut or
+// Paste: pasting would move whatever another application left on the clipboard.
+// Keys that would accept are ignored briefly after the window appears or is
+// re-activated, so a caller cannot harvest an Enter meant for another window.
 class FileChooserDialog : public QDialog {
     Q_OBJECT
 public:
@@ -38,6 +43,8 @@ public:
     QUrl currentUrl() const;
     QString errorMessage() const;
     void setVisible(bool visible) override;
+    // How long Enter/Space/activation are ignored after show or window activation
+    static constexpr int inputGuardMs = 500;
 
 public slots:
     void navigateTo(const QUrl &url);
@@ -47,6 +54,7 @@ public slots:
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    bool event(QEvent *event) override;
 
 private:
     QString locationError(const QUrl &url) const;
@@ -70,6 +78,7 @@ private:
     void updateFolderCommands();
     void createNewFolder();
     void showContextMenu(const QPoint &globalPos, bool onItem);
+    bool inputGuardActive() const;
 
     ChooserOptions m_options;
     QList<QUrl> m_selectedUrls;
@@ -87,9 +96,7 @@ private:
     QAction *m_previewAction;
     QActionGroup *m_viewModes;
     QToolButton *m_newFolderButton;
-    QAction *m_actCut;
     QAction *m_actCopy;
-    QAction *m_actPaste;
     QAction *m_actDelete;
     QAction *m_actRename;
     QAction *m_actProperties;
@@ -103,4 +110,5 @@ private:
     QPointer<QMessageBox> m_overwrite;
     bool m_optionsSupported = true;
     bool m_validated = false;
+    QElapsedTimer m_inputGuard;
 };

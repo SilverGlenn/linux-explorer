@@ -9,6 +9,7 @@
 #include <QDBusMessage>
 #include <QDBusServiceWatcher>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QMimeDatabase>
 #include <QPointer>
@@ -23,6 +24,10 @@ const QString servicePath = QStringLiteral("/org/win7explorer/FileChooser1");
 const QString requestInterface = QStringLiteral("org.win7explorer.FileChooser1.Request");
 constexpr int maxRequests = 64;
 constexpr int maxOwnerRequests = 8;
+// Finished requests are retained for GetResult, but only a few may be building
+// or showing a dialog at once, in total and per caller.
+constexpr int maxShownRequests = 4;
+constexpr int maxOwnerShownRequests = 2;
 
 struct Configuration {
     ChooserOptions chooser;
@@ -217,6 +222,8 @@ public:
 
     QString owner() const { return m_owner; }
     FileChooserDialog *dialog() const { return m_dialog; }
+    // Will build, or is showing, a dialog. Invalid and finished requests are not.
+    bool presenting() const { return !m_terminal && m_config.errorName.isEmpty(); }
 
     void start()
     {
@@ -251,6 +258,12 @@ public:
                 QUrl local;
                 if (!localUri(url.toString(QUrl::FullyEncoded), &local)) {
                     fail(serviceName + QStringLiteral(".Error.InvalidResult"), QStringLiteral("Chooser returned a nonlocal URL."));
+                    return;
+                }
+                // Same lossless filesystem-name round trip the portal backend requires.
+                const QString localPath = local.toLocalFile();
+                if (QFile::decodeName(QFile::encodeName(localPath)) != localPath) {
+                    fail(serviceName + QStringLiteral(".Error.InvalidResult"), QStringLiteral("Chooser returned a path Qt cannot represent losslessly."));
                     return;
                 }
                 const QFileInfo info(local.toLocalFile());
@@ -452,11 +465,20 @@ QDBusObjectPath ChooserService::createRequest(const QVariantMap &options, bool s
         return QDBusObjectPath(QStringLiteral("/"));
     }
     const QString owner = message().service();
-    int ownerCount = 0;
-    for (ChooserRequest *request : m_requests)
-        ownerCount += request->owner() == owner;
+    int ownerCount = 0, shown = 0, ownerShown = 0;
+    for (ChooserRequest *request : m_requests) {
+        const bool mine = request->owner() == owner;
+        ownerCount += mine;
+        shown += request->presenting();
+        ownerShown += mine && request->presenting();
+    }
     if (m_requests.size() >= maxRequests || ownerCount >= maxOwnerRequests) {
         sendErrorReply(QDBusError::LimitsExceeded, QStringLiteral("Too many retained chooser requests; Close unused requests."));
+        return QDBusObjectPath(QStringLiteral("/"));
+    }
+    // Answered at once instead of queued: each one is a full dialog window.
+    if (shown >= maxShownRequests || ownerShown >= maxOwnerShownRequests) {
+        sendErrorReply(QDBusError::LimitsExceeded, QStringLiteral("Too many open chooser dialogs; finish or Close one first."));
         return QDBusObjectPath(QStringLiteral("/"));
     }
     const QString path = servicePath + QStringLiteral("/requests/r%1").arg(++m_serial);

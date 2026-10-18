@@ -23,8 +23,14 @@ void showFailure(QWidget *parent, const QString &title, const QString &primary,
 void showLocationUnavailable(QWidget *parent, const QString &path,
                              const QString &reason = {});
 
-// The elevation prompt, true for Continue and false for Cancel or Escape
-bool askForAdminAccess(QWidget *parent, const QString &folderName);
+// Whether elevating could reasonably be offered for this local path, which it
+// cannot for removable media and remote or foreign filesystems
+bool canOfferElevation(const QString &localPath);
+
+// The elevation prompt, true for Continue and false for Cancel or Escape.
+// The full path is shown as plain text under the folder name.
+bool askForAdminAccess(QWidget *parent, const QString &folderName,
+                       const QString &path = {});
 
 // What the administrator strip says when clicked, informational so OK only
 void showAdministratorWarning(QWidget *parent);

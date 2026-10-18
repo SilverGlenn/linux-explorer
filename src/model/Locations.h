@@ -75,16 +75,27 @@ inline bool isGoogleDriveMount(const QUrl &url)
     return path.startsWith(prefix);
 }
 
-// Parse mountinfo records without probing mount paths. Mountinfo encodes
-// spaces, tabs, newlines, and backslashes as octal escapes.
-inline bool googleDriveMountedIn(const QByteArray &mountInfo)
+// What one reading of mountinfo says about the Drive mount: whether exactly one
+// valid read-only rclone mount sits at the target, and its kernel mount ID. A
+// kernel mount ID distinguishes a replacement mount at the same path, which
+// prevents a late quota response from being applied to a newly connected Drive.
+struct GoogleDriveMountState {
+    bool mounted = false;
+    QString mountId;
+};
+
+// Parse mountinfo records without probing mount paths, in one pass. Mountinfo
+// encodes spaces, tabs, newlines, and backslashes as octal escapes.
+inline GoogleDriveMountState googleDriveMountStateIn(const QByteArray &mountInfo)
 {
     const QUrl mount = googleDriveMount();
     if (!mount.isLocalFile())
-        return false;
+        return {};
     const QString root = QDir::cleanPath(mount.toLocalFile());
     int recordsAtMount = 0;
     bool validRcloneMount = false;
+    // From the first record at the target, which is the one that is judged
+    QByteArray firstId;
     const QList<QByteArray> records = mountInfo.split('\n');
     for (QByteArray record : records) {
         if (record.endsWith('\r'))
@@ -97,7 +108,8 @@ inline bool googleDriveMountedIn(const QByteArray &mountInfo)
             detail::decodeMountInfoField(fields.at(4))));
         if (mountPoint != root)
             continue;
-        ++recordsAtMount;
+        if (++recordsAtMount == 1)
+            firstId = fields.first();
 
         const qsizetype separator = fields.indexOf(QByteArrayLiteral("-"));
         if (separator < 6 || fields.size() <= separator + 2
@@ -108,58 +120,58 @@ inline bool googleDriveMountedIn(const QByteArray &mountInfo)
         validRcloneMount = options.contains(QByteArrayLiteral("ro"))
             && !options.contains(QByteArrayLiteral("rw"));
     }
-    return recordsAtMount == 1 && validRcloneMount;
+    GoogleDriveMountState state;
+    state.mounted = recordsAtMount == 1 && validRcloneMount;
+    if (!state.mounted)
+        return state;
+
+    // Only a plain positive decimal is an ID
+    if (firstId.isEmpty() || firstId.size() > 20 || firstId.startsWith('0'))
+        return state;
+    for (char ch : firstId)
+        if (ch < '0' || ch > '9') return state;
+    bool valid = false;
+    const auto value = firstId.toULongLong(&valid);
+    if (valid && value)
+        state.mountId = QString::fromLatin1(firstId);
+    return state;
+}
+
+inline bool googleDriveMountedIn(const QByteArray &mountInfo)
+{
+    return googleDriveMountStateIn(mountInfo).mounted;
+}
+
+inline QString googleDriveMountIdIn(const QByteArray &mountInfo)
+{
+    return googleDriveMountStateIn(mountInfo).mountId;
 }
 
 // The bounded procfs read is metadata-only: unlike statfs/QStorageInfo it
-// cannot wait on a stalled FUSE mount.
-inline bool googleDriveMounted()
+// cannot wait on a stalled FUSE mount. One read answers both questions, so a
+// caller wanting the state and the ID should ask once, not twice.
+inline GoogleDriveMountState googleDriveMountState()
 {
     constexpr qint64 kMaxMountInfoBytes = 1024 * 1024;
     QFile mountInfo(QStringLiteral("/proc/self/mountinfo"));
     if (!mountInfo.open(QIODevice::ReadOnly))
-        return false;
-    QByteArray data = mountInfo.read(kMaxMountInfoBytes);
+        return {};
+    const QByteArray data = mountInfo.read(kMaxMountInfoBytes);
     // Reaching the cap leaves the record set potentially incomplete, so it
     // cannot establish that there is exactly one mount at our target.
     if (data.size() == kMaxMountInfoBytes)
-        return false;
-    return googleDriveMountedIn(data);
+        return {};
+    return googleDriveMountStateIn(data);
 }
 
-// A kernel mount ID distinguishes a replacement mount at the same path. It
-// prevents a late quota response from being applied to a newly connected Drive.
-inline QString googleDriveMountIdIn(const QByteArray &mountInfo)
+inline bool googleDriveMounted()
 {
-    if (!googleDriveMountedIn(mountInfo))
-        return {};
-    const QString root = QDir::cleanPath(googleDriveMount().toLocalFile());
-    for (const auto &record : mountInfo.split('\n')) {
-        auto fields = record.split(' ');
-        fields.removeAll(QByteArray());
-        if (fields.size() < 6 || QDir::cleanPath(QString::fromLocal8Bit(
-                detail::decodeMountInfoField(fields.at(4)))) != root)
-            continue;
-        const QByteArray id = fields.first();
-        if (id.isEmpty() || id.size() > 20 || id.startsWith('0'))
-            return {};
-        for (char ch : id)
-            if (ch < '0' || ch > '9') return {};
-        bool valid = false;
-        const auto value = id.toULongLong(&valid);
-        return valid && value ? QString::fromLatin1(id) : QString();
-    }
-    return {};
+    return googleDriveMountState().mounted;
 }
 
 inline QString googleDriveMountId()
 {
-    constexpr qint64 cap = 1024 * 1024;
-    QFile file(QStringLiteral("/proc/self/mountinfo"));
-    if (!file.open(QIODevice::ReadOnly))
-        return {};
-    const QByteArray data = file.read(cap);
-    return data.size() == cap ? QString() : googleDriveMountIdIn(data);
+    return googleDriveMountState().mountId;
 }
 
 inline QUrl computer()

@@ -4,6 +4,7 @@
 
 #include "DirectoryModel.h"
 #include "GroupingProxy.h"
+#include "Locations.h"
 #include "aero/text.h"
 #include "aero/listview.h"
 #include "aero/palette.h"
@@ -685,7 +686,8 @@ FileView::FileView(DirectoryModel *model, QWidget *parent)
         // Visibility and mode changes can precede Qt's queued item layout.
         // KIO needs real geometry to prioritize/poll visible previews.
         currentView()->doItemsLayout();
-        m_previews->updateIcons();
+        if (!m_previewsSuppressed)
+            m_previews->updateIcons();
     });
     connect(m_model, &DirectoryModel::loadingStarted, this, [this] {
         m_previewUpdateTimer->stop();
@@ -1071,6 +1073,12 @@ void FileView::rebuildPreviews()
         // The standard adapter also batches QListView layout during updates.
         m_previews = new KFilePreviewGenerator(currentView());
     }
+
+    // Generating a thumbnail reads the file, and on the Drive mount that is
+    // a download per visible item
+    m_previewsSuppressed = Locations::isGoogleDriveMount(m_model->url());
+    if (m_previewsSuppressed)
+        m_previews->setPreviewShown(false);
 }
 
 void FileView::showEvent(QShowEvent *event)
@@ -1239,6 +1247,31 @@ QModelIndexList FileView::selectedIndexes() const
             mapped.append(source);
     }
     return mapped;
+}
+
+bool FileView::selectionTouches(const QModelIndex &first, const QModelIndex &last) const
+{
+    QItemSelectionModel *selection = currentView()->selectionModel();
+    if (!selection || !selection->hasSelection())
+        return false;
+
+    // A wide change is a reset in all but name, and walking it is the cost
+    // this exists to avoid
+    constexpr int kMaxRows = 64;
+    if (last.row() - first.row() >= kMaxRows)
+        return true;
+
+    // Selection is whole rows in details and column 0 in the icon views, so
+    // column 0 answers for both
+    const bool mapped = currentView() == m_details && grouped();
+    for (int row = first.row(); row <= last.row(); ++row) {
+        QModelIndex index = m_model->model()->index(row, 0, first.parent());
+        if (mapped)
+            index = m_grouping->mapFromSource(index);
+        if (index.isValid() && selection->isSelected(index))
+            return true;
+    }
+    return false;
 }
 
 QModelIndex FileView::viewIndexFor(const QUrl &url) const

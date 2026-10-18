@@ -30,6 +30,12 @@ const SizeBucket kSizeBuckets[] = {
 // plus one, which is what the parent lookup reads back
 constexpr quintptr kGroupId = 0;
 
+// Long enough to swallow a burst of source changes
+constexpr int kRebuildDelayMs = 30;
+
+// Between rebuilds while the directory is still loading
+constexpr int kLoadingRebuildDelayMs = 300;
+
 } // namespace
 
 GroupingProxy::GroupingProxy(DirectoryModel *model, QObject *parent)
@@ -37,16 +43,43 @@ GroupingProxy::GroupingProxy(DirectoryModel *model, QObject *parent)
     , m_model(model)
     , m_rebuildTimer(new QTimer(this))
 {
-    // Long enough to swallow a burst of source changes
     m_rebuildTimer->setSingleShot(true);
-    m_rebuildTimer->setInterval(30);
     connect(m_rebuildTimer, &QTimer::timeout, this, &GroupingProxy::rebuild);
+
+    // A rebuild is linear and resets the view, which a folder still streaming in
+    // would pay after every lull, so inserts wait for the end of the load. An
+    // error ends it too, the lister not always saying completed after one
+    connect(model, &DirectoryModel::loadingStarted, this, [this] { m_loading = true; });
+    const auto finished = [this] {
+        m_loading = false;
+        if (m_groupColumn >= 0) {
+            m_rebuildTimer->stop();
+            rebuild();
+        }
+    };
+    connect(model, &DirectoryModel::loadingFinished, this, finished);
+    connect(model, &DirectoryModel::errorOccurred, this, finished);
 }
 
 void GroupingProxy::scheduleRebuild()
 {
     if (m_groupColumn >= 0)
-        m_rebuildTimer->start();
+        m_rebuildTimer->start(kRebuildDelayMs);
+}
+
+void GroupingProxy::scheduleInsertRebuild()
+{
+    if (m_groupColumn < 0)
+        return;
+    if (!m_loading) {
+        m_rebuildTimer->start(kRebuildDelayMs);
+        return;
+    }
+    // Not restarted by the next batch, or a long load would never show any, and
+    // the cap also stops a load that never reports its end from freezing the
+    // groups for good
+    if (!m_rebuildTimer->isActive())
+        m_rebuildTimer->start(kLoadingRebuildDelayMs);
 }
 
 void GroupingProxy::setSourceModel(QAbstractItemModel *sourceModel)
@@ -60,7 +93,7 @@ void GroupingProxy::setSourceModel(QAbstractItemModel *sourceModel)
         connect(sourceModel, &QAbstractItemModel::modelReset,
                 this, &GroupingProxy::scheduleRebuild);
         connect(sourceModel, &QAbstractItemModel::rowsInserted,
-                this, &GroupingProxy::scheduleRebuild);
+                this, &GroupingProxy::scheduleInsertRebuild);
         connect(sourceModel, &QAbstractItemModel::rowsRemoved,
                 this, &GroupingProxy::scheduleRebuild);
         connect(sourceModel, &QAbstractItemModel::layoutChanged,

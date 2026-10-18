@@ -31,6 +31,11 @@ constexpr int maxRequests = 64;
 // Each admission class leaves room for one Close per pending Open. Untrusted
 // callers cannot consume the current frontend's pending or validation budget.
 constexpr int maxAuthorizations = 2 * maxRequests;
+// Authorized requests may queue behind early Closes, but each one actually shown
+// is a full dialog (or a whole presenter process). Excess Opens are answered
+// "other" (2) at once rather than held open.
+constexpr int maxShownDialogs = 4;
+constexpr int maxShownPerApp = 2;
 } // namespace
 
 class PortalChooserRequest : public QObject {
@@ -42,6 +47,8 @@ public:
     FileChooserDialog *dialog() const { return m_dialog; }
     QString owner() const { return m_call.service(); }
     bool frontendBudget() const { return m_frontendBudget; }
+    void setAppId(QString appId) { m_appId = std::move(appId); }
+    bool showing() const { return m_dialog || m_presenter; }
 
     void authorized(PortalChooserOptions config)
     {
@@ -78,6 +85,17 @@ public:
     {
         if (m_terminal || !m_authorized || m_pendingCloses || m_dialog || m_presenter)
             return;
+        int shown = 0, appShown = 0;
+        for (const PortalChooserRequest *other : std::as_const(m_service->m_requests)) {
+            if (other == this || !other->showing())
+                continue;
+            ++shown;
+            appShown += !m_appId.isEmpty() && other->m_appId == m_appId;
+        }
+        if (shown >= maxShownDialogs || appShown >= maxShownPerApp) {
+            finish(2);
+            return;
+        }
         if (!ChooserPresenter::requiredPlatform(m_config.window).isEmpty()) {
             m_presenter = new ChooserPresenter(this);
             m_presenter->start(m_config.chooser, m_config.window, [this](uint response, const ChooserSelection &selected) {
@@ -228,6 +246,7 @@ private:
     PortalChooserOptions m_config;
     QPointer<FileChooserDialog> m_dialog;
     QPointer<ChooserPresenter> m_presenter;
+    QString m_appId;
     int m_pendingCloses = 0;
     bool m_authorized = false;
     bool m_terminal = false;
@@ -514,6 +533,7 @@ void PortalChooserService::createRequest(const QDBusMessage &call, ChooserMode m
     // Only sender-scoped pending state exists before authorization. It routes
     // an already-queued Close without reserving a global handle or UI slot.
     auto *request = new PortalChooserRequest(this, call, path, frontendBudget);
+    request->setAppId(appId);
     m_pendingRequests[call.service()].insert(path, request);
     ++(frontendBudget ? m_frontendPending : m_otherPending);
     m_watcher->addWatchedService(call.service());

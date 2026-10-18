@@ -6,7 +6,6 @@
 #include <QList>
 #include <QMainWindow>
 #include <QPointer>
-#include <QSoundEffect>
 #include <QUrl>
 
 #include <KFileItem>
@@ -355,5 +354,6 @@ private:
     mutable QList<KFileItem> m_selection;
     mutable bool m_selectionValid = false;
 
-    QSoundEffect m_navSound;
+    QTimer *m_selectionTimer = nullptr;
+    QTimer *m_searchTimer = nullptr;
 };

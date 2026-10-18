@@ -11,6 +11,7 @@
 #include <QDialog>
 #include <QLabel>
 #include <QPushButton>
+#include <QStorageInfo>
 
 namespace {
 
@@ -67,7 +68,27 @@ void showLocationUnavailable(QWidget *parent, const QString &path,
                 translate("%1 is not accessible.").arg(path), reason);
 }
 
-bool askForAdminAccess(QWidget *parent, const QString &folderName)
+bool canOfferElevation(const QString &localPath)
+{
+    // Removable media and foreign mounts are somebody else's to administer,
+    // and the admin worker would only widen what a stick or share can do here
+    static const char *const kForeignRoots[] = {"/media", "/run/media", "/mnt"};
+    for (const char *root : kForeignRoots) {
+        const QString prefix = QString::fromLatin1(root);
+        if (localPath == prefix || localPath.startsWith(prefix + QLatin1Char('/')))
+            return false;
+    }
+
+    const QStorageInfo storage(localPath);
+    if (!storage.isValid())
+        return true;
+    const QByteArray type = storage.fileSystemType();
+    return !(type.startsWith("fuse") || type.startsWith("nfs") || type == "cifs"
+             || type.startsWith("smb") || type == "9p" || type == "vfat"
+             || type == "exfat" || type.startsWith("ntfs"));
+}
+
+bool askForAdminAccess(QWidget *parent, const QString &folderName, const QString &path)
 {
     // The folder's own name is the title, as in Windows
     const QIcon warningIcon = Aero::themeIcon({"dialog-warning", "messagebox_warning"});
@@ -82,6 +103,11 @@ bool askForAdminAccess(QWidget *parent, const QString &folderName)
     // opens the folder through the admin worker instead
     dialog.addLine(Aero::bodyLabel(
         translate("Click Continue to open this folder as an administrator.")));
+    // The title is only the last component, and elevating the wrong folder
+    // is the mistake worth preventing. bodyLabel is plain text, so the path
+    // cannot inject markup.
+    if (!path.isEmpty())
+        dialog.addLine(Aero::bodyLabel(path));
 
     QPushButton *proceed = dialog.addButton(translate("Continue"));
     proceed->setDefault(true);

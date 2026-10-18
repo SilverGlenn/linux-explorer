@@ -2,6 +2,7 @@
 
 #include "aero/icons.h"
 #include "aero/fonts.h"
+#include "model/ItemIcons.h"
 
 #include <KApplicationTrader>
 #include <KIO/ChmodJob>
@@ -52,6 +53,12 @@ public:
     }
 };
 
+// Tooltips auto-detect rich text, so a name like "<img src=x>" would render
+QString plainTip(const QString &text)
+{
+    return text.isEmpty() ? QString() : QStringLiteral("<qt>%1</qt>").arg(text.toHtmlEscaped());
+}
+
 QString unavailable()
 {
     return PropertiesDialog::tr("Not available");
@@ -79,7 +86,7 @@ QLabel *valueLabel(const QString &text = {}, const char *name = nullptr)
     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
     label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     label->setMinimumWidth(0);
-    label->setToolTip(text);
+    label->setToolTip(plainTip(text));
     return label;
 }
 
@@ -88,7 +95,7 @@ void setValue(QLabel *label, const QString &text)
     if (!label)
         return;
     label->setText(text);
-    label->setToolTip(text);
+    label->setToolTip(plainTip(text));
 }
 
 QGridLayout *rows(QVBoxLayout *layout, int labelWidth)
@@ -179,8 +186,9 @@ private:
 
 } // namespace
 
-PropertiesDialog::PropertiesDialog(const KFileItemList &items, QWidget *parent)
-    : QDialog(parent), m_items(items), m_data(PropertiesData::fromItems(items))
+PropertiesDialog::PropertiesDialog(const KFileItemList &items, QWidget *parent, bool readOnly)
+    : QDialog(parent), m_items(items), m_data(PropertiesData::fromItems(items)),
+      m_viewOnly(readOnly)
 {
     setObjectName(QStringLiteral("propertiesDialog"));
     setWindowTitle(tr("%1 Properties").arg(m_data.displayName));
@@ -221,8 +229,9 @@ PropertiesDialog::PropertiesDialog(const KFileItemList &items, QWidget *parent)
     m_error->setTextFormat(Qt::PlainText);
     m_error->hide();
     layout->addWidget(m_error);
-    m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel
-                                     | QDialogButtonBox::Apply);
+    m_buttons = new QDialogButtonBox(m_viewOnly
+        ? QDialogButtonBox::Ok
+        : QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply);
     m_buttons->setObjectName(QStringLiteral("propertiesButtons"));
     m_buttons->setCenterButtons(false);
     for (auto *button : m_buttons->buttons())
@@ -231,12 +240,13 @@ PropertiesDialog::PropertiesDialog(const KFileItemList &items, QWidget *parent)
         button->setAutoDefault(false);
     m_buttons->button(QDialogButtonBox::Ok)->setAutoDefault(true);
     m_buttons->button(QDialogButtonBox::Ok)->setDefault(true);
-    m_buttons->button(QDialogButtonBox::Apply)->setEnabled(false);
+    if (QPushButton *apply = m_buttons->button(QDialogButtonBox::Apply)) {
+        apply->setEnabled(false);
+        connect(apply, &QPushButton::clicked, this, [this] { applyChanges(false); });
+    }
     connect(m_buttons, &QDialogButtonBox::accepted, this, &PropertiesDialog::accept);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &PropertiesDialog::reject);
     connect(this, &QDialog::finished, this, [this] { stopSizeCalculation(); });
-    connect(m_buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked,
-            this, [this] { applyChanges(false); });
     layout->addWidget(m_buttons);
 
     refresh();
@@ -302,6 +312,7 @@ QWidget *PropertiesDialog::buildGeneralPage()
     advanced->setMinimumSize(75, 23);
     advanced->setToolTip(tr("Open all properties provided by the desktop."));
     connect(advanced, &QPushButton::clicked, this, [this] { openDesktopProperties(false); });
+    advanced->setVisible(!m_viewOnly);
 
     auto *heading = rows(layout, labelWidth());
     auto *icon = new QLabel;
@@ -309,7 +320,7 @@ QWidget *PropertiesDialog::buildGeneralPage()
     if (m_data.kind == PropertiesData::Kind::Drive)
         itemIcon = Aero::themeIcon({"drive-harddisk", "drive-removable-media"});
     else if (m_items.size() == 1)
-        itemIcon = QIcon::fromTheme(m_items.first().iconName());
+        itemIcon = ItemIcons::safeIcon(m_items.first());
     else
         itemIcon = Aero::themeIcon({"text-x-generic", "folder"});
     icon->setPixmap(itemIcon.pixmap(32, 32));
@@ -317,7 +328,7 @@ QWidget *PropertiesDialog::buildGeneralPage()
     heading->addWidget(icon, 0, 0, Qt::AlignLeft | Qt::AlignVCenter);
     m_name = new QLineEdit;
     m_name->setObjectName(QStringLiteral("propertiesName"));
-    m_name->setReadOnly(!m_data.canRename);
+    m_name->setReadOnly(m_viewOnly || !m_data.canRename);
     m_name->setMinimumHeight(23);
     heading->addWidget(m_name, 0, 1);
     heading->setRowMinimumHeight(0, 34);
@@ -387,6 +398,7 @@ QWidget *PropertiesDialog::buildGeneralPage()
                 auto *change = new QPushButton(tr("Change..."));
                 change->setObjectName(QStringLiteral("propertiesChangeApplication"));
                 change->setMinimumSize(75, 23);
+                change->setVisible(!m_viewOnly);
                 openLayout->addWidget(change);
                 connect(change, &QPushButton::clicked, this, &PropertiesDialog::chooseApplication);
                 row(type, 1, tr("Opens with:"), openRow);
@@ -426,11 +438,12 @@ QWidget *PropertiesDialog::buildGeneralPage()
             checkLayout->setSpacing(12);
             m_readOnly = new QCheckBox(tr("Read-only"));
             m_readOnly->setObjectName(QStringLiteral("propertiesReadOnly"));
-            m_readOnly->setEnabled(m_data.kind == PropertiesData::Kind::File && m_data.canChangePermissions);
+            m_readOnly->setEnabled(!m_viewOnly && m_data.kind == PropertiesData::Kind::File
+                                   && m_data.canChangePermissions);
             m_readOnly->setToolTip(tr("Controls the owner's write permission. Other permissions are preserved."));
             m_hidden = new QCheckBox(tr("Hidden"));
             m_hidden->setObjectName(QStringLiteral("propertiesHidden"));
-            m_hidden->setEnabled(m_data.canRename);
+            m_hidden->setEnabled(!m_viewOnly && m_data.canRename);
             m_hidden->setToolTip(tr("Hidden items have a name beginning with a dot."));
             checkLayout->addWidget(m_readOnly);
             if (file) {
@@ -488,6 +501,7 @@ QWidget *PropertiesDialog::buildSecurityPage()
     auto *edit = new QPushButton(tr("Edit..."));
     edit->setObjectName(QStringLiteral("propertiesEditPermissions"));
     edit->setMinimumSize(75, 23);
+    edit->setVisible(!m_viewOnly);
     editRow->addWidget(edit);
     connect(edit, &QPushButton::clicked, this, [this] { openDesktopProperties(true); });
     layout->addLayout(editRow);
@@ -562,7 +576,7 @@ void PropertiesDialog::refreshSecurity()
                  ? url().toDisplayString(QUrl::PreferLocalFile) : m_data.displayName);
     if (m_items.size() != 1) {
         auto *item = new QTreeWidgetItem(m_security, {tr("Multiple items")});
-        item->setToolTip(0, tr("Use Edit to inspect or change the selected items' permissions."));
+        item->setToolTip(0, plainTip(tr("Use Edit to inspect or change the selected items' permissions.")));
         return;
     }
     const QStringList names{tr("Owner (%1)").arg(m_data.owner),
@@ -576,7 +590,7 @@ void PropertiesDialog::refreshSecurity()
             item->setText(column + 1, m_data.permissions & masks[index][column] ? tr("Allow") : QStringLiteral("—"));
             item->setTextAlignment(column + 1, Qt::AlignCenter);
         }
-        item->setToolTip(0, names.at(index));
+        item->setToolTip(0, plainTip(names.at(index)));
     }
 }
 
@@ -587,7 +601,7 @@ void PropertiesDialog::refreshDetails()
     m_details->clear();
     const auto detail = [this](const QString &name, const QString &value) {
         auto *item = new QTreeWidgetItem(m_details, {name, value.isEmpty() ? unavailable() : value});
-        item->setToolTip(1, item->text(1));
+        item->setToolTip(1, plainTip(item->text(1)));
     };
     detail(tr("Name"), m_data.displayName);
     detail(tr("Type"), m_data.typeName);
@@ -741,6 +755,8 @@ void PropertiesDialog::updateSizeLabels()
 
 bool PropertiesDialog::isDirty() const
 {
+    if (m_viewOnly)
+        return false;
     return (m_data.canRename && m_name->text() != m_data.realName)
         || (m_readOnly && m_readOnly->isEnabled() && m_readOnly->isChecked() != m_data.readOnly)
         || bool(m_pendingService);
@@ -748,8 +764,10 @@ bool PropertiesDialog::isDirty() const
 
 void PropertiesDialog::updateDirtyState()
 {
-    if (m_buttons)
-        m_buttons->button(QDialogButtonBox::Apply)->setEnabled(!m_busy && isDirty());
+    if (m_buttons) {
+        if (QPushButton *apply = m_buttons->button(QDialogButtonBox::Apply))
+            apply->setEnabled(!m_busy && isDirty());
+    }
 }
 
 void PropertiesDialog::setBusy(bool busy)
@@ -757,7 +775,8 @@ void PropertiesDialog::setBusy(bool busy)
     m_busy = busy;
     m_tabs->setEnabled(!busy);
     m_buttons->button(QDialogButtonBox::Ok)->setEnabled(!busy);
-    m_buttons->button(QDialogButtonBox::Cancel)->setEnabled(!busy);
+    if (QPushButton *cancel = m_buttons->button(QDialogButtonBox::Cancel))
+        cancel->setEnabled(!busy);
     updateDirtyState();
 }
 
@@ -784,7 +803,7 @@ void PropertiesDialog::applyChanges(bool closeAfter)
     if (m_busy)
         return;
     showError({});
-    if (!isDirty()) {
+    if (m_viewOnly || !isDirty()) {
         if (closeAfter)
             QDialog::accept();
         return;
@@ -884,6 +903,8 @@ void PropertiesDialog::chooseApplication()
 {
     // The MIME-type constructor can save an association on its own. The
     // generic picker lets the property sheet commit it only on OK or Apply.
+    if (m_viewOnly)
+        return;
     KOpenWithDialog chooser(this);
     chooser.setWindowTitle(tr("Open with"));
     chooser.setSaveNewApplications(false);
@@ -902,6 +923,8 @@ void PropertiesDialog::chooseApplication()
 
 void PropertiesDialog::openDesktopProperties(bool permissionsPage)
 {
+    if (m_viewOnly)
+        return;
     auto *dialog = new DesktopPropertiesDialog(m_items, this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowModality(Qt::WindowModal);

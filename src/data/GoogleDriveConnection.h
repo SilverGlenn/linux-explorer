@@ -7,9 +7,12 @@
 #include <QElapsedTimer>
 #include <memory>
 #include <functional>
+#include <optional>
+#include <utility>
 
 class GoogleDriveAuth;
 class QProcess;
+class QSocketNotifier;
 class QTimer;
 class QLockFile;
 
@@ -102,6 +105,12 @@ private:
     std::shared_ptr<QLockFile> m_operationLock;
     QTimer *m_timeout = nullptr;
     QTimer *m_mountTimer = nullptr;
+    QTimer *m_mountDebounce = nullptr;
+    QSocketNotifier *m_mountNotifier = nullptr;
+    int m_mountInfoFd = -1;
+    // One reading of the mount table, held only while refreshMountState() asks
+    // its questions so they share a single parse
+    std::optional<std::pair<bool, QString>> m_mountSnapshot;
     QTimer *m_reconnectTimer = nullptr;
     ConnectionState m_connectionState = ConnectionState::Disconnected;
     bool m_automaticReconnect = false;

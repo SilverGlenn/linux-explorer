@@ -17,13 +17,52 @@
 #include <QTcpSocket>
 #include <QUrlQuery>
 #include <qt6keychain/keychain.h>
+#include <QFile>
 #include <cstring>
+#include <unistd.h>
 
 namespace {
 constexpr auto walletService = "explorer-win7-google-drive";
 constexpr auto walletKey = "desktop-account-v1";
 constexpr auto canonicalWalletKey = "desktop-account-v2";
 constexpr int maxRecordSize = 65536;
+
+// Whether the process on the other end of a loopback connection belongs to the
+// current user. The callback is reachable by every local user, so the kernel's
+// table of TCP sockets is asked who owns the client's end: the entry whose
+// local port is the peer's port and whose remote port is ours. Anything that
+// cannot be established, a missing entry or an unreadable table included,
+// counts as not the current user.
+bool peerIsCurrentUser(const QTcpSocket *socket)
+{
+    const quint16 peerPort = socket->peerPort();
+    const quint16 ourPort = socket->localPort();
+    if (!peerPort || !ourPort)
+        return false;
+    const auto portOf = [](const QByteArray &address) {
+        bool ok = false;
+        const uint port = address.mid(address.lastIndexOf(':') + 1).toUInt(&ok, 16);
+        return ok ? int(port) : -1;
+    };
+    constexpr qint64 kMaxTableBytes = 8 * 1024 * 1024;
+    for (const char *table : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+        QFile file(QString::fromLatin1(table));
+        if (!file.open(QIODevice::ReadOnly))
+            continue;
+        const QByteArray data = file.read(kMaxTableBytes);
+        for (const QByteArray &line : data.split('\n')) {
+            // sl local_address rem_address st queues timer retransmits uid ...
+            const QList<QByteArray> fields = line.simplified().split(' ');
+            if (fields.size() < 8 || portOf(fields.at(1)) != peerPort
+                || portOf(fields.at(2)) != ourPort)
+                continue;
+            bool ok = false;
+            const uint uid = fields.at(7).toUInt(&ok);
+            return ok && uid == getuid();
+        }
+    }
+    return false;
+}
 
 QString randomSecret()
 {
@@ -290,7 +329,7 @@ private:
         }
         // One complete GET, no body, pipelining, chunking, or duplicate headers.
         bool valid = !m_used && !m_state.isEmpty() && socket->peerAddress() == QHostAddress::LocalHost
-            && end + 4 == data.size();
+            && end + 4 == data.size() && peerIsCurrentUser(socket);
         const QList<QByteArray> lines = data.left(end).split('\n');
         const QList<QByteArray> first = lines.value(0).trimmed().split(' ');
         valid = valid && first.size() == 3 && first.value(0) == "GET"

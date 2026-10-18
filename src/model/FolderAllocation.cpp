@@ -9,6 +9,7 @@
 #include <limits>
 #include <set>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 #include <vector>
 
@@ -24,6 +25,27 @@ struct Frame {
     struct stat initial;
 };
 
+// A tree deeper than this is a loop of bind mounts or a hostile layout, and
+// the walk holds one descriptor per level
+constexpr size_t kMaxDepth = 256;
+// Each visited inode costs a node in the set, so this bounds the memory
+constexpr size_t kMaxVisited = 2000000;
+
+// Every btrfs subvolume has a device number of its own while sharing the pool's
+// space, so one inside a btrfs folder is not another filesystem
+constexpr long kBtrfsMagic = 0x9123683E;
+
+bool onBtrfs(int parent, const char *name)
+{
+    const int fd = ::openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    struct statfs fs {};
+    const bool btrfs = ::fstatfs(fd, &fs) == 0 && fs.f_type == kBtrfsMagic;
+    ::close(fd);
+    return btrfs;
+}
+
 bool changed(const struct stat &before, const struct stat &after)
 {
     return before.st_dev != after.st_dev || before.st_ino != after.st_ino
@@ -38,6 +60,7 @@ Result calculate(const QStringList &paths, const std::shared_ptr<std::atomic_boo
 {
     Result result;
     std::set<Inode> visited;
+    bool saturated = false;
     const auto cancelled = [&] {
         if (cancel && cancel->load(std::memory_order_relaxed)) {
             result.cancelled = true;
@@ -45,7 +68,13 @@ Result calculate(const QStringList &paths, const std::shared_ptr<std::atomic_boo
         }
         return result.cancelled;
     };
+    const auto stopped = [&] { return cancelled() || saturated; };
     const auto count = [&](const struct stat &status) {
+        if (visited.size() >= kMaxVisited) {
+            saturated = true;
+            result.incomplete = true;
+            return false;
+        }
         if (!visited.emplace(status.st_dev, status.st_ino).second)
             return false;
         ++result.entries;
@@ -60,6 +89,10 @@ Result calculate(const QStringList &paths, const std::shared_ptr<std::atomic_boo
     };
     std::vector<Frame> stack;
     const auto enter = [&](int parent, const char *name, const struct stat &status) {
+        if (stack.size() >= kMaxDepth) {
+            result.incomplete = true;
+            return;
+        }
         const int descriptor = ::openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (descriptor < 0) {
             result.incomplete = true;
@@ -81,7 +114,7 @@ Result calculate(const QStringList &paths, const std::shared_ptr<std::atomic_boo
     };
 
     for (const QString &path : paths) {
-        if (cancelled())
+        if (stopped())
             break;
         QByteArray encoded = QFile::encodeName(path);
         // A trailing slash would make lstat follow a symlink to a directory.
@@ -98,8 +131,14 @@ Result calculate(const QStringList &paths, const std::shared_ptr<std::atomic_boo
         }
         if (!count(status) || !S_ISDIR(status.st_mode))
             continue;
+        // Another filesystem under the root is not this folder's space, and a
+        // mount may be a network share that stalls this walk
+        const dev_t rootDevice = status.st_dev;
+        struct statfs rootFs {};
+        const bool rootBtrfs = ::statfs(encoded.constData(), &rootFs) == 0
+            && rootFs.f_type == kBtrfsMagic;
         enter(AT_FDCWD, encoded.constData(), status);
-        while (!stack.empty() && !cancelled()) {
+        while (!stack.empty() && !stopped()) {
             Frame &frame = stack.back();
             const int parent = ::dirfd(frame.directory.get());
             errno = 0;
@@ -117,6 +156,11 @@ Result calculate(const QStringList &paths, const std::shared_ptr<std::atomic_boo
                 continue;
             struct stat child {};
             if (::fstatat(parent, entry->d_name, &child, AT_SYMLINK_NOFOLLOW) != 0) {
+                result.incomplete = true;
+                continue;
+            }
+            if (S_ISDIR(child.st_mode) && child.st_dev != rootDevice
+                && !(rootBtrfs && onBtrfs(parent, entry->d_name))) {
                 result.incomplete = true;
                 continue;
             }

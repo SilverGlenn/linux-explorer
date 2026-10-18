@@ -565,7 +565,7 @@ KFilePlacesModel *NavigationPane::placesModel() const
     return m_places;
 }
 
-bool NavigationPane::canAddToFavorites(const QUrl &url)
+bool NavigationPane::canAddToFavorites(const QUrl &url, bool knownDirectory)
 {
     if (!url.isValid() || url.isEmpty() || Locations::isComputer(url)
         || Locations::isLibraries(url) || Locations::isSearch(url)
@@ -578,7 +578,7 @@ bool NavigationPane::canAddToFavorites(const QUrl &url)
     if (Locations::isGoogleDriveMount(url))
         return false;
     if (url.isLocalFile())
-        return QFileInfo(url.toLocalFile()).isDir();
+        return knownDirectory || QFileInfo(url.toLocalFile()).isDir();
     return KProtocolManager::supportsListing(url);
 }
 
@@ -710,18 +710,23 @@ void NavigationPane::addEntry(QTreeWidgetItem *group, const QModelIndex &placeIn
     item->setData(0, Qt::UserRole, url);
     item->setData(0, kPlaceRowRole, placeIndex.row());
     item->setSizeHint(0, QSize(0, 21));
-    addPlaceholderIfExpandable(item, url);
+    // A mounted device is a directory by definition, and stat'ing a slow or
+    // stalled one here would block the GUI thread for the whole pane
+    addPlaceholderIfExpandable(item, url, m_places->isDevice(placeIndex));
 }
 
-void NavigationPane::addPlaceholderIfExpandable(QTreeWidgetItem *item, const QUrl &url)
+void NavigationPane::addPlaceholderIfExpandable(QTreeWidgetItem *item, const QUrl &url,
+                                                bool knownDirectory)
 {
     // Local directories only, anything remote meaning a job per node
     if (!url.isLocalFile() || Locations::isGoogleDriveMount(url))
         return;
 
-    const QFileInfo info(url.toLocalFile());
-    if (!info.isDir() || !info.isReadable())
-        return;
+    if (!knownDirectory) {
+        const QFileInfo info(url.toLocalFile());
+        if (!info.isDir() || !info.isReadable())
+            return;
+    }
 
     addPlaceholder(item);
 }
@@ -772,7 +777,8 @@ void NavigationPane::applyChildren(const QUrl &url, const QList<QUrl> &children)
         child->setData(0, Qt::UserRole, childUrl);
         child->setData(0, kPlaceRowRole, -1);
         child->setSizeHint(0, QSize(0, 21));
-        addPlaceholderIfExpandable(child, childUrl);
+        // The scan listed only directories, so no stat per child
+        addPlaceholderIfExpandable(child, childUrl, true);
 
         // Expanding schedules that child's own scan, one level per round
         if (m_expanded.contains(childUrl))
@@ -1132,7 +1138,7 @@ void NavigationPane::rememberDrag(const QMimeData *mime)
         const bool folder = knownFolders.contains(url)
             || (url.isLocalFile() && !Locations::isGoogleDriveMount(url)
                 && QFileInfo(url.toLocalFile()).isDir());
-        if (!folder || !canAddToFavorites(url)) {
+        if (!folder || !canAddToFavorites(url, folder)) {
             m_dragFolders.clear();
             return;
         }

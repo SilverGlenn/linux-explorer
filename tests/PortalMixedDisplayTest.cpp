@@ -535,6 +535,10 @@ private:
 
     void sendReturn(Window window)
     {
+        // The picker ignores Enter briefly after it appears, so that a window
+        // popping up under someone typing elsewhere is not accepted; a person
+        // pressing Enter on purpose does so well after that
+        QTest::qWait(600);   // FileChooserDialog::inputGuardMs (500) and a margin
         XEvent event{};
         event.xkey.display = m_display;
         event.xkey.window = window;

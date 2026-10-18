@@ -10,8 +10,10 @@
 #include <KIO/DropJob>
 #include <KIO/EmptyTrashJob>
 #include <KIO/FileUndoManager>
+#include <KIO/Global>
 #include <KIO/JobTracker>
 #include <KIO/JobUiDelegateFactory>
+#include <KIO/ListJob>
 #include <KIO/MkpathJob>
 #include <KIO/OpenUrlJob>
 #include <KIO/Paste>
@@ -27,12 +29,15 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QMessageBox>
 #include <QMimeData>
+#include <QPointer>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QStringList>
 #include <algorithm>
 #include <functional>
+#include <memory>
 
 namespace {
 
@@ -62,6 +67,22 @@ QString parentPath(const QList<QUrl> &sources)
 QString translate(const char *text)
 {
     return QCoreApplication::translate("FileOps", text);
+}
+
+// A new name is one path component, or a rename becomes a move and a new folder
+// lands somewhere else, so this is the same refusal the property sheet makes
+bool isPlainFileName(const QString &name)
+{
+    return !name.isEmpty() && name != QLatin1String(".") && name != QLatin1String("..")
+        && !name.contains(QLatin1Char('/')) && !name.contains(QChar::Null);
+}
+
+bool checkFileName(const QString &name, QWidget *window)
+{
+    if (isPlainFileName(name))
+        return true;
+    KMessageBox::error(window, translate("Enter a file name without a slash."));
+    return false;
 }
 
 // For a message with room for one name, falling back to the location
@@ -264,6 +285,8 @@ public:
     {
         if (newName.isEmpty() || newName == url.fileName())
             return nullptr;
+        if (!checkFileName(newName, m_window))
+            return nullptr;
 
         QUrl target = url.adjusted(QUrl::RemoveFilename);
         target.setPath(target.path() + newName);
@@ -353,6 +376,9 @@ bool renameBatch(const QList<KFileItem> &items, const QString &baseName,
 
     if (baseName.isEmpty())
         return false;
+    // Checked once here, or each numbered name would raise its own error
+    if (!checkFileName(baseName, window))
+        return false;
 
     const QUrl firstUrl = items.first().url();
 
@@ -396,12 +422,14 @@ bool renameBatch(const QList<KFileItem> &items, const QString &baseName,
     return true;
 }
 
-void extractArchive(const QUrl &archiveUrl, const QUrl &destination,
-                    QWidget *window)
-{
-    if (!archiveUrl.isValid() || !destination.isValid())
-        return;
+namespace {
 
+// Enough that a real archive passes unasked and a bomb does not
+constexpr qulonglong kExtractEntryLimit = 20000;
+constexpr qulonglong kExtractByteLimit = qulonglong(4) << 30;
+
+void runExtraction(const QUrl &archiveUrl, const QUrl &destination, QWidget *window)
+{
     // Copied as the chosen folder, or the contents land in a real directory
     // named after the archive instead
     KIO::CopyJob *job = KIO::copyAs(archiveUrl, destination, KIO::HideProgressInfo);
@@ -412,6 +440,69 @@ void extractArchive(const QUrl &archiveUrl, const QUrl &destination,
     KIO::FileUndoManager::self()->recordCopyJob(job);
     showProgress(job, window, archiveUrl.toDisplayString(QUrl::PreferLocalFile),
                  destination.toDisplayString(QUrl::PreferLocalFile));
+}
+
+struct ArchiveTally {
+    qulonglong entries = 0;
+    qulonglong bytes = 0;
+    bool over = false;
+};
+
+} // namespace
+
+void extractArchive(const QUrl &archiveUrl, const QUrl &destination,
+                    QWidget *window)
+{
+    if (!archiveUrl.isValid() || !destination.isValid())
+        return;
+
+    // The archive worker lists the declared sizes without unpacking anything,
+    // and stops as soon as a limit is crossed, so a bomb costs one question
+    // instead of the disk it was written to fill
+    auto *scan = KIO::listRecursive(archiveUrl, KIO::HideProgressInfo);
+    scan->setUiDelegate(nullptr);
+    auto tally = std::make_shared<ArchiveTally>();
+    QPointer<QWidget> guard(window);
+
+    QObject::connect(scan, &KIO::ListJob::entries, scan,
+                     [tally](KIO::Job *listing, const KIO::UDSEntryList &entries) {
+        if (tally->over)
+            return;
+        for (const KIO::UDSEntry &entry : entries) {
+            const QString name = entry.stringValue(KIO::UDSEntry::UDS_NAME);
+            if (name == QLatin1String(".") || name == QLatin1String(".."))
+                continue;
+            ++tally->entries;
+            if (!entry.isDir())
+                tally->bytes += qulonglong(qMax<qlonglong>(0, entry.numberValue(KIO::UDSEntry::UDS_SIZE, 0)));
+        }
+        if (tally->entries > kExtractEntryLimit || tally->bytes > kExtractByteLimit) {
+            tally->over = true;
+            QMetaObject::invokeMethod(listing, [listing] {
+                listing->kill(KJob::EmitResult);
+            }, Qt::QueuedConnection);
+        }
+    });
+    QObject::connect(scan, &KJob::result, scan,
+                     [tally, guard, archiveUrl, destination](KJob *) {
+        // A listing that failed outright is left to the copy, which reports
+        // the same trouble in the usual way
+        if (tally->over) {
+            QMessageBox box(QMessageBox::Warning,
+                            translate("Extract Compressed (Zipped) Folders"),
+                            translate("%1 holds more than %2 items or %3 of data once extracted. "
+                                      "Extracting it could fill the disk. Extract anyway?")
+                                .arg(nameOf(archiveUrl))
+                                .arg(kExtractEntryLimit)
+                                .arg(KIO::convertSize(kExtractByteLimit)),
+                            QMessageBox::Yes | QMessageBox::No, guard.data());
+            box.setTextFormat(Qt::PlainText);
+            box.setDefaultButton(QMessageBox::No);
+            if (box.exec() != QMessageBox::Yes)
+                return;
+        }
+        runExtraction(archiveUrl, destination, guard.data());
+    });
 }
 
 bool canCompress()
@@ -440,7 +531,7 @@ bool compress(const QList<QUrl> &sources, QWidget *window)
 
 void createFolder(const QUrl &parentDir, const QString &name, QWidget *window)
 {
-    if (name.isEmpty())
+    if (name.isEmpty() || !checkFileName(name, window))
         return;
 
     QUrl target = parentDir;
@@ -625,19 +716,21 @@ bool openApplication(const QStringList &desktopNames, QWidget *window)
     return false;
 }
 
-QDialog *showProperties(const QList<KFileItem> &items, QWidget *window)
+QDialog *showProperties(const QList<KFileItem> &items, QWidget *window, bool readOnly)
 {
     if (items.isEmpty())
         return nullptr;
 
     // KIO keeps the specialized editors for links, desktop launchers, trash,
     // and remote protocols. Ordinary local items use Explorer's property sheet.
-    const bool specialized = std::any_of(items.cbegin(), items.cend(), [](const KFileItem &item) {
+    // Read only skips that editor entirely, being able to chmod and to rewrite
+    // a launcher's command line, so every item gets the view only sheet
+    const bool specialized = !readOnly && std::any_of(items.cbegin(), items.cend(), [](const KFileItem &item) {
         return !item.url().isLocalFile() || item.isLink() || item.isDesktopFile();
     });
     QDialog *dialog = specialized
         ? static_cast<QDialog *>(new KPropertiesDialog(KFileItemList(items), window))
-        : static_cast<QDialog *>(new PropertiesDialog(KFileItemList(items), window));
+        : static_cast<QDialog *>(new PropertiesDialog(KFileItemList(items), window, readOnly));
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
     return dialog;

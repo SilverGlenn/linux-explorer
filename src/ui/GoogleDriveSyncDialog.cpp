@@ -327,6 +327,8 @@ GoogleDriveSyncDialog::GoogleDriveSyncDialog(QWidget *parent,
     setMinimumWidth(620);
     resize(680, 560);
     m_pages->setCurrentWidget(m_managerPage);
+    // Status is polled quickly only while this dialog is open to show it
+    m_controller->watch();
     m_controller->refresh();
     // Cached pair metadata remains useful while the worker is stopped or
     // needs authorization; refresh will replace it when the current status
@@ -342,6 +344,7 @@ GoogleDriveSyncDialog::GoogleDriveSyncDialog(QWidget *parent,
 GoogleDriveSyncDialog::~GoogleDriveSyncDialog()
 {
     disconnect(m_controller, nullptr, this, nullptr);
+    m_controller->unwatch();
     if (m_previewPending || m_requestingPermission || m_folderRequestPending)
         m_controller->cancelSetup();
 }

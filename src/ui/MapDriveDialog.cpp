@@ -26,10 +26,28 @@ struct ShareType {
 const ShareType kShareTypes[] = {
     {QT_TRANSLATE_NOOP("MapDriveDialog", "Windows share (SMB)"), "smb",  "network-server"},
     {QT_TRANSLATE_NOOP("MapDriveDialog", "SSH / SFTP"),          "sftp", "folder-remote"},
-    {QT_TRANSLATE_NOOP("MapDriveDialog", "FTP"),                 "ftp",  "folder-remote"},
-    {QT_TRANSLATE_NOOP("MapDriveDialog", "WebDAV"),              "webdav", "folder-remote"},
+    {QT_TRANSLATE_NOOP("MapDriveDialog", "FTP (not encrypted)"), "ftp",  "folder-remote"},
+    {QT_TRANSLATE_NOOP("MapDriveDialog", "WebDAV (not encrypted)"), "webdav", "folder-remote"},
     {QT_TRANSLATE_NOOP("MapDriveDialog", "NFS"),                 "nfs",  "folder-remote"},
 };
+
+// The schemes a typed address may name. Anything else is refused, since KIO
+// has workers that run programs (fish runs ssh) or reach privileged files
+// (admin), and an address typed or pasted here must not reach those.
+bool isMappableScheme(const QString &scheme)
+{
+    static const QStringList allowed{
+        QStringLiteral("smb"), QStringLiteral("sftp"), QStringLiteral("ftp"),
+        QStringLiteral("ftps"), QStringLiteral("webdav"), QStringLiteral("webdavs"),
+        QStringLiteral("nfs")};
+    return allowed.contains(scheme);
+}
+
+// Sent with no encryption, so the user is told rather than left to assume
+bool isCleartextScheme(const QString &scheme)
+{
+    return scheme == QLatin1String("ftp") || scheme == QLatin1String("webdav");
+}
 
 } // namespace
 
@@ -65,7 +83,16 @@ QUrl MapDriveDialog::urlFor(const QString &input, const QString &scheme,
     if (segments.isEmpty())
         return {};
 
+    // Nothing but an allowlisted scheme, matched case-insensitively
+    actualScheme = actualScheme.trimmed().toLower();
+    if (!isMappableScheme(actualScheme))
+        return {};
+
+    // A host starting with a dash reads as an option to anything that passes
+    // it on to a program
     const QString host = segments.first();
+    if (host.startsWith(QLatin1Char('-')))
+        return {};
     const QStringList pathSegments = segments.mid(1);
     const QString userName = user.trimmed();
 
@@ -173,7 +200,10 @@ void MapDriveDialog::updateOkState()
     m_ok->setEnabled(url.isValid());
 
     if (url.isValid())
-        m_preview->setText(tr("Will open: %1").arg(url.toDisplayString()));
+        m_preview->setText(isCleartextScheme(url.scheme())
+            ? tr("Will open: %1\nThis connection is not encrypted, so anything sent over it, "
+                 "a password included, can be read on the network.").arg(url.toDisplayString())
+            : tr("Will open: %1").arg(url.toDisplayString()));
     else
         m_preview->clear();
 }

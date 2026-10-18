@@ -1,5 +1,7 @@
 #include "PortalChooserOptions.h"
 
+#include <algorithm>
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -10,6 +12,39 @@ namespace {
 bool text(const QString &value, int limit, bool nonempty = false)
 {
     return (!nonempty || !value.isEmpty()) && value.size() <= limit && !value.contains(QChar::Null);
+}
+
+// Control characters and the bidi controls (U+202A-202E, U+2066-2069,
+// U+200E/F, U+061C) can disguise a name or caption. Other format characters,
+// the zero-width joiners above all, are ordinary in Persian, Indic and emoji
+// names and stay. The private service rejects control text too.
+bool disguising(QChar ch)
+{
+    const ushort c = ch.unicode();
+    return ch.category() == QChar::Other_Control
+        || (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069)
+        || c == 0x200E || c == 0x200F || c == 0x061C;
+}
+
+bool hasHiddenFormatting(const QString &value)
+{
+    return std::any_of(value.cbegin(), value.cend(), disguising);
+}
+
+// Captions are display-only: strip what could disguise them, then truncate.
+QString caption(const QString &value, qsizetype limit)
+{
+    QString result;
+    for (const QChar ch : value) {
+        if (!disguising(ch))
+            result += ch;
+    }
+    if (result.size() > limit) {
+        result.truncate(limit);
+        if (result.back().isHighSurrogate())
+            result.chop(1);
+    }
+    return result;
 }
 
 QString mnemonic(const QString &value)
@@ -158,7 +193,7 @@ PortalChooserOptions portalChooserOptions(ChooserMode mode, const QString &paren
 {
     PortalChooserOptions config;
     config.chooser.mode = mode;
-    config.chooser.title = title;
+    config.chooser.title = caption(title, 256);
     config.chooser.filterCaseSensitivity = Qt::CaseSensitive;
     auto invalid = [&config](const QString &error) {
         config.error = error;
@@ -181,7 +216,7 @@ PortalChooserOptions portalChooserOptions(ChooserMode mode, const QString &paren
         }
         // Unknown backend options are intentionally ignored for forward compatibility.
     }
-    config.chooser.acceptLabel = mnemonic(wire.value(QStringLiteral("accept_label")).toString());
+    config.chooser.acceptLabel = mnemonic(caption(wire.value(QStringLiteral("accept_label")).toString(), 64));
     config.chooser.multiple = wire.value(QStringLiteral("multiple"), false).toBool();
     config.chooser.directory = wire.value(QStringLiteral("directory"), false).toBool();
     if (mode != ChooserMode::OpenFile && (config.chooser.multiple || config.chooser.directory))
@@ -203,9 +238,9 @@ PortalChooserOptions portalChooserOptions(ChooserMode mode, const QString &paren
         return invalid(QStringLiteral("current_file must be a terminated, lossless absolute filesystem path."));
     const QString name = wire.value(QStringLiteral("current_name")).toString();
     if (!name.isEmpty() && (QFile::encodeName(name).size() > 255 || name == QLatin1String(".")
-        || name == QLatin1String("..") || name.contains(QLatin1Char('/'))
+        || name == QLatin1String("..") || name.contains(QLatin1Char('/')) || hasHiddenFormatting(name)
         || QFile::decodeName(QFile::encodeName(name)) != name))
-        return invalid(QStringLiteral("current_name must be a lossless leaf filename."));
+        return invalid(QStringLiteral("current_name must be a lossless leaf filename without control or bidi formatting characters."));
     if (mode == ChooserMode::SaveFile && !file.isEmpty()) {
         const QFileInfo info(file);
         QString leaf;

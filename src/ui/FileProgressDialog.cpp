@@ -243,6 +243,8 @@ QWidget *FileProgressDialog::buildDetails()
         grid->addWidget(captionLabel, row, 0, Qt::AlignTop);
 
         *valueOut = Aero::label(QString(), 9);
+        // File names and paths, never markup
+        (*valueOut)->setTextFormat(Qt::PlainText);
         grid->addWidget(*valueOut, row, 1);
     };
 

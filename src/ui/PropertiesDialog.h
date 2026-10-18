@@ -26,7 +26,11 @@ class PropertiesDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit PropertiesDialog(const KFileItemList &items, QWidget *parent = nullptr);
+    // A view only sheet changes nothing: no rename, attributes, file type
+    // association or desktop editor, for the file picker to show on behalf of
+    // the requesting application
+    explicit PropertiesDialog(const KFileItemList &items, QWidget *parent = nullptr,
+                              bool readOnly = false);
     ~PropertiesDialog() override;
 
     QUrl url() const;
@@ -96,6 +100,7 @@ private:
     quint64 m_totalFolders = 0;
     int m_sizesRemaining = 0;
     bool m_sizeIncomplete = false;
+    bool m_viewOnly = false;
     bool m_busy = false;
     bool m_closeAfterApply = false;
     bool m_applyReadOnly = false;

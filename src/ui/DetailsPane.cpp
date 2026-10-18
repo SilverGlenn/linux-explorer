@@ -3,6 +3,7 @@
 #include "aero/artwork.h"
 #include "aero/icons.h"
 #include "aero/text.h"
+#include "model/ItemIcons.h"
 
 #include <KIO/Global>
 #include <QDateTime>
@@ -10,6 +11,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QTextDocument>
 #include <QLocale>
 #include <QSysInfo>
 #ifdef Q_OS_LINUX
@@ -19,11 +21,18 @@
 namespace {
 class ElidingLabel : public QLabel {
 public:
-    using QLabel::QLabel;
+    explicit ElidingLabel(QWidget *parent = nullptr) : QLabel(parent)
+    {
+        // File names and volume labels, never markup
+        setTextFormat(Qt::PlainText);
+    }
     void setFullText(const QString &text)
     {
         m_full = text;
-        setToolTip(text);
+        // Tooltips auto-detect rich text too, so a name like "<b>x</b>" is
+        // escaped, and only then, ordinary names staying plain
+        setToolTip(Qt::mightBeRichText(text)
+            ? QStringLiteral("<qt>%1</qt>").arg(text.toHtmlEscaped()) : text);
         setAccessibleName(text);
         elide();
     }
@@ -170,7 +179,7 @@ void DetailsPane::showSelection(const QList<KFileItem> &items)
         const QDateTime created = item.isDir() ? QDateTime() : item.time(KFileItem::CreationTime);
         const QString createdText = created.isValid()
             ? tr("Date created: %1").arg(QLocale().toString(created, QLocale::ShortFormat)) : QString();
-        setContent(QIcon::fromTheme(item.iconName(), Aero::themeIcon({"folder"})),
+        setContent(ItemIcons::safeIcon(item, Aero::themeIcon({"folder"})),
                    item.text(), item.isDir() ? tr("File folder") : item.mimeComment(), date,
                    item.isDir() ? QString() : tr("Size: %1").arg(KIO::convertSize(item.size())), createdText);
         return;

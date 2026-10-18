@@ -30,6 +30,7 @@
 #include "aero/arrows.h"
 #include "aero/buttons.h"
 #include "aero/contextmenu.h"
+#include "aero/sounds.h"
 #include "aero/splitter.h"
 #include "aero/strips.h"
 #include "aero/text.h"
@@ -180,10 +181,6 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
         initialSize = initialSize.boundedTo(screen->availableGeometry().size() - QSize(24, 48));
     resize(initialSize.expandedTo(minimumSize()));
 
-    m_navSound.setSource(QUrl::fromLocalFile(
-        "/usr/share/sounds/Windows 7/og/Windows Navigation Start.wav"));
-    m_navSound.setVolume(1.0f);
-
     buildNavigationBar();
 
     auto *central = new QWidget;
@@ -308,13 +305,10 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
             [this](const QModelIndex &first, const QModelIndex &last) {
         invalidateSelection();
         if (isComputerView() || isLibrariesView()) return;
-        const QModelIndexList selected = m_fileView->selectedIndexes();
-        const bool selectionChanged = std::any_of(selected.cbegin(), selected.cend(),
-            [&first, &last](const QModelIndex &index) {
-                return index.parent() == first.parent()
-                    && index.row() >= first.row() && index.row() <= last.row();
-            });
-        if (!selectionChanged) return; // avoid rebuilding chrome for unrelated thumbnails
+        // Per changed row against the selection model, since building every
+        // selected index for each thumbnail is quadratic in a big folder
+        if (!m_fileView->selectionTouches(first, last))
+            return; // avoid rebuilding chrome for unrelated thumbnails
         updateDetailsPane();
         updateActionStates();
         rebuildContextualCommands();
@@ -862,7 +856,11 @@ void MainWindow::buildNavigationBar()
                                          layout, this);
     m_navigation->setShowHiddenFilesProvider([this] { return m_model->showHiddenFiles(); });
     connect(m_navigation, &BrowserNavigation::locationChanged, this, &MainWindow::showLocation);
-    connect(m_navigation, &BrowserNavigation::navigated, &m_navSound, &QSoundEffect::play);
+    // The shared helper builds the effect on first play and keeps it, rather
+    // than every window decoding the file at construction
+    connect(m_navigation, &BrowserNavigation::navigated, this, [] {
+        Aero::playSound(QStringLiteral("Windows Navigation Start"));
+    });
     connect(m_navigation, &BrowserNavigation::refreshRequested, this, &MainWindow::refresh);
     connect(m_navigation, &BrowserNavigation::typedFileActivated, this, [this](const QUrl &url) {
         FileOps::openItem(KFileItem(url), this);
@@ -881,10 +879,25 @@ void MainWindow::buildNavigationBar()
     m_searchBox->setToolTip(tr("Filters this folder as you type. Press Enter to "
                                "search subfolders as well."));
 
-    connect(m_searchBox, &QLineEdit::textChanged, this, [this](const QString &text) {
-        m_model->setNameFilter(text);
+    // Refiltering the listing per keystroke is wasted work while typing
+    m_searchTimer = new QTimer(this);
+    m_searchTimer->setSingleShot(true);
+    m_searchTimer->setInterval(150);
+    const auto applyFilter = [this] {
+        m_model->setNameFilter(m_searchBox->text());
         updateDetailsPane();
         updateListMessage();
+    };
+    connect(m_searchTimer, &QTimer::timeout, this, applyFilter);
+    connect(m_searchBox, &QLineEdit::textChanged, this,
+            [this, applyFilter](const QString &text) {
+        // Clearing is applied at once so the full listing comes straight back
+        if (text.isEmpty()) {
+            m_searchTimer->stop();
+            applyFilter();
+        } else {
+            m_searchTimer->start();
+        }
     });
     connect(m_searchBox, &QLineEdit::returnPressed, this, &MainWindow::startSearch);
 
@@ -1335,13 +1348,24 @@ QWidget *MainWindow::buildBody()
     });
     connect(m_fileView, &FileView::contextMenuRequested,
             this, &MainWindow::showContextMenu);
-    connect(m_fileView, &FileView::selectionChanged, this, [this] {
-        invalidateSelection();
+    // A rubber band fires selectionChanged on every mouse move, so the chrome
+    // refresh is coalesced. The cache is still dropped immediately so
+    // selectedItems() is never stale in between.
+    m_selectionTimer = new QTimer(this);
+    m_selectionTimer->setSingleShot(true);
+    m_selectionTimer->setInterval(20);
+    connect(m_selectionTimer, &QTimer::timeout, this, [this] {
         updateDetailsPane();
-        updateActionStates();
         rebuildContextualCommands();
         if (m_previewPane->isVisible())
             m_previewPane->setItems(selectedItems());
+    });
+    connect(m_fileView, &FileView::selectionChanged, this, [this] {
+        invalidateSelection();
+        // At once, a shortcut such as F2 or Delete pressed straight after a
+        // selection having to act on it rather than on the one before
+        updateActionStates();
+        m_selectionTimer->start();
     });
     connect(m_fileView, &FileView::renameRequested, this, &MainWindow::applyRename);
     connect(m_fileView, &FileView::dropped, this, &MainWindow::handleDrop);
@@ -1573,6 +1597,8 @@ void MainWindow::showLocation(const QUrl &url)
 
     // A stale filter would narrow the new folder with no visible cause, and
     // search results keep their term, that being what produced them
+    // A filter still waiting from the last keystrokes belongs to the old folder
+    m_searchTimer->stop();
     if (Locations::isSearch(url)) {
         QSignalBlocker blocker(m_searchBox);
         m_searchBox->setText(Locations::searchTerm(url));
@@ -2093,9 +2119,11 @@ void MainWindow::reportListingFailure(int error, const QUrl &url)
 
     // Only where elevation could change the answer, an elevated view having
     // nothing above it and a server refusing on its own account, so both of
-    // those get Windows' flat refusal instead
+    // those get Windows' flat refusal instead. Removable media and foreign
+    // mounts are refused the same way.
     const bool alreadyAdmin = folder.scheme() == QLatin1String("admin");
-    if (alreadyAdmin || !folder.isLocalFile() || Locations::isGoogleDriveMount(folder)) {
+    if (alreadyAdmin || !folder.isLocalFile() || Locations::isGoogleDriveMount(folder)
+        || !AccessDialogs::canOfferElevation(folder.toLocalFile())) {
         AccessDialogs::showLocationUnavailable(this, path);
         return;
     }
@@ -2106,7 +2134,7 @@ void MainWindow::reportListingFailure(int error, const QUrl &url)
         name = path;
     // Windows ends the sequence with the same box whether the rights were
     // declined or simply not granted
-    if (!AccessDialogs::askForAdminAccess(this, name)) {
+    if (!AccessDialogs::askForAdminAccess(this, name, path)) {
         AccessDialogs::showLocationUnavailable(this, path);
         return;
     }

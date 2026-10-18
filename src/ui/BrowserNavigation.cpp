@@ -19,7 +19,9 @@
 #include <KIO/StatJob>
 #include <QAction>
 #include <QCompleter>
+#include <QCollator>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QFileSystemModel>
 #include <QGraphicsOpacityEffect>
@@ -28,6 +30,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QSet>
+#include <algorithm>
 #include <memory>
 #include <sys/stat.h>
 #include <QProgressBar>
@@ -54,6 +57,8 @@ constexpr int kProgressFinishDuration = 180;
 
 // Or a directory with thousands of subfolders builds a menu off the screen
 constexpr int kMaxCrumbMenuEntries = 60;
+// A sanity bound on what one dropdown reads from a parent with huge numbers of folders
+constexpr int kMaxCrumbMenuNames = 50000;
 
 constexpr int kMaxRecentEntries = 15;
 
@@ -819,12 +824,24 @@ void BrowserNavigation::showCrumbMenu(const QUrl &parent, const QPoint &globalPo
         if (showHidden)
             filters |= QDir::Hidden;
 
-        QDir dir(parent.toLocalFile());
-        dir.setFilter(filters);
-        dir.setSorting(QDir::Name | QDir::LocaleAware | QDir::IgnoreCase);
+        // Only the first few of a huge parent are ever shown, so names alone
+        // are read and sorted, and file information is made only for those few.
+        // The slack is for system folders skipped below.
+        QStringList names;
+        QDirIterator iterator(parent.toLocalFile(), filters);
+        while (iterator.hasNext() && names.size() < kMaxCrumbMenuNames)
+            names.append(iterator.nextFileInfo().fileName());
+        QCollator collator;
+        collator.setCaseSensitivity(Qt::CaseInsensitive);
+        std::sort(names.begin(), names.end(), [&collator](const QString &left, const QString &right) {
+            return collator.compare(left, right) < 0;
+        });
+        QFileInfoList entries;
+        const QDir dir(parent.toLocalFile());
+        for (int i = 0; i < names.size() && entries.size() < kMaxCrumbMenuEntries * 4; ++i)
+            entries.append(QFileInfo(dir, names.at(i)));
 
         const QIcon folderIcon = Aero::themeIcon({"folder"});
-        const QFileInfoList entries = dir.entryInfoList();
         const QString here = QDir::cleanPath(currentUrl().toLocalFile());
         int looked = 0;
         for (const QFileInfo &entry : entries) {

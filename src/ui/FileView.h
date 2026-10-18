@@ -46,6 +46,10 @@ public:
     QItemSelectionModel *selectionModel() const;
     QModelIndexList selectedIndexes() const;
 
+    // Whether any selected row lies in the given range of the flat listing,
+    // without building the full selected index list
+    bool selectionTouches(const QModelIndex &first, const QModelIndex &last) const;
+
     // Where a paste or a drop onto empty space lands
     void setDestination(const QUrl &url) { m_destination = url; }
 
@@ -156,6 +160,7 @@ private:
     // Only one generator may observe decoration writes on the shared model.
     KAbstractViewAdapter *m_previewAdapter = nullptr;
     KFilePreviewGenerator *m_previews = nullptr;
+    bool m_previewsSuppressed = false;
     QTimer *m_previewUpdateTimer = nullptr;
 
     Settings::ViewMode m_mode = Settings::ViewMode::Details;

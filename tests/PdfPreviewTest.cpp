@@ -346,8 +346,9 @@ private slots:
         PreviewPane pane;
         pane.setItems({KFileItem(QUrl(QStringLiteral("https://invalid.example/private.pdf")),
                                 QStringLiteral("application/pdf"), 0)});
-        QCOMPARE(pane.findChild<QLabel *>(QStringLiteral("previewPlaceholder"))->text(),
-                 QStringLiteral("PDF preview is available for local files only."));
+        // Selection changes are coalesced before a preview loads
+        QTRY_COMPARE(pane.findChild<QLabel *>(QStringLiteral("previewPlaceholder"))->text(),
+                     QStringLiteral("PDF preview is available for local files only."));
     }
 
     void missingRendererIsReported()

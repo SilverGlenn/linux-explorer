@@ -18,6 +18,19 @@ bool hasControl(const QString &value)
     }
     return false;
 }
+
+// Tokens are opaque startup/activation ids: short printable ASCII, no spaces.
+// Anything else is dropped rather than handed to the window system.
+bool wellFormedToken(const QString &token)
+{
+    if (token.isEmpty() || token.size() > 256)
+        return false;
+    for (QChar ch : token) {
+        if (ch.unicode() <= 0x20 || ch.unicode() >= 0x7f)
+            return false;
+    }
+    return true;
+}
 } // namespace
 
 void Explorer::configureChooserGlass(QDialog *dialog, QWidget *contents, QWidget *navigation)
@@ -79,13 +92,15 @@ void Explorer::showChooserWindow(QDialog *dialog, const ChooserWindowOptions &op
     } else if (presentation.parentWindow.startsWith(QLatin1String("wayland:"))) {
         KWindowSystem::setMainWindow(window, presentation.parentWindow.mid(8));
     }
-    if (!presentation.activationToken.isEmpty() && KWindowSystem::isPlatformX11())
-        KStartupInfo::setNewStartupId(window, presentation.activationToken.toUtf8());
+    const QString token = wellFormedToken(presentation.activationToken)
+        ? presentation.activationToken : QString();
+    if (!token.isEmpty() && KWindowSystem::isPlatformX11())
+        KStartupInfo::setNewStartupId(window, token.toUtf8());
     dialog->show();
     QGuiApplication::setDesktopFileName(previous);
-    if (!presentation.activationToken.isEmpty()) {
+    if (!token.isEmpty()) {
         if (KWindowSystem::isPlatformWayland())
-            KWindowSystem::setCurrentXdgActivationToken(presentation.activationToken);
+            KWindowSystem::setCurrentXdgActivationToken(token);
         KWindowSystem::activateWindow(window);
     }
 }

@@ -72,6 +72,9 @@ private:
     // Coalesces bursts of source signals, previews changing a row per file
     void scheduleRebuild();
 
+    // Inserts alone are held back while the listing is still arriving
+    void scheduleInsertRebuild();
+
     void computeGroups(QList<Group> *groups,
                        QHash<int, RowPosition> *lookup) const;
     QString groupTitleFor(int sourceRow, int *rank) const;
@@ -84,4 +87,5 @@ private:
     QHash<int, RowPosition> m_rowLookup;
 
     int m_groupColumn = -1;
+    bool m_loading = false;
 };

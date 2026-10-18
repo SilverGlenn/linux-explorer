@@ -11,6 +11,7 @@ No system/default rclone configuration is read or changed.
 import argparse
 import contextlib
 import csv
+import ctypes
 import datetime
 import fcntl
 import getpass
@@ -21,6 +22,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import resource
 import select
 import shutil
 import signal
@@ -38,17 +40,89 @@ class HelperError(Exception):
     """A safe, credential-free error for display."""
 
 
+# Variables that make the dynamic loader, the interpreter, or libc load code or
+# data of the caller's choosing. glibc itself ignores several for set-id
+# programs, and none of them has any business in a child of this helper.
+_UNSAFE_ENVIRONMENT_PREFIXES = ("RCLONE_", "LD_", "PYTHON")
+_UNSAFE_ENVIRONMENT_NAMES = {"GCONV_PATH", "LOCPATH", "NLSPATH", "HOSTALIASES", "RES_OPTIONS"}
+
+
 def clean_environment():
     # Ambient rclone options can override config, credentials, read-only mode,
-    # logging, or remote identity. Never inherit any of them.
+    # logging, or remote identity. Never inherit any of them. Proxy and TLS
+    # variables (HTTPS_PROXY, SSL_CERT_FILE...) are deliberately kept, since
+    # rclone needs them to reach Google from behind a proxy.
     return {key: value for key, value in os.environ.items()
-            if not key.lstrip("_").upper().startswith("RCLONE_")}
+            if not key.lstrip("_").upper().startswith(_UNSAFE_ENVIRONMENT_PREFIXES)
+            and key.upper() not in _UNSAFE_ENVIRONMENT_NAMES}
+
+
+def harden_process(allow_inspection=False):
+    """Keep this process's memory out of core dumps and away from ptrace.
+
+    Best effort: failure leaves the process as it was. A non-dumpable process
+    also makes its own /proc/self/fdinfo files unreadable to itself, so the one
+    command that reads them, which handles no credentials, opts out.
+    """
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ValueError, OSError):
+        pass
+    if allow_inspection:
+        return
+    try:
+        PR_SET_DUMPABLE = 4
+        ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def writable_by_others(info):
+    """Whether another account could rewrite this file. Group write is harmless
+    on a file of this user's in their own private group, which is what a
+    umask of 002 (Ubuntu's default) gives a binary installed under ~/.local."""
+    if info.st_mode & 0o002:
+        return True
+    if not info.st_mode & 0o020:
+        return False
+    if info.st_uid != os.getuid() or info.st_gid != os.getgid():
+        return True
+    try:
+        group = grp.getgrgid(info.st_gid)
+    except KeyError:
+        return True
+    return bool(group.gr_mem) and group.gr_mem != [pwd.getpwuid(os.getuid()).pw_name]
+
+
+def trusted_file(path):
+    """A regular file, symlinks resolved, owned by root or this user and not
+    writable by anyone else, so another account cannot have swapped it."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return False
+    return (stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid())
+            and not writable_by_others(info))
 
 
 def require_binary(name):
+    if name == "cat":
+        # Carries the config key on the password pipe, so it comes from a fixed
+        # system location and must belong to root, never from the PATH.
+        for directory in ("/usr/bin", "/bin"):
+            candidate = os.path.join(directory, name)
+            try:
+                info = os.stat(candidate)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022:
+                return candidate
+        raise HelperError(f"Required program is unavailable: {name}.")
     result = shutil.which(name)
     if not result:
         raise HelperError(f"Required program is unavailable: {name}.")
+    if name == "rclone" and not trusted_file(result):
+        raise HelperError("The rclone program has unsafe ownership or permissions.")
     return result
 
 
@@ -834,6 +908,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if os.getuid() == 0:
         parser.error("Run this helper as your normal desktop user, not root.")
+    harden_process(allow_inspection=args.command == "app-quota")
     previous_umask = os.umask(0o077)
     def interrupted(_number, _frame):
         raise KeyboardInterrupt()
