@@ -1229,6 +1229,11 @@ void NavigationPane::showContextMenu(const QPoint &pos)
         placeIndex = m_places->index(placeRow, 0);
 
     QMenu menu(this);
+    // The local-only chooser shares this pane but handles none of the window
+    // commands. Offer each only in a host that can perform it.
+    const auto handled = [this](auto signal) {
+        return isSignalConnected(QMetaMethod::fromSignal(signal));
+    };
 
     if (item->data(0, kGroupIdRole).toString() == QLatin1String("favorites")) {
         const QUrl current = m_currentUrl;
@@ -1240,30 +1245,30 @@ void NavigationPane::showContextMenu(const QPoint &pos)
 
     if (url.isValid()) {
         menu.addAction(tr("Open"), this, [this, url] { Q_EMIT urlActivated(url); });
-        if (item->data(0, kGoogleDriveRole).toBool())
+        if (item->data(0, kGoogleDriveRole).toBool() && handled(&NavigationPane::newWindowRequested))
             menu.addAction(tr("Open in new window"), this,
                            [this, url] { Q_EMIT newWindowRequested(url); });
         menu.addSeparator();
     }
 
-    if (url.scheme() == QLatin1String("trash")) {
+    if (url.scheme() == QLatin1String("trash") && handled(&NavigationPane::emptyTrashRequested)) {
         menu.addAction(tr("Empty Recycle Bin"), this,
                        [this] { Q_EMIT emptyTrashRequested(); });
         menu.addSeparator();
     }
 
-    if (Locations::isComputer(url)) {
+    if (Locations::isComputer(url) && handled(&NavigationPane::connectDrivesRequested)) {
         menu.addAction(tr("Connect drives..."), this,
                        [this] { Q_EMIT connectDrivesRequested(); });
         menu.addSeparator();
     }
 
-    if (url.scheme() == QLatin1String("remote")) {
-        menu.addAction(tr("Map network drive..."), this,
-                       [this] { Q_EMIT mapDriveRequested(); });
-        // The local-only chooser shares this pane but has no account setup
-        // handler. Offer the command only in a host that can perform it.
-        if (isSignalConnected(QMetaMethod::fromSignal(&NavigationPane::googleDriveRequested)))
+    if (url.scheme() == QLatin1String("remote")
+        && (handled(&NavigationPane::mapDriveRequested) || handled(&NavigationPane::googleDriveRequested))) {
+        if (handled(&NavigationPane::mapDriveRequested))
+            menu.addAction(tr("Map network drive..."), this,
+                           [this] { Q_EMIT mapDriveRequested(); });
+        if (handled(&NavigationPane::googleDriveRequested))
             menu.addAction(tr("Connect Google Drive..."), this,
                            [this] { Q_EMIT googleDriveRequested(); });
         menu.addSeparator();

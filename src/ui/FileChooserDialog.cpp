@@ -4,6 +4,7 @@
 #include "ComputerView.h"
 #include "ChooserWindow.h"
 #include "DirectoryModel.h"
+#include "FileOps.h"
 #include "FileView.h"
 #include "Libraries.h"
 #include "LibrariesView.h"
@@ -16,6 +17,8 @@
 #include "aero/icons.h"
 #include "aero/artwork.h"
 #include "aero/arrows.h"
+#include "aero/buttons.h"
+#include "aero/contextmenu.h"
 #include "aero/palette.h"
 #include "aero/text.h"
 #include "aero/strips.h"
@@ -38,6 +41,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPushButton>
@@ -53,6 +57,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <climits>
 #include <unistd.h>
 
@@ -216,8 +221,15 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
 
     auto *commandBar = Aero::commandBar(Explorer::Art::CommandBar);
     commandBar->row()->addWidget(Aero::bodyLabel(folderMode() ? tr("Select a folder") : tr("Select a file")));
+    // Win7's dialogs keep New folder on the bar, as Explorer does
+    m_newFolderButton = new Aero::MenuButton(tr("New folder"));
+    m_newFolderButton->setObjectName(QStringLiteral("chooserNewFolderButton"));
+    static_cast<Aero::MenuButton *>(m_newFolderButton)->setShowArrow(false);
+    connect(m_newFolderButton, &QToolButton::clicked, this, &FileChooserDialog::createNewFolder);
+    commandBar->row()->addWidget(m_newFolderButton);
     commandBar->row()->addStretch();
     auto *modes = new QActionGroup(this);
+    m_viewModes = modes;
     const QList<QPair<Settings::ViewMode, QString>> viewModes = {
         {Settings::ViewMode::ExtraLargeIcons, tr("Extra large icons")},
         {Settings::ViewMode::LargeIcons, tr("Large icons")},
@@ -454,6 +466,58 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     connect(m_name, &QLineEdit::textChanged, this, [this] {
         m_selectionIntent = false;
     });
+
+    // Scoped to the file list, so the name box keeps its own clipboard keys
+    const auto fileAction = [this](const QString &text, const QKeySequence &key, auto slot) {
+        auto *action = new QAction(text, this);
+        action->setShortcut(key);
+        action->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        connect(action, &QAction::triggered, this, slot);
+        m_files->addAction(action);
+        return action;
+    };
+    const auto selection = [this] { return m_model->itemsForIndexes(m_files->selectedIndexes()); };
+    m_actCut = fileAction(tr("Cut"), QKeySequence::Cut, [selection] {
+        FileOps::cutToClipboard(selection());
+    });
+    m_actCopy = fileAction(tr("Copy"), QKeySequence::Copy, [selection] {
+        FileOps::copyToClipboard(selection());
+    });
+    m_actPaste = fileAction(tr("Paste"), QKeySequence::Paste, [this] {
+        if (canModifyFolder() && FileOps::canPaste())
+            FileOps::pasteFromClipboard(currentUrl(), this);
+    });
+    m_actDelete = fileAction(tr("Delete"), QKeySequence::Delete, [this, selection] {
+        const auto items = selection();
+        if (items.isEmpty() || !canModifyFolder()) return;
+        QList<QUrl> urls;
+        for (const auto &item : items) urls.append(item.url());
+        FileOps::moveToTrash(urls, this);
+    });
+    m_actRename = fileAction(tr("Rename"), QKeySequence(Qt::Key_F2), [this, selection] {
+        const auto items = selection();
+        if (items.size() == 1 && canModifyFolder())
+            m_files->renameItem(items.first().url());
+    });
+    m_actProperties = fileAction(tr("Properties"), QKeySequence(Qt::ALT | Qt::Key_Return), [this, selection] {
+        const auto items = selection();
+        if (!items.isEmpty()) FileOps::showProperties(items, this);
+        else if (localFileUrl(currentUrl()))
+            FileOps::showProperties({KFileItem(currentUrl())}, this);
+    });
+    connect(m_files, &FileView::contextMenuRequested, this, &FileChooserDialog::showContextMenu);
+    connect(m_files, &FileView::renameRequested, this, [this](const QUrl &url, const QString &name) {
+        if (!FileOps::rename(url, name, this))
+            m_files->selectUrl(url);
+    });
+    connect(&FileOps::GLOBAL_RENAME_CONTEXT, &FileOps::GlobalRenameContext::finishRename,
+            this, [this](const QUrl &url) { m_files->selectUrl(url); });
+    // Creating returns before the lister has seen the folder, so its rename
+    // waits for the listing to report it
+    connect(m_model, &DirectoryModel::itemsAdded, this, [this] {
+        if (m_pendingRename.isEmpty() || !m_files->selectUrl(m_pendingRename, true)) return;
+        m_pendingRename.clear();
+    });
     connect(m_search, &QLineEdit::textChanged, m_model, &DirectoryModel::setNameFilter);
     connect(m_filters, &QComboBox::currentIndexChanged, this, &FileChooserDialog::applyFilter);
     connect(m_buttons, &QDialogButtonBox::accepted, this, &FileChooserDialog::accept);
@@ -478,6 +542,8 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
     // Also covers the shared address editor, which is created lazily.
     qApp->installEventFilter(this);
     restrictViews(m_places);
+    for (auto *view : m_places->findChildren<QAbstractItemView *>())
+        view->setContextMenuPolicy(Qt::CustomContextMenu);
     restrictViews(m_libraries);
     restrictViews(m_computer);
     applyFilter();
@@ -618,6 +684,128 @@ void FileChooserDialog::showLocation(const QUrl &url)
         m_files->setStatusMessage({});
         m_model->setUrl(url);
     }
+    m_pendingRename.clear();
+    updateFolderCommands();
+}
+
+bool FileChooserDialog::canModifyFolder() const
+{
+    const QUrl folder = currentUrl();
+    // Drive mounts are read through their own sync, never written from here
+    return m_stack->currentWidget() == m_files && localFileUrl(folder)
+        && !Locations::isGoogleDriveMount(folder)
+        && writable(QFileInfo(folder.toLocalFile()));
+}
+
+void FileChooserDialog::updateFolderCommands()
+{
+    const bool shellRoot = m_stack->currentWidget() != m_files;
+    m_newFolderButton->setVisible(!shellRoot);
+    m_newFolderButton->setEnabled(canModifyFolder());
+}
+
+void FileChooserDialog::createNewFolder()
+{
+    if (!canModifyFolder()) return;
+    const QUrl folder = currentUrl();
+    const QDir dir(folder.toLocalFile());
+    QString name = tr("New folder");
+    for (int n = 2; QFileInfo::exists(dir.filePath(name)); ++n)
+        name = tr("New folder (%1)").arg(n);
+    m_pendingRename = QUrl::fromLocalFile(dir.filePath(name));
+    m_files->focusView();
+    FileOps::createFolder(folder, name, this);
+}
+
+void FileChooserDialog::showContextMenu(const QPoint &globalPos, bool onItem)
+{
+    const auto items = m_model->itemsForIndexes(m_files->selectedIndexes());
+    const bool modifiable = canModifyFolder();
+    QMenu menu(this);
+    Aero::setPointSize(&menu, 9);
+    const auto add = [&menu](QAction *source, bool enabled) {
+        // Shortcut captions stay off context menus, as in Explorer's
+        auto *action = menu.addAction(source->text(), source, &QAction::trigger);
+        action->setEnabled(enabled);
+        return action;
+    };
+
+    if (onItem && !items.isEmpty()) {
+        menu.setObjectName(QStringLiteral("chooserItemContextMenu"));
+        const bool dirs = std::all_of(items.cbegin(), items.cend(),
+                                      [](const KFileItem &item) { return item.isDir(); });
+        const bool files = std::none_of(items.cbegin(), items.cend(),
+                                        [](const KFileItem &item) { return item.isDir(); });
+        QAction *open = nullptr;
+        if (items.size() == 1 && dirs) {
+            const QUrl url = items.first().url();
+            open = menu.addAction(tr("Open"), this, [this, url] { navigateTo(url); });
+        }
+        QAction *select = nullptr;
+        if ((folderMode() && dirs) || (!folderMode() && files))
+            select = menu.addAction(tr("Select"), this, &FileChooserDialog::accept);
+        menu.setDefaultAction(select ? select : open);
+        menu.addSeparator();
+        add(m_actCut, modifiable);
+        add(m_actCopy, true);
+        menu.addAction(tr("Copy as path"), this, [items] { FileOps::copyPathToClipboard(items); });
+        menu.addSeparator();
+        add(m_actDelete, modifiable);
+        add(m_actRename, modifiable && items.size() == 1);
+        menu.addSeparator();
+        add(m_actProperties, true);
+    } else {
+        menu.setObjectName(QStringLiteral("chooserFolderContextMenu"));
+        QMenu *view = menu.addMenu(tr("View"));
+        for (QAction *action : m_viewModes->actions())
+            view->addAction(action);
+        QMenu *sort = menu.addMenu(tr("Sort by"));
+        auto *sortColumns = new QActionGroup(sort);
+        const std::pair<QString, int> sorts[] = {
+            {tr("Name"), DirectoryModel::Name},
+            {tr("Date modified"), DirectoryModel::ModifiedTime},
+            {tr("Type"), DirectoryModel::Type},
+            {tr("Size"), DirectoryModel::Size},
+        };
+        for (const auto &[label, column] : sorts) {
+            auto *action = sort->addAction(label, this, [this, column] {
+                m_files->sortBy(column, m_model->sortOrder());
+            });
+            action->setCheckable(true);
+            action->setChecked(m_model->sortColumn() == column);
+            sortColumns->addAction(action);
+        }
+        sort->addSeparator();
+        auto *sortOrders = new QActionGroup(sort);
+        for (const auto &[label, order] : {std::pair{tr("Ascending"), Qt::AscendingOrder},
+                                           std::pair{tr("Descending"), Qt::DescendingOrder}}) {
+            auto *action = sort->addAction(label, this, [this, order] {
+                m_files->sortBy(m_model->sortColumn(), order);
+            });
+            action->setCheckable(true);
+            action->setChecked(m_model->sortOrder() == order);
+            sortOrders->addAction(action);
+        }
+        menu.addAction(tr("Refresh"), m_navigation, &BrowserNavigation::refreshRequested);
+        menu.addSeparator();
+        add(m_actPaste, modifiable && FileOps::canPaste());
+        menu.addSeparator();
+        QMenu *create = menu.addMenu(tr("New"));
+        create->addAction(Aero::themeIcon({"folder-new", "folder"}), tr("Folder"),
+                          this, &FileChooserDialog::createNewFolder);
+        create->setEnabled(modifiable);
+        menu.addSeparator();
+        add(m_actProperties, localFileUrl(currentUrl()));
+    }
+
+    Aero::styleContextMenu(&menu);
+    // Some styles ignore QMenu's DefaultItem flag.
+    if (QAction *action = menu.defaultAction()) {
+        QFont font = menu.font();
+        font.setBold(true);
+        action->setFont(font);
+    }
+    menu.exec(globalPos);
 }
 
 void FileChooserDialog::applyFilter()
@@ -905,12 +1093,14 @@ bool FileChooserDialog::eventFilter(QObject *watched, QEvent *event)
     const auto *widget = qobject_cast<QWidget *>(watched);
     if (!widget || (widget != this && !isAncestorOf(widget)))
         return QDialog::eventFilter(watched, event);
-    const bool browserPane = widget && (m_places->isAncestorOf(widget)
-        || m_libraries->isAncestorOf(widget) || m_computer->isAncestorOf(widget));
+    const bool places = widget && m_places->isAncestorOf(widget);
+    const bool browserPane = places || (widget && (m_libraries->isAncestorOf(widget)
+        || m_computer->isAncestorOf(widget)));
     if (browserPane && event->type() == QEvent::MouseButtonPress
         && static_cast<QMouseEvent *>(event)->button() == Qt::MiddleButton)
         return true;
-    if (browserPane && (event->type() == QEvent::ContextMenu || event->type() == QEvent::DragEnter
+    // The places tree keeps its own menu of favorites and bookmark commands
+    if (browserPane && ((event->type() == QEvent::ContextMenu && !places) || event->type() == QEvent::DragEnter
         || event->type() == QEvent::DragMove || event->type() == QEvent::Drop)) {
         event->ignore();
         return true;

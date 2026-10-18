@@ -1163,8 +1163,7 @@ void FileView::setCheckBoxesVisible(bool visible)
 bool FileView::eventFilter(QObject *watched, QEvent *event)
 {
     if (m_chooserMode && (event->type() == QEvent::DragEnter
-        || event->type() == QEvent::DragMove || event->type() == QEvent::Drop
-        || event->type() == QEvent::ContextMenu)) {
+        || event->type() == QEvent::DragMove || event->type() == QEvent::Drop)) {
         event->ignore();
         return true;
     }
@@ -1254,8 +1253,6 @@ QModelIndex FileView::viewIndexFor(const QUrl &url) const
 
 void FileView::renameItem(const QUrl &url)
 {
-    if (m_chooserMode)
-        return;
     const QModelIndex index = viewIndexFor(url);
     if (!index.isValid())
         return;
@@ -1432,7 +1429,6 @@ void FileView::setChooserMode(bool enabled, bool multiple)
         view->setDragEnabled(!enabled);
         view->setAcceptDrops(!enabled);
         view->viewport()->setAcceptDrops(!enabled);
-        view->setContextMenuPolicy(enabled ? Qt::PreventContextMenu : Qt::CustomContextMenu);
         view->setEditTriggers(QAbstractItemView::NoEditTriggers);
     }
 }

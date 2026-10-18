@@ -30,6 +30,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPlainTextEdit>
@@ -46,6 +47,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QtMath>
 
 class FileChooserTest : public QObject {
@@ -113,18 +115,29 @@ private slots:
         QCOMPARE(files->currentView()->selectionMode(), QAbstractItemView::SingleSelection);
         QVERIFY(!files->currentView()->dragEnabled());
         QVERIFY(!files->currentView()->viewport()->acceptDrops());
-        QSignalSpy renamed(files, &FileView::renameRequested);
-        files->renameItem(QUrl::fromLocalFile(script));
-        QCOMPARE(renamed.count(), 0);
         auto *places = dialog.findChild<NavigationPane *>();
         auto *tree = places->findChild<QTreeWidget *>();
         QVERIFY(tree);
         QVERIFY(!tree->dragEnabled());
         QVERIFY(!tree->viewport()->acceptDrops());
-        QCOMPARE(tree->contextMenuPolicy(), Qt::PreventContextMenu);
-        QContextMenuEvent context(QContextMenuEvent::Mouse, QPoint(10, 10), QPoint(10, 10));
-        QApplication::sendEvent(tree->viewport(), &context);
-        QVERIFY(!QApplication::activePopupWidget());
+        QCOMPARE(tree->contextMenuPolicy(), Qt::CustomContextMenu);
+        // Each places row offers its menu, minus the commands only a window handles
+        QStringList captions;
+        QTimer::singleShot(100, [&] {
+            if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+                for (auto *action : menu->actions()) captions.append(action->text());
+                menu->close();
+            }
+        });
+        QTreeWidgetItem *row = nullptr;
+        for (QTreeWidgetItemIterator it(tree); *it && !row; ++it)
+            if ((*it)->parent()) row = *it;
+        QVERIFY(row);
+        Q_EMIT tree->customContextMenuRequested(tree->visualItemRect(row).center());
+        QVERIFY(captions.contains(QStringLiteral("Open")));
+        for (const auto *command : {"Empty Recycle Bin", "Connect drives...", "Map network drive...",
+                                    "Connect Google Drive...", "Open in new window"})
+            QVERIFY(!captions.contains(QLatin1String(command)));
         QVERIFY(files->selectUrl(QUrl::fromLocalFile(script)));
         files->focusView();
         QTest::keyClick(files->currentView(), Qt::Key_Return);
@@ -136,6 +149,62 @@ private slots:
         FileView normal(&normalModel);
         QCOMPARE(normal.currentView()->selectionMode(), QAbstractItemView::ExtendedSelection);
         QVERIFY(normal.currentView()->dragEnabled());
+    }
+
+    void newFolderButtonCreatesAndStartsRename()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkdir(QStringLiteral("New folder")));
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *button = dialog.findChild<QToolButton *>(QStringLiteral("chooserNewFolderButton"));
+        QVERIFY(button);
+        QTRY_VERIFY(button->isVisible() && button->isEnabled());
+        button->click();
+        const QString created = dir.filePath(QStringLiteral("New folder (2)"));
+        QTRY_VERIFY(QFileInfo(created).isDir());
+        auto *files = dialog.findChild<FileView *>();
+        QTRY_VERIFY(files->currentView()->findChild<QLineEdit *>());
+        QVERIFY(!dialog.result());
+    }
+
+    void fileListOffersContextMenus()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString file = dir.filePath(QStringLiteral("a.txt"));
+        QFile touch(file);
+        QVERIFY(touch.open(QIODevice::WriteOnly));
+        touch.close();
+        FileChooserDialog dialog(optionsFor(dir.path()));
+        show(dialog);
+        auto *model = dialog.findChild<DirectoryModel *>();
+        auto *files = dialog.findChild<FileView *>();
+        QTRY_VERIFY(model->indexForUrl(QUrl::fromLocalFile(file)).isValid());
+        QVERIFY(files->selectUrl(QUrl::fromLocalFile(file)));
+        for (const bool onItem : {true, false}) {
+            QString shown;
+            QStringList captions;
+            QTimer::singleShot(100, [&] {
+                if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+                    shown = menu->objectName();
+                    for (auto *action : menu->actions()) captions.append(action->text());
+                    menu->close();
+                }
+            });
+            if (!onItem) files->currentView()->clearSelection();
+            Q_EMIT files->contextMenuRequested(files->mapToGlobal(QPoint(50, 50)), onItem);
+            if (onItem) {
+                QCOMPARE(shown, QStringLiteral("chooserItemContextMenu"));
+                QVERIFY(captions.contains(QStringLiteral("Select")));
+                QVERIFY(captions.contains(QStringLiteral("Rename")));
+            } else {
+                QCOMPARE(shown, QStringLiteral("chooserFolderContextMenu"));
+                QVERIFY(captions.contains(QStringLiteral("New")));
+            }
+        }
+        QVERIFY(QFileInfo::exists(file));
     }
 
     void filterGlobsOrMimeKeepsFoldersAndSearchIndependent()

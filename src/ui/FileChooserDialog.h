@@ -15,6 +15,7 @@ class NavigationPane;
 class PreviewPane;
 class SearchBox;
 class QAction;
+class QActionGroup;
 class QComboBox;
 class QDialogButtonBox;
 class QLabel;
@@ -22,8 +23,10 @@ class QLineEdit;
 class QMessageBox;
 class QStackedWidget;
 class QTimer;
+class QToolButton;
 
-// A selection-only common file dialog. No file operations or application launches.
+// A common file dialog. Like Win7's, it offers the shell's basic file
+// operations (new folder, rename, delete, clipboard), but never launches applications.
 class FileChooserDialog : public QDialog {
     Q_OBJECT
 public:
@@ -63,6 +66,10 @@ private:
     void restrictViews(QWidget *container);
     void updatePreview();
     void setPreviewVisible(bool visible);
+    bool canModifyFolder() const;
+    void updateFolderCommands();
+    void createNewFolder();
+    void showContextMenu(const QPoint &globalPos, bool onItem);
 
     ChooserOptions m_options;
     QList<QUrl> m_selectedUrls;
@@ -78,6 +85,15 @@ private:
     QStackedWidget *m_stack;
     PreviewPane *m_preview;
     QAction *m_previewAction;
+    QActionGroup *m_viewModes;
+    QToolButton *m_newFolderButton;
+    QAction *m_actCut;
+    QAction *m_actCopy;
+    QAction *m_actPaste;
+    QAction *m_actDelete;
+    QAction *m_actRename;
+    QAction *m_actProperties;
+    QUrl m_pendingRename;
     SearchBox *m_search;
     QLineEdit *m_name;
     QComboBox *m_filters;
