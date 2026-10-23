@@ -62,6 +62,23 @@ constexpr int kMaxCrumbMenuNames = 50000;
 
 constexpr int kMaxRecentEntries = 15;
 
+QUrl navigationTarget(const QUrl &url)
+{
+    QUrl target = GoogleDriveService::managedDriveLocation(url);
+    // Directory symlinks are our folder shortcuts. Open their destination,
+    // rather than making the shortcut's parent part of the address/history.
+    // Leave virtual/elevated URLs and the managed mount to their workers.
+    if (target.isLocalFile() && !Locations::isGoogleDriveMount(target)) {
+        const QFileInfo info(QDir::cleanPath(target.toLocalFile()));
+        if (info.isSymLink() && info.isDir()) {
+            const QString path = info.canonicalFilePath();
+            if (!path.isEmpty())
+                target = GoogleDriveService::managedDriveLocation(QUrl::fromLocalFile(path));
+        }
+    }
+    return target;
+}
+
 } // namespace
 
 BrowserNavigation::BrowserNavigation(KFilePlacesModel *places, ComputerModel *computer,
@@ -993,7 +1010,7 @@ bool BrowserNavigation::accepts(const QUrl &url)
 
 bool BrowserNavigation::initialize(const QUrl &url)
 {
-    const QUrl target = GoogleDriveService::managedDriveLocation(url);
+    const QUrl target = navigationTarget(url);
     if (!accepts(target))
         return false;
     m_history.clear();
@@ -1011,7 +1028,7 @@ QUrl BrowserNavigation::currentUrl() const
 
 bool BrowserNavigation::navigateTo(const QUrl &url, bool announceNavigation)
 {
-    const QUrl target = GoogleDriveService::managedDriveLocation(url);
+    const QUrl target = navigationTarget(url);
     if (target.matches(currentUrl(), QUrl::StripTrailingSlash) || !accepts(target))
         return false;
     pushHistory(target);
@@ -1024,7 +1041,7 @@ bool BrowserNavigation::navigateTo(const QUrl &url, bool announceNavigation)
 
 bool BrowserNavigation::redirectTo(const QUrl &from, const QUrl &to)
 {
-    const QUrl target = GoogleDriveService::managedDriveLocation(to);
+    const QUrl target = navigationTarget(to);
     if (m_historyIndex < 0 || !from.isValid()
         || !from.matches(currentUrl(), QUrl::StripTrailingSlash)
         || target.matches(currentUrl(), QUrl::StripTrailingSlash) || !accepts(target))

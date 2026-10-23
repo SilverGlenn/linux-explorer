@@ -53,6 +53,81 @@ private:
     };
 
 private slots:
+    void directoryShortcutsUseTargetLocation_data()
+    {
+        QTest::addColumn<QString>("entryPoint");
+        QTest::newRow("startup") << QStringLiteral("startup");
+        QTest::newRow("navigate") << QStringLiteral("navigate");
+        QTest::newRow("redirect") << QStringLiteral("redirect");
+        QTest::newRow("typed") << QStringLiteral("typed");
+    }
+
+    void directoryShortcutsUseTargetLocation()
+    {
+        QFETCH(QString, entryPoint);
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        QDir root(temp.path());
+        QVERIFY(root.mkpath(QStringLiteral("Desktop")));
+        QVERIFY(root.mkpath(QStringLiteral("Projects/encia")));
+        const QString shortcut = root.filePath(QStringLiteral("Desktop/encia"));
+        const QUrl target = QUrl::fromLocalFile(root.filePath(QStringLiteral("Projects/encia")));
+        const QUrl parent = QUrl::fromLocalFile(root.filePath(QStringLiteral("Projects")));
+        QVERIFY(QFile::link(target.toLocalFile(), shortcut));
+        // Desktop launchers can supply a trailing slash on directory URLs.
+        const QUrl shortcutUrl = QUrl::fromLocalFile(shortcut + QLatin1Char('/'));
+        Browser browser;
+        auto &nav = browser.navigation;
+        QSignalSpy locations(&nav, &BrowserNavigation::locationChanged);
+        if (entryPoint == QLatin1String("startup")) {
+            QVERIFY(nav.initialize(shortcutUrl));
+        } else {
+            QVERIFY(nav.initialize(Locations::computer()));
+            if (entryPoint == QLatin1String("navigate")) {
+                QVERIFY(nav.navigateTo(shortcutUrl));
+            } else if (entryPoint == QLatin1String("redirect")) {
+                QVERIFY(nav.redirectTo(Locations::computer(), shortcutUrl));
+            } else {
+                nav.focusPathEdit();
+                nav.pathEditor()->setText(shortcutUrl.toLocalFile());
+                nav.submitPathEdit();
+            }
+        }
+        QCOMPARE(nav.currentUrl(), target);
+        QCOMPARE(locations.last().first().toUrl(), target);
+        const auto crumbs = nav.crumbsFor(nav.currentUrl());
+        QVERIFY(crumbs.size() >= 2);
+        QCOMPARE(crumbs.at(crumbs.size() - 2).target, parent);
+        QVERIFY(!nav.navigateTo(target)); // No duplicate alias in history.
+        nav.goUp();
+        QVERIFY(nav.currentUrl().matches(parent, QUrl::StripTrailingSlash));
+        nav.goBack();
+        QCOMPARE(nav.currentUrl(), target);
+        nav.goForward();
+        QVERIFY(nav.currentUrl().matches(parent, QUrl::StripTrailingSlash));
+    }
+
+    void directoryShortcutCannotBypassDestinationPolicy()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        QDir root(temp.path());
+        QVERIFY(root.mkdir(QStringLiteral("restricted")));
+        const QUrl target = QUrl::fromLocalFile(root.filePath(QStringLiteral("restricted")));
+        const QUrl shortcut = QUrl::fromLocalFile(root.filePath(QStringLiteral("shortcut")));
+        QVERIFY(QFile::link(target.toLocalFile(), shortcut.toLocalFile()));
+        Browser browser;
+        auto &nav = browser.navigation;
+        QVERIFY(nav.initialize(Locations::computer()));
+        nav.setUrlPolicy([target](const QUrl &url) {
+            return url == target ? QStringLiteral("Blocked destination") : QString();
+        });
+        QSignalSpy errors(&nav, &BrowserNavigation::errorOccurred);
+        QVERIFY(!nav.navigateTo(shortcut));
+        QCOMPARE(nav.currentUrl(), Locations::computer());
+        QCOMPARE(errors.size(), 1);
+    }
+
     void managedDriveNeverInheritsAdministratorIdentity()
     {
         Browser browser;
