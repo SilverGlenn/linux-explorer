@@ -10,9 +10,6 @@ namespace Settings {
 
 namespace {
 
-// How many folders keep a remembered view mode
-constexpr int kMaxRememberedFolders = 400;
-
 // About Win7's own list length
 constexpr int kMaxRecentPaths = 25;
 
@@ -59,7 +56,24 @@ BoolSetting s_notifyUnmountedDrives{"NotifyUnmountedDrives", true};
 // QSettings treats a slash as a group separator, so paths are percent encoded
 QString folderKey(const QUrl &url)
 {
-    return QString::fromLatin1(url.toEncoded().toPercentEncoding());
+    const QUrl normalized = url.adjusted(QUrl::NormalizePathSegments | QUrl::StripTrailingSlash
+                                        | QUrl::RemovePassword);
+    return QString::fromLatin1(normalized.toEncoded().toPercentEncoding());
+}
+
+QVariant legacyViewMode(QSettings &settings, const QUrl &url)
+{
+    const QString prefix = QStringLiteral("FolderViews/");
+    QVariant value = settings.value(prefix + folderKey(url));
+    if (!value.isValid())
+        value = settings.value(prefix + QString::fromLatin1(url.toEncoded().toPercentEncoding()));
+    if (!value.isValid()) {
+        QUrl withSlash = url.adjusted(QUrl::NormalizePathSegments);
+        if (!withSlash.path().endsWith(QLatin1Char('/')))
+            withSlash.setPath(withSlash.path() + QLatin1Char('/'));
+        value = settings.value(prefix + QString::fromLatin1(withSlash.toEncoded().toPercentEncoding()));
+    }
+    return value;
 }
 
 int clampMode(int raw)
@@ -211,6 +225,7 @@ void clearRememberedViewModes()
     QSettings s;
     // The whole group, since removing the keys alone would leave it behind
     s.remove(QStringLiteral("FolderViews"));
+    s.remove(QStringLiteral("FolderStates"));
 }
 
 std::optional<bool> navigationGroupExpanded(const QString &groupId)
@@ -273,13 +288,13 @@ void setDefaultViewMode(ViewMode mode)
 
 ViewMode viewModeFor(const QUrl &url)
 {
-    if (!url.isValid())
+    if (!url.isValid() || url.isEmpty())
         return defaultViewMode();
+    if (const auto state = folderViewStateFor(url))
+        return state->mode;
 
     QSettings s;
-    s.beginGroup(QStringLiteral("FolderViews"));
-    const QVariant stored = s.value(folderKey(url));
-    s.endGroup();
+    const QVariant stored = legacyViewMode(s, url);
 
     if (!stored.isValid())
         return defaultViewMode();
@@ -288,37 +303,142 @@ ViewMode viewModeFor(const QUrl &url)
 
 bool hasViewModeFor(const QUrl &url)
 {
-    if (!url.isValid())
+    if (!url.isValid() || url.isEmpty())
         return false;
-
+    if (folderViewStateFor(url))
+        return true;
     QSettings s;
-    s.beginGroup(QStringLiteral("FolderViews"));
-    const bool stored = s.value(folderKey(url)).isValid();
-    s.endGroup();
-    return stored;
+    return legacyViewMode(s, url).isValid();
 }
 
 void setViewModeFor(const QUrl &url, ViewMode mode)
 {
-    if (!url.isValid())
+    if (!url.isValid() || url.isEmpty())
         return;
 
+    if (auto state = folderViewStateFor(url)) {
+        state->mode = mode;
+        setFolderViewStateFor(url, *state);
+    }
     QSettings s;
     s.beginGroup(QStringLiteral("FolderViews"));
 
-    // QSettings has no insertion order and so nothing to evict by age, and
-    // dropping an arbitrary quarter keeps this to one sweep per hundred folders
-    const QStringList existing = s.childKeys();
-    const QString entry = folderKey(url);
-    const bool full = existing.size() >= kMaxRememberedFolders;
-    if (full && !existing.contains(entry)) {
-        const int toRemove = existing.size() / 4;
-        for (int i = 0; i < toRemove; ++i)
-            s.remove(existing.at(i));
-    }
-
-    s.setValue(entry, int(mode));
+    // Keep legacy choices too; visiting more folders must not silently discard
+    // a preference that has not yet been migrated to a complete layout.
+    s.setValue(folderKey(url), int(mode));
     s.endGroup();
+}
+
+std::optional<FolderViewState> folderViewStateFor(const QUrl &url)
+{
+    if (!url.isValid() || url.isEmpty())
+        return std::nullopt;
+    const QVariantMap values = QSettings().value(QStringLiteral("FolderStates/") + folderKey(url)).toMap();
+    if (values.value(QStringLiteral("version")).toInt() != 1)
+        return std::nullopt;
+    const auto integer = [&values](const QString &name, int fallback) {
+        bool ok = false;
+        const int value = values.value(name).toInt(&ok);
+        return ok ? value : fallback;
+    };
+    FolderViewState state;
+    state.mode = ViewMode(clampMode(integer(QStringLiteral("mode"), int(defaultViewMode()))));
+    state.header = values.value(QStringLiteral("header")).toByteArray();
+    if (state.header.size() > 65536)
+        state.header.clear();
+    for (const QVariant &column : values.value(QStringLiteral("columns")).toList()) {
+        bool ok = false;
+        const int source = column.toInt(&ok);
+        if (ok) state.visibleColumns.append(source);
+    }
+    state.sortColumn = integer(QStringLiteral("sortColumn"), 0);
+    state.sortOrder = integer(QStringLiteral("sortOrder"), 0) == int(Qt::DescendingOrder)
+        ? Qt::DescendingOrder : Qt::AscendingOrder;
+    state.groupColumn = integer(QStringLiteral("groupColumn"), -1);
+    state.previewVisible = values.value(QStringLiteral("previewVisible"), false).toBool();
+    state.previewWidth = qBound(120, integer(QStringLiteral("previewWidth"), 250), 2000);
+    state.navigationVisible = values.value(QStringLiteral("navigationVisible"), true).toBool();
+    state.detailsVisible = values.value(QStringLiteral("detailsVisible"), true).toBool();
+    return state;
+}
+
+void setFolderViewStateFor(const QUrl &url, const FolderViewState &state)
+{
+    if (!url.isValid() || url.isEmpty())
+        return;
+    QVariantList columns;
+    for (int source : state.visibleColumns)
+        columns.append(source);
+    const QVariantMap values {
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("mode"), int(state.mode)},
+        {QStringLiteral("header"), state.header},
+        {QStringLiteral("columns"), columns},
+        {QStringLiteral("sortColumn"), state.sortColumn},
+        {QStringLiteral("sortOrder"), int(state.sortOrder)},
+        {QStringLiteral("groupColumn"), state.groupColumn},
+        {QStringLiteral("previewVisible"), state.previewVisible},
+        {QStringLiteral("previewWidth"), state.previewWidth},
+        {QStringLiteral("navigationVisible"), state.navigationVisible},
+        {QStringLiteral("detailsVisible"), state.detailsVisible}
+    };
+    QSettings().setValue(QStringLiteral("FolderStates/") + folderKey(url), values);
+}
+
+namespace {
+struct ChooserSettings : QSettings {
+    ChooserSettings()
+        : QSettings(QSettings::NativeFormat, QSettings::UserScope,
+                    QStringLiteral("linux-explorer-win7"), QStringLiteral("file-picker"))
+    {
+    }
+};
+} // namespace
+
+QUrl chooserFolder()
+{
+    return QUrl(ChooserSettings().value(QStringLiteral("Picker/Folder")).toString(), QUrl::StrictMode);
+}
+
+void setChooserFolder(const QUrl &folder)
+{
+    ChooserSettings().setValue(QStringLiteral("Picker/Folder"), folder.toString(QUrl::FullyEncoded));
+}
+
+int chooserSortColumn()
+{
+    bool ok = false;
+    const int column = ChooserSettings().value(QStringLiteral("Picker/SortColumn")).toInt(&ok);
+    return ok && column >= 0 ? column : -1;
+}
+
+Qt::SortOrder chooserSortOrder()
+{
+    return ChooserSettings().value(QStringLiteral("Picker/SortOrder"), int(Qt::DescendingOrder)).toInt()
+        == int(Qt::AscendingOrder) ? Qt::AscendingOrder : Qt::DescendingOrder;
+}
+
+void setChooserSort(int sourceColumn, Qt::SortOrder order)
+{
+    ChooserSettings settings;
+    settings.setValue(QStringLiteral("Picker/SortColumn"), sourceColumn);
+    settings.setValue(QStringLiteral("Picker/SortOrder"), int(order));
+}
+
+ViewMode chooserViewMode()
+{
+    return ViewMode(clampMode(ChooserSettings().value(QStringLiteral("Picker/ViewMode"),
+                                                      int(ViewMode::Details)).toInt()));
+}
+
+void setChooserViewMode(ViewMode mode)
+{
+    ChooserSettings().setValue(QStringLiteral("Picker/ViewMode"), int(mode));
+}
+
+void clearChooserMemory()
+{
+    ChooserSettings().remove(QStringLiteral("Picker"));
 }
 
 } // namespace Settings

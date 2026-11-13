@@ -247,6 +247,9 @@ public:
             return QSize(qMax(m_rowWidth, 160), contentHeight(option.fontMetrics));
         case Standard:
         default:
+            if (const auto *list = qobject_cast<const QListView *>(option.widget);
+                list && list->viewMode() == QListView::ListMode && list->gridSize().isValid())
+                return (list->gridSize() - QSize(16, 4)).expandedTo(QSize(1, 1));
             return QStyledItemDelegate::sizeHint(option, index);
         }
     }
@@ -367,9 +370,11 @@ public:
         const QSize grid = gridSize();
         const int width = qMax(viewport()->width(), 1);
 
-        if (viewMode() == QListView::IconMode && isWrapping()) {
+        if (flow() == QListView::LeftToRight && isWrapping() && grid.isValid()) {
             const int cell = qMax(1, grid.width());
-            const int perRow = qMax(1, width / cell);
+            // QListView wraps against the inclusive right edge. At an exact
+            // grid-width multiple it puts the last cell on the next row.
+            const int perRow = qMax(1, (width - 1) / cell);
             // Rounded up, so a part filled last row still counts
             const int rows = (count + perRow - 1) / perRow;
             return QSize(cell, rows * qMax(1, grid.height()));
@@ -650,6 +655,16 @@ void ComputerView::applyMode()
         view->setFullWidthRows(m_mode == Settings::ViewMode::Content);
 
         switch (m_mode) {
+        case Settings::ViewMode::SmallIcons:
+            delegate->setLayout(DriveDelegate::Standard);
+            view->setViewMode(QListView::ListMode);
+            view->setFlow(QListView::LeftToRight);
+            view->setWrapping(true);
+            view->setWordWrap(false);
+            view->setTextElideMode(Qt::ElideRight);
+            view->setGridSize(QSize(176, qMax(22, metrics.height() + 6) + 4));
+            break;
+
         case Settings::ViewMode::List:
             // Win7 wraps this mode to the right, which a section cannot, the
             // page scrolling down so a wrapped column would run off the side

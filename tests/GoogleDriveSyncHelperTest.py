@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import stat
@@ -46,12 +47,27 @@ class FakeAPI(SYNC.DriveAPI):
                                "root_id": folder_metadata("root_id", "My Drive", None),
                                "selected": folder_metadata("selected", "Selected", "root_id")}
         self.items = {"root_id": [self.metadata_items["selected"]], "selected": []}
+        self.page_size = 1000
 
     def metadata(self, folder_id):
         return self.metadata_items[folder_id]
 
-    def children(self, folder_id):
+    def listing_items(self, folder_id):
         return self.items.get(folder_id, [])
+
+    def get(self, endpoint, parameters):
+        if endpoint != "files" or not parameters["q"].endswith(" and trashed=false"):
+            raise AssertionError("Unexpected synthetic Drive request")
+        parents = re.findall(r"'([A-Za-z0-9_-]+)' in parents", parameters["q"])
+        if not parents:
+            raise AssertionError("An unscoped Drive listing was requested")
+        items = [item for parent in parents for item in self.listing_items(parent)]
+        offset = int(parameters.get("pageToken", "0"))
+        end = offset + min(int(parameters["pageSize"]), self.page_size)
+        result = {"files": items[offset:end]}
+        if end < len(items):
+            result["nextPageToken"] = str(end)
+        return result
 
 
 class FakeEngine:
@@ -166,6 +182,96 @@ class SyncHelperTest(unittest.TestCase):
         inventory = self.api.inventory("selected")
         self.assertEqual((inventory["file_count"], inventory["bytes"]), (1, 3))
 
+    def test_broad_folder_preview_fits_existing_deadline_without_writes(self):
+        for index in range(80):
+            folder_id = "branch_" + str(index).zfill(3) + "x" * 245
+            folder = folder_metadata(folder_id, f"Branch {index:02d}", "selected")
+            self.api.items["selected"].append(folder)
+            self.api.items[folder_id] = [file_metadata("file.txt", parent=folder_id, file_id=f"file_{index}")]
+        clock = [0.0]
+        known = {"selected"}
+        original = self.api.get
+        def slow_get(endpoint, parameters):
+            parents = re.findall(r"'([A-Za-z0-9_-]+)' in parents", parameters["q"])
+            self.assertTrue(set(parents) <= known, "listing escaped the discovered subtree")
+            self.assertLessEqual(len(parents), 20, "folder queries must remain bounded")
+            self.assertLess(len(SYNC.urllib.parse.urlencode(parameters)), 8192)
+            clock[0] += 2
+            result = original(endpoint, parameters)
+            known.update(item["id"] for item in result["files"] if item["mimeType"] == SYNC.FOLDER)
+            return result
+        with mock.patch.object(SYNC.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(self.api, "get", side_effect=slow_get):
+            try:
+                result = self.request("preview", remote_folder_id="selected", local_path=str(self.local))
+            except SYNC.MetadataTimeout:
+                self.fail("A supported broad folder timed out because its subfolders were listed one at a time")
+        self.assertEqual(result["preview"]["file_count"], 80)
+        self.assertEqual(result["preview"]["bytes"], 320)
+        self.assertLess(clock[0], 120)
+        self.assertFalse(self.engine.commands)
+        self.assertFalse(list(self.local.iterdir()))
+        self.assertFalse(self.worker.state["pairs"])
+
+    def test_paginated_inventory_keeps_same_names_in_distinct_folders(self):
+        left = folder_metadata("left", "Left", "selected")
+        right = folder_metadata("right", "Right", "selected")
+        self.api.items.update(selected=[left, right],
+                              left=[file_metadata("same.txt", b"one", parent="left", file_id="left_file")],
+                              right=[file_metadata("same.txt", b"two!", parent="right", file_id="right_file")])
+        self.api.page_size = 1
+        inventory = self.api.inventory("selected")
+        self.assertEqual(set(inventory["files"]), {"Left/same.txt", "Right/same.txt"})
+        self.assertEqual(inventory["files"]["Left/same.txt"]["size"], 3)
+        self.assertEqual(inventory["files"]["Right/same.txt"]["size"], 4)
+        self.assertEqual((inventory["file_count"], inventory["bytes"]), (2, 7))
+        self.api.items["selected"].reverse()
+        self.assertEqual(self.api.inventory("selected")["fingerprint"], inventory["fingerprint"])
+        self.api.items["left"].append(file_metadata("same.txt", parent="left", file_id="duplicate"))
+        with self.assertRaisesRegex(SYNC.Error, "Duplicate"):
+            self.api.inventory("selected")
+
+    def test_inventory_rejects_results_outside_scoped_parents(self):
+        for parents in (["outside"], ["selected", "outside"], [], None, [["selected"]]):
+            self.api.items["selected"] = [dict(file_metadata("file.txt"), parents=parents)]
+            with self.subTest(parents=parents), self.assertRaises(SYNC.Error):
+                self.api.inventory("selected")
+
+    def test_inventory_rejects_repeated_folders_and_total_item_overflow(self):
+        folder = folder_metadata("child", "Child", "selected")
+        self.api.items["selected"] = [folder, dict(folder, name="Other")]
+        with self.assertRaisesRegex(SYNC.Error, "repeated folder"):
+            self.api.inventory("selected")
+        self.api.items["selected"] = [folder, folder_metadata("sibling", "Sibling", "selected")]
+        self.api.items["child"] = [file_metadata("one", parent="child")]
+        self.api.items["sibling"] = [file_metadata("two", parent="sibling")]
+        with mock.patch.object(SYNC, "MAX_ITEMS", 3), self.assertRaisesRegex(SYNC.Error, "item safety limit"):
+            self.api.inventory("selected")
+
+    def test_inventory_deadline_and_cancellation_apply_between_listing_pages(self):
+        self.api.items["selected"] = [file_metadata("one"), file_metadata("two")]
+        self.api.page_size = 1
+        original = self.api.get
+        for cancelled in (False, True):
+            clock = [0.0]
+            self.api.cancel.clear()
+            def slow_get(endpoint, parameters):
+                clock[0] += 61
+                if cancelled and parameters.get("pageToken"):
+                    self.api.cancel.set()
+                return original(endpoint, parameters)
+            expected = "paused or stopped" if cancelled else "timed out"
+            with self.subTest(cancelled=cancelled), mock.patch.object(SYNC.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(self.api, "get", side_effect=slow_get):
+                with self.assertRaisesRegex(SYNC.Error, expected):
+                    self.api.inventory("selected")
+        self.api.cancel.clear()
+
+    def test_inventory_rejects_incomplete_or_malformed_listing_pages(self):
+        for document in ({"incompleteSearch": True, "files": []}, {"files": None},
+                         {"files": [], "nextPageToken": 123}):
+            with self.subTest(document=document), mock.patch.object(self.api, "get", return_value=document):
+                with self.assertRaises(SYNC.Error):
+                    self.api.inventory("selected")
+
     def test_folder_must_be_writable_and_beneath_my_drive_root(self):
         for folder_id in ("root", "invalid:remote", "../parent"):
             with self.subTest(folder_id=folder_id), self.assertRaises(SYNC.Error):
@@ -219,6 +325,24 @@ class SyncHelperTest(unittest.TestCase):
         second.mkdir()
         with self.assertRaisesRegex(SYNC.Error, "overlap"):
             self.request("preview", remote_folder_id="child", local_path=str(second))
+
+    def test_parent_preview_reports_stalled_child_overlap_before_recursive_listing(self):
+        child = folder_metadata("child", "Child", "selected")
+        self.api.metadata_items["child"] = child
+        self.api.items["selected"] = [child]
+        self.request("preview", remote_folder_id="child", local_path=str(self.local))
+        self.request("add", remote_folder_id="child", local_path=str(self.local))
+        pair = self.worker.state["pairs"][0]
+        pair["state"] = "needs-review"
+        destination = self.home / "parent-copy"
+        destination.mkdir()
+        with mock.patch.object(self.api, "get", side_effect=AssertionError("Recursive listing ran before checking the known overlap")):
+            with self.assertRaisesRegex(SYNC.Error, "overlap"):
+                self.request("preview", remote_folder_id="selected", local_path=str(destination))
+        self.assertEqual(pair["state"], "needs-review")
+        self.assertFalse(pair["initialized"])
+        self.assertFalse(list(destination.iterdir()))
+        self.assertFalse(self.engine.commands)
 
     def test_unsafe_state_and_lock_are_rejected(self):
         self.paths.state_file.chmod(0o644)
@@ -301,6 +425,81 @@ class SyncHelperTest(unittest.TestCase):
         self.assertEqual(pair["state"], "needs-review")
         self.assertEqual(manifest_path.read_bytes(), before)
         self.worker.run_pair.assert_called_once()
+
+    def test_interrupted_initial_copy_can_resume_without_resetting_review(self):
+        pair = self.add()
+        reviewed = pair["reviewed_hash"]
+        for state in ("needs-review", "paused"):
+            pair["state"], pair["error"] = state, "Interrupted initial copy"
+            public = self.worker.response()["pairs"][0]
+            self.assertTrue(public.get("can_retry_initial"))
+            self.assertFalse(public["can_resume"], "partial copies must not enable ordinary Sync now or deletion review")
+            self.assertFalse(SYNC.public_pair(pair, "b" * 64).get("can_retry_initial"))
+            response = self.request("resume", pair_id=pair["id"])
+            self.assertEqual(response["pairs"][0]["state"], "initializing")
+            self.assertEqual(pair["reviewed_hash"], reviewed)
+            self.assertFalse(pair["initialized"])
+            self.assertFalse(self.engine.commands)
+        pair["state"] = "needs-review"
+        with self.assertRaises(SYNC.Error):
+            self.request("sync-now", pair_id=pair["id"])
+        with self.assertRaises(SYNC.Error):
+            self.request("review", pair_id=pair["id"])
+
+    def test_initial_copy_rejects_edited_or_unexpected_partial_files_before_writes(self):
+        self.api.items["selected"] = [file_metadata("downloaded.txt", b"original")]
+        pair = self.add()
+        for name, content in (("downloaded.txt", b"user edit"), ("new-local.txt", b"keep")):
+            local_file = self.local / name
+            local_file.write_bytes(content)
+            with self.subTest(name=name), self.assertRaisesRegex(SYNC.Error, "partial download"):
+                self.worker.run_pair(pair)
+            self.assertEqual(local_file.read_bytes(), content)
+            self.assertFalse(self.engine.commands)
+            self.assertFalse(pair["initialized"])
+            local_file.unlink()
+
+    def test_initial_copy_rejects_unexpected_partial_directories_before_writes(self):
+        pair = self.add()
+        unexpected = self.local / "new-local-folder"
+        unexpected.mkdir()
+        with self.assertRaisesRegex(SYNC.Error, "partial download"):
+            self.worker.run_pair(pair)
+        self.assertTrue(unexpected.is_dir())
+        self.assertFalse(self.engine.commands)
+        self.assertFalse(pair["initialized"])
+
+    def test_partial_initial_copy_still_rejects_changed_cloud_snapshot(self):
+        self.api.items["selected"] = [file_metadata("downloaded.txt", b"original")]
+        pair = self.add()
+        (self.local / "downloaded.txt").write_bytes(b"original")
+        self.api.items["selected"].append(file_metadata("cloud-change.txt"))
+        with self.assertRaisesRegex(SYNC.Error, "changed after its preview"):
+            self.worker.run_pair(pair)
+        self.assertFalse(self.engine.commands)
+        self.assertEqual((self.local / "downloaded.txt").read_bytes(), b"original")
+
+    def test_partial_initial_copy_cannot_restart_already_started_baseline(self):
+        pair = self.add()
+        sentinel = self.local / (".explorer-sync-access-" + pair["id"])
+        sentinel.write_bytes(b"keep existing setup marker")
+        with self.assertRaisesRegex(SYNC.Error, "reserved"):
+            self.worker.run_pair(pair)
+        self.assertEqual(sentinel.read_bytes(), b"keep existing setup marker")
+        self.assertFalse(self.engine.commands)
+        self.assertFalse(pair["initialized"])
+
+    def test_partial_initial_copy_cannot_reset_existing_bisync_state(self):
+        pair = self.add()
+        workdir = self.paths.directory / "pairs" / pair["id"] / "bisync"
+        self.paths.helper.safe_directory(workdir, create=True)
+        baseline = workdir / "retained.lst"
+        baseline.write_bytes(b"keep the existing baseline")
+        with self.assertRaisesRegex(SYNC.Error, "initial baseline"):
+            self.worker.run_pair(pair)
+        self.assertEqual(baseline.read_bytes(), b"keep the existing baseline")
+        self.assertFalse(self.engine.commands)
+        self.assertFalse(pair["initialized"])
 
     def test_cloud_change_after_preview_blocks_initial_download(self):
         pair = self.add()
@@ -760,18 +959,50 @@ class ModernRcloneLocalIntegrationTest(unittest.TestCase):
             with self.assertRaises(SYNC.Error):
                 runner.config_document(paths.config, credential["config_password"], "drive", "other.apps.googleusercontent.com", credential["client_secret"], refresh=False)
 
-    def local_worker(self, home, file_count=30):
+    def test_refreshed_rclone_token_metadata_keeps_strict_credential_validation(self):
+        binary = self.modern_binary()
+        with tempfile.TemporaryDirectory(prefix="drive-token-") as temporary:
+            paths = SYNC.Paths(Path(temporary), {})
+            paths.prepare()
+            token = {"access_token": "synthetic-access-no-account", "refresh_token": "synthetic-refresh-no-account",
+                     "token_type": "Bearer", "expiry": "2099-01-01T00:00:00Z"}
+            credential = {"version": 1, "client_id": "123-synthetic.apps.googleusercontent.com",
+                          "client_secret": "synthetic-client-secret", "config_password": "s" * 43,
+                          "browse_config_password": "b" * 43, "token": token}
+            runner = SYNC.Rclone(paths, credential["config_password"], binary)
+            cases = [({"expires_in": 0}, True), ({"expires_in": 3600}, True), ({"expires_in": 86400}, True),
+                     ({"expires_in": -1}, False), ({"expires_in": 86401}, False),
+                     ({"expires_in": True}, False), ({"expires_in": "3600"}, False),
+                     ({"expires_in": None}, False), ({"expires_in": 3600.0}, False),
+                     ({"expires_in": 3600, "token_uri": "https://example.invalid"}, False),
+                     ({"expires_in": 3600, "refresh_token": ""}, False),
+                     ({"expires_in": 3600, "expiry": "invalid"}, False)]
+            for extra, valid in cases:
+                with self.subTest(extra=extra):
+                    runner.install(dict(credential, token=dict(token, **extra)))
+                    def load():
+                        return runner.config_document(paths.config, credential["config_password"], "drive",
+                                                      credential["client_id"], credential["client_secret"], refresh=False)
+                    if valid:
+                        self.assertEqual(load(), token)
+                    else:
+                        with self.assertRaises(SYNC.Error):
+                            load()
+
+    def local_worker(self, home, file_count=30, empty_directory=False):
         binary = self.modern_binary()
         paths = SYNC.Paths(home, {})
         local, remote = home / "mirror", home / "cloud-synthetic"
         local.mkdir(mode=0o700)
         remote.mkdir(mode=0o700)
+        if empty_directory:
+            (remote / "Empty").mkdir()
         for index in range(file_count):
             (remote / f"file{index}.txt").write_text(f"original {index}")
         class LocalAPI(FakeAPI):
-            def children(self, folder_id):
+            def listing_items(self, folder_id):
                 if folder_id != "selected":
-                    return super().children(folder_id)
+                    return super().listing_items(folder_id)
                 items = []
                 for path in remote.iterdir():
                     if path.is_dir():
@@ -804,6 +1035,45 @@ class ModernRcloneLocalIntegrationTest(unittest.TestCase):
         worker.request(dict(selection, action="preview"))
         worker.request(dict(selection, action="add"))
         return worker, worker.state["pairs"][0], local, remote, engine
+
+    def test_partial_initial_copy_resumes_without_replacing_downloaded_files(self):
+        with tempfile.TemporaryDirectory(prefix="explorer-sync-resume-test-") as temporary:
+            worker, pair, local, remote, engine = self.local_worker(Path(temporary), file_count=2, empty_directory=True)
+            shutil.copy2(remote / "file0.txt", local / "file0.txt")
+            (local / "Empty").mkdir()
+            before = (local / "file0.txt").stat()
+            pair["state"] = "needs-review"
+            worker.request({"version": 1, "action": "resume", "pair_id": pair["id"]})
+            self.assertEqual(pair["state"], "initializing")
+            self.assertFalse(worker.run_pair(pair))
+            self.assertTrue(pair["initialized"])
+            self.assertEqual((local / "file0.txt").stat().st_ino, before.st_ino)
+            self.assertEqual((local / "file0.txt").read_text(), "original 0")
+            self.assertEqual((local / "file1.txt").read_text(), "original 1")
+            copy = next(command for command in engine.commands if command[0] == "copy")
+            self.assertIn("--ignore-existing", copy)
+
+    def test_partial_initial_copy_reserves_space_only_for_missing_files(self):
+        with tempfile.TemporaryDirectory(prefix="explorer-sync-space-test-") as temporary:
+            worker, pair, local, remote, _engine = self.local_worker(Path(temporary), file_count=2)
+            shutil.copy2(remote / "file0.txt", local / "file0.txt")
+            free = 64 * 1024 * 1024 + (remote / "file1.txt").stat().st_size
+            with mock.patch.object(SYNC.shutil, "disk_usage", return_value=mock.Mock(free=free)):
+                self.assertFalse(worker.run_pair(pair))
+            self.assertTrue(pair["initialized"])
+            self.assertEqual((local / "file1.txt").read_text(), "original 1")
+
+    def test_data_transfers_have_longer_bounded_budget_than_thirty_minutes(self):
+        with tempfile.TemporaryDirectory(prefix="explorer-sync-budget-test-") as temporary:
+            worker, pair, _local, _remote, engine = self.local_worker(Path(temporary), file_count=2)
+            with mock.patch.object(engine, "run", wraps=engine.run) as run:
+                self.assertFalse(worker.run_pair(pair))
+            budgets = {call.args[0][0]: call.kwargs.get("timeout", 1800) for call in run.call_args_list}
+            for command in ("copy", "bisync"):
+                with self.subTest(command=command):
+                    self.assertGreater(budgets[command], 1800)
+                    self.assertLessEqual(budgets[command], 24 * 60 * 60)
+            self.assertTrue(pair["initialized"])
 
     def test_worker_initialization_and_regular_jobs_with_local_remote_adapter(self):
         with tempfile.TemporaryDirectory(prefix="explorer-sync-job-test-") as temporary:

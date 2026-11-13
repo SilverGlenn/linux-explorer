@@ -51,8 +51,19 @@ for installer, programs, expected in (
             assert str(work) not in actual, (installer, identity)
         if installer == 'DesktopEntries':
             original = (source / 'linux-explorer-win7.desktop').read_text()
-            actual = (applications / 'linux-explorer-win7.desktop').read_text()
-            assert actual == original.replace('Exec=explorer-win7',
-                                               f'Exec="{escaped(prefix + "/bin/explorer-win7")}"')
+            browser = applications / 'linux-explorer-win7.desktop'
+            expected_browser = original.replace('Exec=explorer-win7',
+                                                 f'Exec="{escaped(prefix + "/bin/explorer-win7")}"')
+            assert browser.read_text() == expected_browser
+            # Updates retain the user's launch binding, including an explicitly
+            # empty binding, while refreshing the rest of the launcher.
+            for shortcut in ('Meta+E', 'Meta+Shift+E,Ctrl+Alt+E', ''):
+                binding = f'X-KDE-Shortcuts={shortcut}\n'
+                browser.write_text('[Desktop Entry]\nName=Old launcher\n'
+                                   + binding + 'Exec=/old/explorer\n')
+                subprocess.run(['cmake', f'-DCMAKE_INSTALL_PREFIX={prefix}', '-P', str(script)],
+                               env={**os.environ, 'DESTDIR': str(work / 'stage')}, check=True)
+                assert browser.read_text() == expected_browser.replace(
+                    '[Desktop Entry]\n', '[Desktop Entry]\n' + binding, 1)
 
-print('Browser, Chooser and Portal desktop identities, Exec escaping and DESTDIR: PASS')
+print('Browser, Chooser and Portal identities, Exec escaping, DESTDIR and shortcut preservation: PASS')

@@ -417,6 +417,63 @@ private Q_SLOTS:
             QStringLiteral("Review the existing files before retrying.")));
     }
 
+    void interruptedInitialCopyOffersResumeWithoutDeletionReview()
+    {
+        for (const QString &state : {QStringLiteral("needs-review"), QStringLiteral("paused")}) {
+            FakeGoogleDriveSyncController controller;
+            QTemporaryDir localFolder;
+            QVERIFY(localFolder.isValid());
+            controller.pairList = QJsonArray{QJsonObject{
+                {QStringLiteral("id"), QStringLiteral("partial-copy")},
+                {QStringLiteral("remote_name"), QStringLiteral("Work")},
+                {QStringLiteral("local_path"), localFolder.path()},
+                {QStringLiteral("state"), state},
+                {QStringLiteral("initialized"), false},
+                {QStringLiteral("can_resume"), false},
+                {QStringLiteral("can_retry_initial"), true}}};
+            GoogleDriveSyncDialog dialog(nullptr, &controller);
+            showDialog(dialog);
+            auto *pairs = tree(dialog, "googleDriveSyncPairs");
+            pairs->setCurrentItem(pairs->topLevelItem(0));
+            auto *resume = button(dialog, "googleDriveSyncPauseResume");
+            QVERIFY(resume->isEnabled());
+            QCOMPARE(resume->text(), QStringLiteral("Resume initial copy"));
+            QVERIFY(!button(dialog, "googleDriveSyncNow")->isEnabled());
+            resume->click();
+            QCOMPARE(controller.resumeCalls, 1);
+            QCOMPARE(controller.lastPairId, QStringLiteral("partial-copy"));
+            QCOMPARE(controller.reviewCalls, 0);
+            QCOMPARE(controller.removeCalls, 0);
+            QCOMPARE(controller.pauseCalls, 0);
+            auto pair = controller.pairList[0].toObject();
+            pair.insert(QStringLiteral("can_retry_initial"), false);
+            controller.pairList[0] = pair;
+            Q_EMIT controller.changed();
+            QVERIFY(!resume->isEnabled());
+        }
+    }
+
+    void initialCopyCanBePaused()
+    {
+        FakeGoogleDriveSyncController controller;
+        controller.pairList = QJsonArray{QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("initial-copy")},
+            {QStringLiteral("remote_name"), QStringLiteral("Work")},
+            {QStringLiteral("state"), QStringLiteral("initializing")},
+            {QStringLiteral("initialized"), false},
+            {QStringLiteral("can_resume"), false}}};
+        GoogleDriveSyncDialog dialog(nullptr, &controller);
+        showDialog(dialog);
+        auto *pairs = tree(dialog, "googleDriveSyncPairs");
+        pairs->setCurrentItem(pairs->topLevelItem(0));
+        auto *pause = button(dialog, "googleDriveSyncPauseResume");
+        QVERIFY(pause->isEnabled());
+        QCOMPARE(pause->text(), QStringLiteral("Pause"));
+        pause->click();
+        QCOMPARE(controller.pauseCalls, 1);
+        QCOMPARE(controller.lastPairId, QStringLiteral("initial-copy"));
+    }
+
     void needsReviewRequiresExplicitReviewAndConfirmation()
     {
         FakeGoogleDriveSyncController controller;

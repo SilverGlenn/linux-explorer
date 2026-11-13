@@ -40,6 +40,7 @@
 #include <QSignalSpy>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QTemporaryDir>
@@ -97,6 +98,70 @@ private slots:
     void initTestCase()
     {
         Aero::registerStylesheet(qApp);
+    }
+
+    // Each case starts as a first-ever picker would
+    void init() { Settings::clearChooserMemory(); }
+    void cleanupTestCase() { Settings::clearChooserMemory(); }
+
+    void firstPickerStartsInDownloadsNewestFirst()
+    {
+        const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        QVERIFY(QDir().mkpath(downloads));
+        FileChooserDialog dialog{ChooserOptions{}};
+        QCOMPARE(dialog.currentUrl(), QUrl::fromLocalFile(downloads));
+        auto *model = dialog.findChild<DirectoryModel *>();
+        QCOMPARE(model->sortColumn(), int(DirectoryModel::ModifiedTime));
+        QCOMPARE(model->sortOrder(), Qt::DescendingOrder);
+    }
+
+    void pickerRemembersFolderSortAndViewAcrossApplications()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString file = dir.filePath(QStringLiteral("picked.txt"));
+        writeFile(file);
+        {
+            FileChooserDialog first(optionsFor(dir.path()));
+            show(first);
+            auto *model = first.findChild<DirectoryModel *>();
+            auto *files = first.findChild<FileView *>();
+            QTRY_VERIFY(model->indexForUrl(QUrl::fromLocalFile(file)).isValid());
+            files->sortBy(DirectoryModel::Size, Qt::AscendingOrder);
+            files->setViewMode(Settings::ViewMode::List);
+            name(first)->setText(QStringLiteral("picked.txt"));
+            first.accept();
+            QCOMPARE(first.result(), int(QDialog::Accepted));
+        }
+        // A later request from any application that names no folder of its own
+        FileChooserDialog second{ChooserOptions{}};
+        QCOMPARE(second.currentUrl(), QUrl::fromLocalFile(dir.path()));
+        auto *model = second.findChild<DirectoryModel *>();
+        QCOMPARE(model->sortColumn(), int(DirectoryModel::Size));
+        QCOMPARE(model->sortOrder(), Qt::AscendingOrder);
+        QCOMPARE(second.findChild<FileView *>()->viewMode(), Settings::ViewMode::List);
+
+        // The application's own folder still wins, keeping the arrangement
+        QTemporaryDir other;
+        QVERIFY(other.isValid());
+        FileChooserDialog third(optionsFor(other.path()));
+        QCOMPARE(third.currentUrl(), QUrl::fromLocalFile(other.path()));
+        QCOMPARE(third.findChild<DirectoryModel *>()->sortColumn(), int(DirectoryModel::Size));
+
+        // Cancelling keeps the arrangement but does not move the folder
+        third.reject();
+        FileChooserDialog fourth{ChooserOptions{}};
+        QCOMPARE(fourth.currentUrl(), QUrl::fromLocalFile(dir.path()));
+    }
+
+    void rememberedFolderThatIsGoneFallsBackToDownloads()
+    {
+        const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        QVERIFY(QDir().mkpath(downloads));
+        Settings::setChooserFolder(QUrl::fromLocalFile(QDir::homePath() + QStringLiteral("/no such folder")));
+        FileChooserDialog dialog{ChooserOptions{}};
+        QCOMPARE(dialog.currentUrl(), QUrl::fromLocalFile(downloads));
+        QVERIFY(!dialog.findChild<QLabel *>(QStringLiteral("chooserError"))->isVisibleTo(&dialog));
     }
 
     void activationSelectsWithoutLaunchingAndPoliciesAreOptIn()

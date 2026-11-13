@@ -3,3 +3,4 @@ result
 client_secret_*.json
 google-oauth-client*.json
 CMakeUserPresets.json
+/.herd/

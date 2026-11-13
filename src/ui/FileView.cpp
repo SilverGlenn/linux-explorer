@@ -5,6 +5,7 @@
 #include "DirectoryModel.h"
 #include "GroupingProxy.h"
 #include "Locations.h"
+#include "PortalExport.h"
 #include "aero/text.h"
 #include "aero/listview.h"
 #include "aero/palette.h"
@@ -25,10 +26,12 @@
 #include <QDropEvent>
 #include <QMouseEvent>
 #include <QPersistentModelIndex>
+#include <QPointer>
 #include <QTimer>
 #include <QStyleOptionButton>
 #include <QTimerEvent>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
@@ -38,9 +41,11 @@
 #include <QPainter>
 #include <QRubberBand>
 #include <QScrollBar>
+#include <QScopeGuard>
 #include <QShowEvent>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
+#include <QTextLayout>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -58,9 +63,54 @@ constexpr int kCheckMargin = 2;
 constexpr int kSpringLoadDelay = 700;
 
 // A 48px icon with three lines, and a 32px icon with two
-constexpr int kTileWidth = 256;
+constexpr int kTileWidth = 250;
 constexpr int kTileHeight = 56;
 constexpr int kContentHeight = 50;
+constexpr int kIconViewInset = 8;
+constexpr int kIconGapH = 24;
+constexpr int kIconGapV = 8;
+constexpr int kSmallGapH = 16;
+constexpr int kSmallGapV = 4;
+constexpr int kTileGapH = 6;
+constexpr int kTileGapV = 4;
+
+int tileHeight(const QFontMetrics &metrics)
+{
+    return qMax(kTileHeight, 3 * metrics.height() + 6);
+}
+
+int contentHeight(const QFontMetrics &metrics)
+{
+    return qMax(kContentHeight, 2 * metrics.height() + 6);
+}
+
+QString iconCaption(const QStyleOptionViewItem &option, int width)
+{
+    // Native word wrapping alone will elide an entire underscore-separated
+    // filename onto one line. Break at a word boundary where possible, or at a
+    // Unicode text boundary otherwise, then elide only the second line.
+    width = qMax(1, width);
+    QTextLayout layout(option.text, option.font);
+    QTextOption textOption;
+    textOption.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    textOption.setTextDirection(option.direction);
+    layout.setTextOption(textOption);
+    layout.beginLayout();
+    QTextLine line = layout.createLine();
+    if (!line.isValid()) {
+        layout.endLayout();
+        return option.text;
+    }
+    line.setLineWidth(width);
+    const int split = line.textLength();
+    layout.endLayout();
+    if (split >= option.text.size())
+        return option.text;
+    QString remaining = option.text.mid(split).trimmed();
+    remaining.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    return option.text.left(split).trimmed() + QLatin1Char('\n')
+        + option.fontMetrics.elidedText(remaining, Qt::ElideRight, width);
+}
 
 int defaultColumnWidth(int sourceColumn)
 {
@@ -274,23 +324,37 @@ public:
     {
         switch (m_layout) {
         case Tile:
-            return QSize(kTileWidth, kTileHeight);
+            return QSize(kTileWidth, tileHeight(option.fontMetrics));
         case Content:
-            return QSize(qMax(m_rowWidth, 120), kContentHeight);
+            return QSize(qMax(m_rowWidth, 1), contentHeight(option.fontMetrics));
         case Standard:
-        default:
-            return QStyledItemDelegate::sizeHint(option, index);
+        default: {
+            const auto *list = qobject_cast<const QListView *>(option.widget);
+            // QListView's ListMode advances by gridSize but does not bound the
+            // item's own rectangle. Its natural filename width can overlap
+            // several neighbouring cells. IconMode also needs stable cells:
+            // thumbnail aspect ratios must not steal the caption's two lines.
+            if (list && list->gridSize().isValid()) {
+                // The grid is the pitch, not the item box. Leave actual blank
+                // space between paint/selection/hit rectangles, as Explorer does.
+                const QSize gap = list->viewMode() == QListView::IconMode
+                    ? QSize(kIconGapH, kIconGapV) : QSize(kSmallGapH, kSmallGapV);
+                return (list->gridSize() - gap).expandedTo(QSize(1, 1));
+            }
+            QSize size = QStyledItemDelegate::sizeHint(option, index);
+            size.rwidth() += checkBoxSpace(index);
+            return size;
+        }
         }
     }
 
-    // Reports the space taken, so the caller can paint clear of it
-    int paintCheckBox(QPainter *painter, const QStyleOptionViewItem &option,
+    void paintCheckBox(QPainter *painter, const QStyleOptionViewItem &option,
                       const QModelIndex &index) const
     {
         // The first logical column is the name whatever the header's order,
         // and a grouping heading has no file to select
         if (!m_checkBoxes || index.column() != 0 || itemFor(index).isNull())
-            return 0;
+            return;
 
         // The box follows the selection rather than a state of its own
         QStyleOptionButton box;
@@ -303,19 +367,60 @@ public:
         QStyle *style = option.widget ? option.widget->style() : QApplication::style();
         style->drawPrimitive(QStyle::PE_IndicatorCheckBox, &box, painter,
                              option.widget);
-
-        return m_rowBased ? kCheckSize + 2 * kCheckMargin : 0;
     }
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override
     {
+        painter->save();
+        const auto restorePainter = qScopeGuard([painter] { painter->restore(); });
+        if (qobject_cast<const QListView *>(option.widget))
+            painter->setClipRect(option.rect, Qt::IntersectClip);
+        const int reserved = checkBoxSpace(index);
         if (m_layout == Standard) {
             QStyleOptionViewItem shifted = option;
-            // The icon modes need no shift, the box sitting over empty space
-            const int reserved = paintCheckBox(painter, option, index);
+            initStyleOption(&shifted, index);
+            Aero::correctRowSelectionPosition(shifted, index);
+            QStyle *style = shifted.widget ? shifted.widget->style() : QApplication::style();
+            const auto *tree = qobject_cast<const QTreeView *>(shifted.widget);
+            if (tree && tree->selectionBehavior() == QAbstractItemView::SelectRows
+                && (shifted.state & (QStyle::State_Selected | QStyle::State_MouseOver))) {
+                // Some styles join cells by logical neighbors, even after
+                // columns move. Render one continuous native row background,
+                // clipped to this cell, rather than a separate frame per cell.
+                QStyleOptionViewItem background = shifted;
+                background.rect = {};
+                for (int column = 0; column < tree->header()->count(); ++column) {
+                    if (!tree->isColumnHidden(column))
+                        background.rect |= QRect(tree->columnViewportPosition(column), option.rect.top(),
+                                                 tree->columnWidth(column), option.rect.height());
+                }
+                background.viewItemPosition = QStyleOptionViewItem::OnlyOne;
+                painter->save();
+                painter->setClipRect(option.rect, Qt::IntersectClip);
+                style->drawPrimitive(QStyle::PE_PanelItemViewItem, &background, painter, tree);
+                painter->restore();
+
+                // Preserve selected text/icon appearance while letting the
+                // native delegate draw content without another cell highlight.
+                if (shifted.state & QStyle::State_Selected) {
+                    shifted.palette.setBrush(QPalette::Text, shifted.palette.brush(QPalette::HighlightedText));
+                    if (!shifted.icon.isNull()) {
+                        const QIcon::Mode mode = shifted.state & QStyle::State_Enabled
+                            ? QIcon::Selected : QIcon::Disabled;
+                        const QIcon::State state = shifted.state & QStyle::State_Open ? QIcon::On : QIcon::Off;
+                        shifted.icon = QIcon(shifted.icon.pixmap(shifted.decorationSize,
+                            tree->devicePixelRatioF(), mode, state));
+                    }
+                }
+                shifted.state &= ~(QStyle::State_Selected | QStyle::State_MouseOver);
+                shifted.backgroundBrush = Qt::NoBrush;
+            }
+            // Draw the checkbox last: selected backgrounds and thumbnails
+            // would otherwise cover the corner overlay in icon modes.
             shifted.rect.setLeft(shifted.rect.left() + reserved);
-            QStyledItemDelegate::paint(painter, shifted, index);
+            style->drawControl(QStyle::CE_ItemViewItem, &shifted, painter, shifted.widget);
+            paintCheckBox(painter, option, index);
             return;
         }
 
@@ -329,9 +434,6 @@ public:
         opt.features &= ~QStyleOptionViewItem::HasDecoration;
         QStyle *style = opt.widget ? opt.widget->style() : QApplication::style();
         style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
-
-        // After the background, or the row's highlight would paint over it
-        const int reserved = paintCheckBox(painter, option, index);
 
         const bool selected = opt.state & QStyle::State_Selected;
         const int iconSize = (m_layout == Tile) ? 48 : 32;
@@ -359,6 +461,37 @@ public:
                                option.rect.bottomRight() - QPoint(4, 0));
         }
         painter->restore();
+        paintCheckBox(painter, option, index);
+    }
+
+    void updateEditorGeometry(QWidget *editor, const QStyleOptionViewItem &option,
+                              const QModelIndex &index) const override
+    {
+        if (!editor) return;
+        const int reserved = checkBoxSpace(index);
+        if (m_layout == Standard) {
+            QStyleOptionViewItem shifted = option;
+            shifted.rect.setLeft(shifted.rect.left() + reserved);
+            QStyledItemDelegate::updateEditorGeometry(editor, shifted, index);
+            return;
+        }
+        // Tile/Content captions are not the native IconMode text rectangle.
+        // Keep the editor over the name, clear of the icon and metadata.
+        const int iconSize = m_layout == Tile ? 48 : 32;
+        const QRect area = option.rect.adjusted(4 + reserved + iconSize + 8, 3, -6, -3);
+        const int height = qMin(editor->sizeHint().height(), option.rect.height());
+        QRect name;
+        if (m_layout == Tile) {
+            const ItemText text = itemText(index, false, option.palette);
+            const int lines = 1 + !text.type.isEmpty() + !text.size.isEmpty();
+            const int lineHeight = option.fontMetrics.height();
+            const int top = area.top() + (area.height() - lines * lineHeight) / 2;
+            name = QRect(area.left(), top - (height - lineHeight) / 2, area.width(), height);
+        } else {
+            name = QRect(area.left(), area.top() + (area.height() - height) / 2,
+                         qMax(1, area.width() - area.width() / 2 - 12), height);
+        }
+        editor->setGeometry(name.intersected(option.rect));
     }
 
     void setEditorData(QWidget *editor, const QModelIndex &index) const override
@@ -402,7 +535,29 @@ public:
         onRename(index, line->text().trimmed());
     }
 
+protected:
+    void initStyleOption(QStyleOptionViewItem *option, const QModelIndex &index) const override
+    {
+        QStyledItemDelegate::initStyleOption(option, index);
+        const auto *list = qobject_cast<const QListView *>(option->widget);
+        if (m_layout != Standard || !list || list->viewMode() != QListView::IconMode)
+            return;
+        // Share the same geometry between native painting and inline rename.
+        // Center portrait, landscape and stock icons in a stable square box.
+        option->decorationSize = list->iconSize();
+        QStyle *style = list->style();
+        const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, option, list) + 1;
+        const QRect textRect = style->subElementRect(QStyle::SE_ItemViewItemText, option, list);
+        option->text = iconCaption(*option, textRect.width() - 2 * margin);
+    }
+
 private:
+    int checkBoxSpace(const QModelIndex &index) const
+    {
+        return m_checkBoxes && m_rowBased && index.column() == 0 && !itemFor(index).isNull()
+            ? kCheckSize + 2 * kCheckMargin : 0;
+    }
+
     // The index belongs to whichever model the view is currently on
     KFileItem itemFor(const QModelIndex &index) const
     {
@@ -465,6 +620,7 @@ protected:
         if (indexes.isEmpty()) return;
         QMimeData *mime = Base::model()->mimeData(indexes);
         if (!mime) return;
+        PortalExport::offer(mime);
         QDrag drag(this);
         drag.setMimeData(mime);
         QList<QIcon> icons;
@@ -549,6 +705,16 @@ private:
 class DetailsTree : public DropTarget<QTreeView> {
 public:
     using DropTarget<QTreeView>::DropTarget;
+    ~DetailsTree() override { delete m_band.data(); }
+
+    void setBandContainer(QWidget *container)
+    {
+        QWidget *parent = container ? container : viewport();
+        if (m_band)
+            m_band->setParent(parent);
+        else
+            m_band = new QRubberBand(QRubberBand::Rectangle, parent);
+    }
 
 protected:
     void mousePressEvent(QMouseEvent *event) override
@@ -575,13 +741,29 @@ protected:
         }
 
         if (!m_band)
-            m_band = new QRubberBand(QRubberBand::Rectangle, viewport());
+            setBandContainer(nullptr);
         const QRect rect = QRect(m_origin, event->pos()).normalized();
-        m_band->setGeometry(rect);
+        // Explorer's band includes its outer left gutter. Paint in the host's
+        // coordinates, but keep the header and scrollbars outside the band.
+        const QPoint offset = viewport()->mapTo(m_band->parentWidget(), QPoint());
+        QRect bounds = viewport()->rect().translated(offset);
+        bounds.setLeft(0);
+        m_band->setGeometry(rect.translated(offset).intersected(bounds));
         m_band->show();
 
         selectionModel()->select(m_initial, QItemSelectionModel::ClearAndSelect);
-        setSelection(rect, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        // QTreeView substitutes the final row when a rectangle's bottom
+        // corner misses every column. Keep the visible band unchanged, but
+        // exclude the blank gutter (and off-viewport space) from hit-testing.
+        QRect columns;
+        for (int column = 0; column < header()->count(); ++column) {
+            if (!isColumnHidden(column))
+                columns |= QRect(columnViewportPosition(column), 0,
+                                 columnWidth(column), viewport()->height());
+        }
+        const QRect hitRect = rect.intersected(columns).intersected(viewport()->rect());
+        if (!hitRect.isEmpty())
+            setSelection(hitRect, QItemSelectionModel::Select | QItemSelectionModel::Rows);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override
@@ -595,14 +777,75 @@ protected:
         DropTarget<QTreeView>::mouseReleaseEvent(event);
     }
 
+    void hideEvent(QHideEvent *event) override
+    {
+        m_banding = false;
+        if (m_band)
+            m_band->hide();
+        DropTarget<QTreeView>::hideEvent(event);
+    }
+
 private:
-    QRubberBand *m_band = nullptr;
+    QPointer<QRubberBand> m_band;
     QItemSelection m_initial;
     QPoint m_origin;
     bool m_banding = false;
 };
 
-using IconList = DropTarget<QListView>;
+class IconList : public DropTarget<QListView> {
+public:
+    IconList()
+    {
+        // Grid layouts ignore QListView::spacing(). Keep a small white inset
+        // around the icon viewport instead, leaving Details headers untouched.
+        setViewportMargins(0, kIconViewInset, kIconViewInset, kIconViewInset);
+        setBackgroundRole(QPalette::Base);
+        setAutoFillBackground(true);
+    }
+
+protected:
+    void setSelection(const QRect &rect, QItemSelectionModel::SelectionFlags command) override
+    {
+        if (viewMode() != QListView::ListMode || state() != DragSelectingState || !model()) {
+            QListView::setSelection(rect, command);
+            return;
+        }
+        // Qt's ListMode rubber-band lookup includes entire grid slots, even
+        // when indexAt() correctly reports a gap. Select actual item boxes.
+        // Rows are ordered by their layout row (Small) or column (List): locate
+        // the first candidate group without scanning the whole directory.
+        const QRect area = rect.normalized();
+        const bool across = flow() == QListView::LeftToRight;
+        const auto position = [this, across](const QRect &box) {
+            return across ? box.top() : isRightToLeft() ? -box.right() : box.left();
+        };
+        const auto index = [this](int row) { return model()->index(row, modelColumn(), rootIndex()); };
+        const int count = model()->rowCount(rootIndex());
+        const auto lowerBound = [&](int coordinate) {
+            int low = 0, high = count;
+            while (low < high) {
+                const int middle = low + (high - low) / 2;
+                if (position(visualRect(index(middle))) < coordinate) low = middle + 1;
+                else high = middle;
+            }
+            return low;
+        };
+        int first = lowerBound(position(area));
+        if (first > 0)
+            first = lowerBound(position(visualRect(index(first - 1))));
+        const int end = across ? area.bottom() : isRightToLeft() ? -area.left() : area.right();
+        QItemSelection selection;
+        for (int row = first; row < count; ++row) {
+            const QModelIndex item = index(row);
+            const QRect box = visualRect(item);
+            if (position(box) > end) break;
+            if (box.intersects(area) && (item.flags() & Qt::ItemIsSelectable)
+                && (item.flags() & Qt::ItemIsEnabled))
+                selection.select(item, item);
+        }
+        selectionModel()->select(selection, command);
+    }
+};
 
 } // namespace
 
@@ -679,6 +922,7 @@ FileView::FileView(DirectoryModel *model, QWidget *parent)
     // Tick box clicks are caught before they turn into selections
     m_details->viewport()->installEventFilter(this);
     m_icons->viewport()->installEventFilter(this);
+    m_icons->installEventFilter(this);
 
     m_previewUpdateTimer = new QTimer(this);
     m_previewUpdateTimer->setSingleShot(true);
@@ -736,6 +980,9 @@ void FileView::buildDetailsView()
     header->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(header, &QHeaderView::customContextMenuRequested,
             this, &FileView::showHeaderMenu);
+    connect(header, &QHeaderView::sectionMoved, this, &FileView::layoutChanged);
+    connect(header, &QHeaderView::sectionResized, this, &FileView::layoutChanged);
+    connect(header, &QHeaderView::sortIndicatorChanged, this, &FileView::layoutChanged);
 
     // Not the view's own activation, which follows the style's single click
     // hint, where the folder options have to override it
@@ -859,6 +1106,7 @@ void FileView::showHeaderMenu(const QPoint &pos)
             m_details->header()->setSortIndicator(indicatorColumn, order);
             m_model->sort(sortColumn, order);
             configureColumns();
+            Q_EMIT layoutChanged();
         });
     }
 
@@ -979,6 +1227,12 @@ void FileView::applyMode()
 
     m_stack->setCurrentWidget(m_icons);
     m_icons->setIconSize(QSize(iconSize, iconSize));
+    // Qt ignores spacing for grid layouts; only natural-width List uses it.
+    m_icons->setSpacing(m_mode == Settings::ViewMode::List ? 2 : 0);
+    // Without alignment Qt stretches List items across the inter-column gap.
+    m_icons->setItemAlignment(m_mode == Settings::ViewMode::List ? Qt::AlignLeft : Qt::Alignment());
+    m_icons->setHorizontalScrollBarPolicy(m_mode == Settings::ViewMode::Content
+        ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAsNeeded);
 
     auto *delegate = static_cast<ItemDelegate *>(m_icons->itemDelegate());
 
@@ -996,7 +1250,6 @@ void FileView::applyMode()
         m_icons->setWrapping(true);
         m_icons->setWordWrap(false);
         m_icons->setUniformItemSizes(false);
-        m_icons->setGridSize(QSize());
         m_icons->setTextElideMode(Qt::ElideRight);
         break;
 
@@ -1007,7 +1260,6 @@ void FileView::applyMode()
         m_icons->setWrapping(true);
         m_icons->setWordWrap(false);
         m_icons->setUniformItemSizes(false);
-        m_icons->setGridSize(QSize(160, 21));
         m_icons->setTextElideMode(Qt::ElideRight);
         break;
 
@@ -1018,7 +1270,6 @@ void FileView::applyMode()
         m_icons->setWrapping(true);
         m_icons->setWordWrap(false);
         m_icons->setUniformItemSizes(true);
-        m_icons->setGridSize(QSize(kTileWidth, kTileHeight));
         break;
 
     case Settings::ViewMode::Content:
@@ -1029,8 +1280,6 @@ void FileView::applyMode()
         m_icons->setWrapping(false);
         m_icons->setWordWrap(false);
         m_icons->setUniformItemSizes(true);
-        delegate->setRowWidth(m_icons->viewport()->width());
-        m_icons->setGridSize(QSize(m_icons->viewport()->width(), kContentHeight));
         break;
 
     default:
@@ -1042,10 +1291,9 @@ void FileView::applyMode()
         m_icons->setWordWrap(true);
         m_icons->setUniformItemSizes(true);
         m_icons->setTextElideMode(Qt::ElideRight);
-        m_icons->setGridSize(QSize(qMax(iconSize + 32, 80),
-                                   iconSize + 2 * fontMetrics().height() + 8));
         break;
     }
+    updateIconGrid();
 
     // QListView treats a Static movement as "nothing may be dragged", so both
     // setMovement() and setViewMode() switch dragging off along with the
@@ -1056,6 +1304,38 @@ void FileView::applyMode()
     rebuildPreviews();
     m_previewUpdateTimer->start();
     repositionMessage();
+}
+
+void FileView::updateIconGrid()
+{
+    if (!m_icons || m_mode == Settings::ViewMode::Details)
+        return;
+    const QFontMetrics metrics = m_icons->fontMetrics();
+    QSize grid;
+    switch (m_mode) {
+    case Settings::ViewMode::List:
+        break; // Natural-width columns, filled from top to bottom.
+    case Settings::ViewMode::SmallIcons:
+        grid = QSize(160 + kSmallGapH, qMax(21, metrics.height() + 6) + kSmallGapV);
+        break;
+    case Settings::ViewMode::Tiles:
+        grid = QSize(kTileWidth + kTileGapH, tileHeight(metrics) + kTileGapV);
+        break;
+    case Settings::ViewMode::Content: {
+        const int width = qMax(1, m_icons->viewport()->width());
+        static_cast<ItemDelegate *>(m_icons->itemDelegate())->setRowWidth(width);
+        grid = QSize(width, contentHeight(metrics));
+        break;
+    }
+    default: {
+        const int iconSize = Settings::iconSizeFor(m_mode);
+        grid = QSize(qMax(iconSize + 8, 72) + kIconGapH,
+                     iconSize + 2 * metrics.height() + 8 + kIconGapV);
+        break;
+    }
+    }
+    if (m_icons->gridSize() != grid)
+        m_icons->setGridSize(grid);
 }
 
 void FileView::rebuildPreviews()
@@ -1099,6 +1379,11 @@ QAbstractItemView *FileView::currentView() const
 void FileView::focusView()
 {
     currentView()->setFocus(Qt::TabFocusReason);
+}
+
+void FileView::setSelectionBandContainer(QWidget *container)
+{
+    static_cast<DetailsTree *>(m_details)->setBandContainer(container);
 }
 
 void FileView::bindActivation(QAbstractItemView *view)
@@ -1170,6 +1455,11 @@ void FileView::setCheckBoxesVisible(bool visible)
 
 bool FileView::eventFilter(QObject *watched, QEvent *event)
 {
+    if ((watched == m_icons->viewport() && event->type() == QEvent::Resize)
+        || (watched == m_icons && event->type() == QEvent::FontChange)) {
+        updateIconGrid();
+        repositionMessage();
+    }
     if (m_chooserMode && (event->type() == QEvent::DragEnter
         || event->type() == QEvent::DragMove || event->type() == QEvent::Drop)) {
         event->ignore();
@@ -1416,6 +1706,36 @@ void FileView::setHeaderState(const QByteArray &state)
         m_sizedColumns.insert(source);
 }
 
+void FileView::restoreLayout(const Settings::FolderViewState &state)
+{
+    // Logical header indexes only have meaning after the visible source
+    // columns are restored. Grouping swaps the model and must come next.
+    setGroupColumn(-1);
+    QList<int> columns;
+    for (int source : state.visibleColumns) {
+        if (source >= 0 && source < DirectoryModel::ColumnCount && !columns.contains(source))
+            columns.append(source);
+    }
+    if (columns.isEmpty())
+        columns = {DirectoryModel::Name, DirectoryModel::Size,
+                   DirectoryModel::ModifiedTime, DirectoryModel::Type};
+    m_model->setVisibleColumns(columns);
+    // A missing/corrupt header must fall back to defaults, not to whichever
+    // folder was on screen before this one.
+    m_sizedColumns.clear();
+    configureColumns();
+    setViewMode(state.mode);
+    if (state.mode == Settings::ViewMode::Details
+        && state.groupColumn >= 0 && state.groupColumn < DirectoryModel::ColumnCount)
+        setGroupColumn(state.groupColumn);
+    setHeaderState(state.header);
+    const int sortColumn = m_model->isColumnVisible(state.sortColumn)
+        ? state.sortColumn : int(DirectoryModel::Name);
+    sortBy(sortColumn, state.sortOrder);
+    // restoreState can restore the same indicator without emitting a change.
+    m_model->sort(sortColumn, state.sortOrder);
+}
+
 void FileView::setStatusMessage(const QString &message)
 {
     m_message->setText(message);
@@ -1441,12 +1761,7 @@ void FileView::resizeEvent(QResizeEvent *event)
     QWidget::resizeEvent(event);
     repositionMessage();
 
-    if (m_mode == Settings::ViewMode::Content) {
-        auto *delegate = static_cast<ItemDelegate *>(m_icons->itemDelegate());
-        const int width = m_icons->viewport()->width();
-        delegate->setRowWidth(width);
-        m_icons->setGridSize(QSize(width, kContentHeight));
-    }
+    updateIconGrid();
 }
 
 void FileView::setChooserMode(bool enabled, bool multiple)

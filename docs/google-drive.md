@@ -88,6 +88,11 @@ supported. The local folder remains an ordinary directory, available offline.
 
 Folder previews and recovery reviews share a two-minute inspection deadline,
 including ancestry, listing pages, network retries and local review hashing.
+Inspection batches up to 20 discovered subfolders per listing request instead of
+making a separate network round trip for every directory. Queries remain scoped
+to the selected folder tree, and all listing and file-safety checks still apply.
+A preview reports an existing parent/child sync overlap before scanning the
+whole tree; remove the other sync entry first (its files are kept).
 Explorer waits beyond the worker's response deadline, shows a useful error if a
 check fails, and permits a fresh preview. Back or Close cancels an owned read-only
 setup check without stopping established sync jobs. A busy status poll preserves
@@ -96,9 +101,18 @@ the last verified worker state rather than claiming sync support disappeared.
 The initial destination must be empty to avoid guessing which existing version
 is authoritative. A reviewed inventory is bound to the initial operation. If the
 cloud folder changes after preview, Explorer stops before downloading and asks
-for a fresh preview. If initial preparation is interrupted, downloaded files are
-kept and the pair requires attention; remove the pair and use a new empty folder
-to restart. Removing a pair never deletes its local or cloud files.
+for a fresh preview. If the initial download is interrupted, downloaded files are
+kept. **Resume initial copy** verifies the original cloud snapshot and hashes the
+partial local copy before downloading only missing files. Existing files and
+directories must match that snapshot; local edits, unexpected entries, cloud
+changes, or an already-started synchronization baseline stop the retry before
+writes. Such cases require reviewing the retained files before recreating the
+pair. Removing a pair never deletes its local or cloud files.
+
+Data-transfer commands have a bounded twelve-hour budget rather than the old
+thirty-minute cap, so a large initial copy can finish on slower connections.
+The sixty-second network I/O timeout and two-minute metadata inspection deadline
+remain in place. Initial downloads can also be paused and safely resumed.
 
 A single private worker per Linux user runs independently of Explorer windows.
 It checks established pairs every two minutes, and **Sync now** requests an

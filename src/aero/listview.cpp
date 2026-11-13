@@ -11,6 +11,7 @@
 #include <QPainter>
 #include <QPen>
 #include <QTreeView>
+#include <QStyleOptionViewItem>
 
 namespace {
 
@@ -114,6 +115,33 @@ private:
 } // namespace
 
 namespace Aero {
+
+void correctRowSelectionPosition(QStyleOptionViewItem &option, const QModelIndex &index)
+{
+    const auto *tree = qobject_cast<const QTreeView *>(option.widget);
+    if (!tree || tree->selectionBehavior() != QAbstractItemView::SelectRows)
+        return;
+
+    const QHeaderView *header = tree->header();
+    int first = -1;
+    int last = -1;
+    for (int visual = 0; visual < header->count(); ++visual) {
+        const int logical = header->logicalIndex(visual);
+        if (header->isSectionHidden(logical))
+            continue;
+        if (first < 0)
+            first = logical;
+        last = logical;
+    }
+    if (first == last)
+        option.viewItemPosition = QStyleOptionViewItem::OnlyOne;
+    else if (index.column() == first)
+        option.viewItemPosition = QStyleOptionViewItem::Beginning;
+    else if (index.column() == last)
+        option.viewItemPosition = QStyleOptionViewItem::End;
+    else
+        option.viewItemPosition = QStyleOptionViewItem::Middle;
+}
 
 void configureListTree(QTreeView *tree)
 {

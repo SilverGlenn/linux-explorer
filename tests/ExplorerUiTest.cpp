@@ -13,6 +13,7 @@
 #include "MainWindow.h"
 #include "ApplicationAppearance.h"
 #include "NavigationPane.h"
+#include "OptionsDialog.h"
 #include "PreviewPane.h"
 #include "Settings.h"
 #include "SearchBox.h"
@@ -25,6 +26,7 @@
 
 #include <QActionGroup>
 #include <QAbstractButton>
+#include <QAbstractItemDelegate>
 #include <QApplication>
 #include <QAccessible>
 #include <QContextMenuEvent>
@@ -46,6 +48,7 @@
 #include <QListView>
 #include <QMenuBar>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPainter>
 #include <QPdfWriter>
@@ -54,10 +57,14 @@
 #include <QPushButton>
 #include <QProcess>
 #include <QScreen>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QSlider>
+#include <QSplitter>
 #include <QStackedWidget>
+#include <QStyleOptionViewItem>
+#include <QStyleOptionButton>
 #include <QTemporaryDir>
 #include <QTextBrowser>
 #include <QTimer>
@@ -68,6 +75,7 @@
 #include <QWidgetAction>
 #include <QWindow>
 #include <memory>
+#include <limits>
 
 namespace {
 // Stable drives let the grouping tests run without depending on host devices.
@@ -97,6 +105,47 @@ public:
 private:
     bool fixedPresent = true;
 };
+
+struct ItemGaps {
+    int horizontal = std::numeric_limits<int>::max();
+    int vertical = std::numeric_limits<int>::max();
+    QPoint horizontalPoint{-1, -1};
+    QPoint verticalPoint{-1, -1};
+    QModelIndex rightItem;
+};
+
+ItemGaps visibleItemGaps(QListView *list)
+{
+    ItemGaps result;
+    for (int a = 0; a < list->model()->rowCount(); ++a) {
+        const QModelIndex ai = list->model()->index(a, 0);
+        const QRect ar = list->visualRect(ai);
+        if (!list->viewport()->rect().contains(ar.center())) continue;
+        for (int b = 0; b < list->model()->rowCount(); ++b) {
+            const QModelIndex bi = list->model()->index(b, 0);
+            const QRect br = list->visualRect(bi);
+            if (!list->viewport()->rect().contains(br.center())) continue;
+            const int top = qMax(ar.top(), br.top()), bottom = qMin(ar.bottom(), br.bottom());
+            const int left = qMax(ar.left(), br.left()), right = qMin(ar.right(), br.right());
+            if (ar.right() < br.left() && top <= bottom) {
+                const int gap = br.left() - ar.right() - 1;
+                if (gap < result.horizontal) {
+                    result.horizontal = gap;
+                    result.horizontalPoint = QPoint((ar.right() + br.left()) / 2, (top + bottom) / 2);
+                    result.rightItem = bi;
+                }
+            }
+            if (ar.bottom() < br.top() && left <= right) {
+                const int gap = br.top() - ar.bottom() - 1;
+                if (gap < result.vertical) {
+                    result.vertical = gap;
+                    result.verticalPoint = QPoint((left + right) / 2, (ar.bottom() + br.top()) / 2);
+                }
+            }
+        }
+    }
+    return result;
+}
 
 QAction *actionNamed(QWidget &window, const QString &name)
 {
@@ -129,6 +178,23 @@ private:
         QFile file(m_folder.toLocalFile() + QLatin1Char('/') + name);
         return file.open(QIODevice::WriteOnly) && file.write(data) == data.size();
     }
+    bool writeIconFixture(const QString &folder, int count = 36)
+    {
+        for (int i = 0; i < count; ++i) {
+            QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+            image.fill(QColor::fromHsv((i * 37) % 360, 150, 200));
+            QPainter painter(&image);
+            painter.setPen(Qt::white);
+            painter.drawText(image.rect(), Qt::AlignCenter, QStringLiteral("Image %1").arg(i));
+            painter.end();
+            const QString name = i % 3 == 0
+                ? QStringLiteral("Screenshot 20261112 %1 project notes with a long descriptive name.png").arg(i, 6, 10, QLatin1Char('0'))
+                : QStringLiteral("Screenshot_20261112_%1_a_very_long_filename_for_layout_review.png").arg(i, 6, 10, QLatin1Char('0'));
+            if (!image.save(folder + QLatin1Char('/') + name)) return false;
+        }
+        return true;
+    }
+
     std::unique_ptr<MainWindow> window(const QUrl &url)
     {
         auto result = std::make_unique<MainWindow>(url);
@@ -172,6 +238,261 @@ private Q_SLOTS:
         Settings::setSingleClickToOpen(false);
         Settings::setHideKnownExtensions(false);
         Settings::setDefaultViewMode(Settings::ViewMode::Details);
+    }
+
+    void init()
+    {
+        Settings::clearRememberedViewModes();
+        Settings::setDefaultViewMode(Settings::ViewMode::Details);
+        Settings::setHeaderState({});
+        Settings::setSplitterState({});
+        Settings::setWindowGeometry({});
+    }
+
+    void folderMemoryKeepsAnUntouchedViewWhenAnotherFolderChanges()
+    {
+        auto win = window(m_folder);
+        auto *view = win->findChild<FileView *>();
+        QCOMPARE(view->viewMode(), Settings::ViewMode::Details);
+        navigate(*win, QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos")));
+        actionNamed(*win, QStringLiteral("Large icons"))->trigger();
+        QCOMPARE(view->viewMode(), Settings::ViewMode::LargeIcons);
+        // No event-loop turn: a pending save must still belong to Photos.
+        navigate(*win, m_folder);
+        QCOMPARE(view->viewMode(), Settings::ViewMode::Details);
+        navigate(*win, QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos")));
+        QCOMPARE(view->viewMode(), Settings::ViewMode::LargeIcons);
+    }
+
+    void folderMemorySeparatesPreviewAndRetainsItsClosedWidth()
+    {
+        const QUrl other = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos"));
+        auto win = window(m_folder);
+        auto *preview = win->findChild<PreviewPane *>();
+        auto *button = win->findChild<QToolButton *>(QStringLiteral("previewPaneButton"));
+        auto *splitter = qobject_cast<QSplitter *>(preview->parentWidget());
+        QVERIFY(splitter);
+        button->click();
+        splitter->setSizes({158, 450, 300});
+        const int rememberedWidth = preview->width();
+        QVERIFY(rememberedWidth >= 200);
+        navigate(*win, other);
+        QVERIFY(!preview->isVisible());
+        QVERIFY(!button->isChecked());
+        navigate(*win, m_folder);
+        QVERIFY(preview->isVisible());
+        QVERIFY(button->isChecked());
+        QVERIFY(qAbs(preview->width() - rememberedWidth) <= 2);
+        button->click();
+        navigate(*win, other);
+        navigate(*win, m_folder);
+        QVERIFY(!preview->isVisible());
+        button->click();
+        QVERIFY(qAbs(preview->width() - rememberedWidth) <= 2);
+    }
+
+    void folderMemoryRestoresPreviewAndPanesAfterReopen()
+    {
+        int previewWidth = 0;
+        {
+            auto win = window(m_folder);
+            auto *preview = win->findChild<PreviewPane *>();
+            win->findChild<QToolButton *>(QStringLiteral("previewPaneButton"))->click();
+            auto *splitter = qobject_cast<QSplitter *>(preview->parentWidget());
+            splitter->setSizes({158, 450, 300});
+            previewWidth = preview->width();
+            actionNamed(*win, QStringLiteral("Navigation pane"))->trigger();
+            actionNamed(*win, QStringLiteral("Details pane"))->trigger();
+            QVERIFY(win->findChild<NavigationPane *>()->isHidden());
+            QVERIFY(win->findChild<DetailsPane *>()->isHidden());
+            // Flush on close without allowing the resize debounce to run.
+            win->close();
+        }
+        auto reopened = window(m_folder);
+        auto *preview = reopened->findChild<PreviewPane *>();
+        QVERIFY(preview->isVisible());
+        QVERIFY(reopened->findChild<QToolButton *>(QStringLiteral("previewPaneButton"))->isChecked());
+        QVERIFY(qAbs(preview->width() - previewWidth) <= 2);
+        QVERIFY(reopened->findChild<NavigationPane *>()->isHidden());
+        QVERIFY(reopened->findChild<DetailsPane *>()->isHidden());
+    }
+
+    void folderMemoryRestoresSourceColumnsSortAndGrouping()
+    {
+        const QUrl other = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos"));
+        auto win = window(m_folder);
+        auto *view = win->findChild<FileView *>();
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *header = view->findChild<QTreeView *>()->header();
+        model->setColumnVisible(DirectoryModel::Size, false);
+        view->setGroupColumn(DirectoryModel::Type);
+        view->sortBy(DirectoryModel::ModifiedTime, Qt::DescendingOrder);
+        header->moveSection(header->visualIndex(model->viewColumnFor(DirectoryModel::Type)), 0);
+        header->resizeSection(model->viewColumnFor(DirectoryModel::Name), 337);
+        header->resizeSection(model->viewColumnFor(DirectoryModel::Type), 173);
+        navigate(*win, other);
+        QCOMPARE(view->groupColumn(), -1);
+        QVERIFY(model->isColumnVisible(DirectoryModel::Size));
+        QCOMPARE(model->sortColumn(), int(DirectoryModel::Name));
+        view->setGroupColumn(DirectoryModel::Name);
+        view->sortBy(DirectoryModel::Size, Qt::AscendingOrder);
+        navigate(*win, m_folder);
+        QCOMPARE(view->groupColumn(), int(DirectoryModel::Type));
+        QVERIFY(!model->isColumnVisible(DirectoryModel::Size));
+        QCOMPARE(model->sortColumn(), int(DirectoryModel::ModifiedTime));
+        QCOMPARE(model->sortOrder(), Qt::DescendingOrder);
+        QCOMPARE(header->visualIndex(model->viewColumnFor(DirectoryModel::Type)), 0);
+        QCOMPARE(header->sectionSize(model->viewColumnFor(DirectoryModel::Name)), 337);
+        QCOMPARE(header->sectionSize(model->viewColumnFor(DirectoryModel::Type)), 173);
+        win->close();
+        auto reopened = window(m_folder);
+        model = reopened->findChild<DirectoryModel *>();
+        view = reopened->findChild<FileView *>();
+        header = view->findChild<QTreeView *>()->header();
+        QCOMPARE(view->groupColumn(), int(DirectoryModel::Type));
+        QCOMPARE(model->sortColumn(), int(DirectoryModel::ModifiedTime));
+        QCOMPARE(model->sortOrder(), Qt::DescendingOrder);
+        QVERIFY(!model->isColumnVisible(DirectoryModel::Size));
+        QCOMPARE(header->sectionSize(model->viewColumnFor(DirectoryModel::Name)), 337);
+        QCOMPARE(header->visualIndex(model->viewColumnFor(DirectoryModel::Type)), 0);
+    }
+
+    void folderMemoryUnchangedWindowCannotOverwriteANewerChoice()
+    {
+        auto first = window(m_folder);
+        first->findChild<QToolButton *>(QStringLiteral("previewPaneButton"))->click();
+        QTest::qWait(250);
+        auto second = window(m_folder);
+        auto *button = second->findChild<QToolButton *>(QStringLiteral("previewPaneButton"));
+        QVERIFY(button->isChecked());
+        button->click();
+        actionNamed(*second, QStringLiteral("Content"))->trigger();
+        QTest::qWait(250);
+        first->close();
+        auto third = window(m_folder);
+        QVERIFY(!third->findChild<PreviewPane *>()->isVisible());
+        QCOMPARE(third->findChild<FileView *>()->viewMode(), Settings::ViewMode::Content);
+    }
+
+    void folderMemoryKeepsVirtualPagesSeparate_data()
+    {
+        QTest::addColumn<QUrl>("destination");
+        QTest::newRow("computer") << Locations::computer();
+        QTest::newRow("libraries") << Locations::libraries();
+    }
+
+    void folderMemoryKeepsVirtualPagesSeparate()
+    {
+        QFETCH(QUrl, destination);
+        auto win = window(m_folder);
+        actionNamed(*win, QStringLiteral("Large icons"))->trigger();
+        win->findChild<QToolButton *>(QStringLiteral("previewPaneButton"))->click();
+        navigate(*win, destination);
+        QVERIFY(!win->findChild<PreviewPane *>()->isVisible());
+        actionNamed(*win, QStringLiteral("Details"))->trigger();
+        navigate(*win, m_folder);
+        QCOMPARE(win->findChild<FileView *>()->viewMode(), Settings::ViewMode::LargeIcons);
+        QVERIFY(win->findChild<PreviewPane *>()->isVisible());
+        navigate(*win, destination);
+        if (Locations::isComputer(destination))
+            QCOMPARE(win->findChild<ComputerView *>()->viewMode(), Settings::ViewMode::Details);
+        else
+            QCOMPARE(win->findChild<LibrariesView *>()->viewMode(), Settings::ViewMode::Details);
+    }
+
+    void folderMemoryNormalizesPathsAndReadsLegacyModes()
+    {
+        const QUrl slash(m_folder.toString() + QLatin1Char('/'));
+        Settings::setViewModeFor(slash, Settings::ViewMode::LargeIcons);
+        QCOMPARE(Settings::viewModeFor(m_folder), Settings::ViewMode::LargeIcons);
+        Settings::clearRememberedViewModes();
+        const QString legacyKey = QString::fromLatin1(slash.toEncoded().toPercentEncoding());
+        QSettings().setValue(QStringLiteral("FolderViews/") + legacyKey, int(Settings::ViewMode::SmallIcons));
+        QCOMPARE(Settings::viewModeFor(m_folder), Settings::ViewMode::SmallIcons);
+    }
+
+    void folderMemoryCorruptHeaderDoesNotBorrowAnotherFoldersWidths()
+    {
+        const QUrl other = QUrl::fromLocalFile(m_folder.toLocalFile() + QStringLiteral("/Photos"));
+        auto win = window(m_folder);
+        auto *view = win->findChild<FileView *>();
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *header = view->findChild<QTreeView *>()->header();
+        header->resizeSection(model->viewColumnFor(DirectoryModel::Name), 391);
+        Settings::FolderViewState damaged;
+        damaged.header = "not a Qt header";
+        damaged.visibleColumns = {0, 1, 2, 6, -9, 99, 0};
+        damaged.mode = Settings::ViewMode(99);
+        damaged.sortColumn = 999;
+        damaged.groupColumn = 999;
+        Settings::setFolderViewStateFor(other, damaged);
+        navigate(*win, other);
+        QCOMPARE(view->viewMode(), Settings::ViewMode::Details);
+        QCOMPARE(model->visibleColumns(), (QList<int>{0, 1, 2, 6}));
+        QCOMPARE(model->sortColumn(), int(DirectoryModel::Name));
+        QCOMPARE(view->groupColumn(), -1);
+        QCOMPARE(header->sectionSize(model->viewColumnFor(DirectoryModel::Name)), 260);
+    }
+
+    void folderMemoryDoesNotPersistUrlPasswords()
+    {
+        const QUrl authenticated(QStringLiteral("sftp://user:credential-not-for-settings@example.invalid/work/"));
+        const QUrl withoutPassword(QStringLiteral("sftp://user@example.invalid/work"));
+        Settings::FolderViewState state;
+        state.mode = Settings::ViewMode::Content;
+        state.previewVisible = true;
+        Settings::setFolderViewStateFor(authenticated, state);
+        QCOMPARE(Settings::viewModeFor(withoutPassword), Settings::ViewMode::Content);
+        QVERIFY(Settings::folderViewStateFor(withoutPassword)->previewVisible);
+        Settings::setViewModeFor(authenticated, Settings::ViewMode::LargeIcons);
+        QCOMPARE(Settings::viewModeFor(withoutPassword), Settings::ViewMode::LargeIcons);
+        for (const QString &key : QSettings().allKeys())
+            QVERIFY(!key.contains(QStringLiteral("credential-not-for-settings")));
+    }
+
+    void folderMemoryKeepsOlderChoicesBeyondTheLegacyCacheLimit()
+    {
+        const QUrl kept(QStringLiteral("file:///folders/000-kept"));
+        Settings::setViewModeFor(kept, Settings::ViewMode::Content);
+        {
+            QSettings settings;
+            for (int i = 0; i < 400; ++i) {
+                const QUrl folder(QStringLiteral("file:///folders/other-%1").arg(i));
+                const QString key = QString::fromLatin1(folder.toEncoded().toPercentEncoding());
+                settings.setValue(QStringLiteral("FolderViews/") + key, int(Settings::ViewMode::Details));
+            }
+        }
+        Settings::setViewModeFor(QUrl(QStringLiteral("file:///folders/new")), Settings::ViewMode::LargeIcons);
+        QCOMPARE(Settings::viewModeFor(kept), Settings::ViewMode::Content);
+    }
+
+    void folderMemoryResetCancelsPendingLayouts()
+    {
+        auto win = window(m_folder);
+        win->findChild<QToolButton *>(QStringLiteral("previewPaneButton"))->click();
+        win->findChild<FileView *>()->setGroupColumn(DirectoryModel::Type);
+        // Open the real options dialog, use its existing Reset Folders action.
+        bool resetClicked = false;
+        QTimer::singleShot(0, win.get(), [&] {
+            auto *dialog = win->findChild<OptionsDialog *>();
+            if (!dialog) return;
+            for (auto *button : dialog->findChildren<QPushButton *>()) {
+                if (button->text() == QStringLiteral("Reset Folders")) {
+                    button->click();
+                    resetClicked = true;
+                    break;
+                }
+            }
+            dialog->reject();
+        });
+        actionNamed(*win, QStringLiteral("Folder and search options"))->trigger();
+        QVERIFY(resetClicked);
+        QVERIFY(!win->findChild<PreviewPane *>()->isVisible());
+        QCOMPARE(win->findChild<FileView *>()->groupColumn(), -1);
+        QTest::qWait(250);
+        auto reopened = window(m_folder);
+        QVERIFY(!reopened->findChild<PreviewPane *>()->isVisible());
+        QCOMPARE(reopened->findChild<FileView *>()->groupColumn(), -1);
     }
 
     void viewButtonUsesNativeFiveModeCycle()
@@ -254,7 +575,6 @@ private Q_SLOTS:
         QVERIFY(list);
         QCOMPARE(view.libraryCount(), Libraries::entries().size());
         QVERIFY(view.libraryCount() > 0);
-        QCOMPARE(list->itemDelegate()->sizeHint(QStyleOptionViewItem(), list->model()->index(0, 0)), QSize(256, 64));
         QCOMPARE(list->model()->index(0, 0).data(Qt::UserRole).toUrl(), Libraries::entries().first().url);
         QTest::qWait(30);
         const QPoint pos = list->visualRect(list->model()->index(0, 0)).center();
@@ -741,6 +1061,9 @@ private Q_SLOTS:
             }
             for (QAction *action : menu->actions())
                 if (action->text() == QLatin1String("Copy")) action->trigger();
+            QVERIFY(QApplication::clipboard()->mimeData()->urls().contains(target));
+            for (QAction *action : menu->actions())
+                if (action->text() == QLatin1String("Copy as path")) action->trigger();
         });
         view->contextMenuRequested(view->mapToGlobal(QPoint(50, 50)), true);
         QVERIFY(sawMenu);
@@ -750,13 +1073,15 @@ private Q_SLOTS:
         QVERIFY(commands.indexOf(QStringLiteral("Send to")) < commands.indexOf(QStringLiteral("Cut")));
         QVERIFY(commands.indexOf(QStringLiteral("Copy")) < commands.indexOf(QStringLiteral("Create shortcut")));
         QVERIFY(commands.indexOf(QStringLiteral("Delete")) < commands.indexOf(QStringLiteral("Rename")));
-        QCOMPARE(commands.contains(QStringLiteral("Copy as path")), extended);
+        QVERIFY(commands.contains(QStringLiteral("Copy as path")));
+        QCOMPARE(commands.indexOf(QStringLiteral("Copy as path")),
+                 commands.indexOf(QStringLiteral("Copy")) + 1);
         QCOMPARE(commands.contains(QStringLiteral("Open with")), !folder);
         QVERIFY(!hasWidgetRows);
         QVERIFY(!hasShortcutCaptions);
         QVERIFY(!commands.contains(QStringLiteral("Assign Tags")));
         QVERIFY(!commands.contains(QStringLiteral("Activities")));
-        QVERIFY(QApplication::clipboard()->mimeData()->urls().contains(target));
+        QCOMPARE(QApplication::clipboard()->text(), target.toLocalFile());
         QApplication::clipboard()->clear();
         // The context copy has no caption; the actual keyboard action remains bound.
         QCOMPARE(actionNamed(*win, QStringLiteral("Copy"))->shortcut(), QKeySequence(QKeySequence::Copy));
@@ -860,6 +1185,46 @@ private Q_SLOTS:
         QTest::keyClick(edit, Qt::Key_F6);
         QTRY_VERIFY(view->isAncestorOf(QApplication::focusWidget()));
         QTRY_VERIFY(!win->findChild<QLineEdit *>(QStringLiteral("pathEditor")));
+    }
+
+    void iconButtonsShowInsetSurfaceOnlyWhilePressed_data()
+    {
+        QTest::addColumn<QString>("accessibleName");
+        QTest::newRow("refresh") << QStringLiteral("Refresh");
+        QTest::newRow("help") << QStringLiteral("Help");
+    }
+
+    void iconButtonsShowInsetSurfaceOnlyWhilePressed()
+    {
+        QFETCH(QString, accessibleName);
+        auto win = window(Locations::libraries());
+        QToolButton *button = nullptr;
+        for (auto *candidate : win->findChildren<QToolButton *>()) {
+            if (candidate->accessibleName() == accessibleName) {
+                button = candidate;
+                break;
+            }
+        }
+        QVERIFY(button);
+        QTest::mouseMove(button, button->rect().center());
+        const QSize size = button->size();
+        // Sample the surface clear of the icon and the refresh separator.
+        const auto surface = [button] {
+            const QImage image = button->grab().toImage();
+            const qreal dpr = image.devicePixelRatio();
+            return image.pixelColor(qFloor(3.5 * dpr), qFloor(3.5 * dpr));
+        };
+        const QColor normal = surface();
+        QTest::mousePress(button, Qt::LeftButton);
+        QVERIFY(button->isDown());
+        QVERIFY2(surface() != normal, "Pressing must paint an inset surface behind the icon");
+        QCOMPARE(button->size(), size);
+        // Cancel without invoking Refresh or opening Help.
+        QTest::mouseMove(button, QPoint(-10, -10));
+        QTRY_VERIFY(!button->isDown());
+        QTest::mouseRelease(button, Qt::LeftButton, Qt::NoModifier, QPoint(-10, -10));
+        QTest::mouseMove(button, button->rect().center());
+        QCOMPARE(surface(), normal);
     }
 
     void helpIsModelessAndIconOnlyControlsHaveAccessibleNames()
@@ -1410,6 +1775,705 @@ private Q_SLOTS:
         QCOMPARE(type->toolTip(), QString());
     }
 
+    void iconItemsHaveRealWhitespaceBetweenThem_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<bool>("rtl");
+        QTest::addColumn<int>("horizontalGap");
+        QTest::addColumn<int>("verticalGap");
+        for (bool rtl : {false, true}) {
+            for (int mode : {0, 1, 2, 3, 4, 6}) {
+                QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(mode).arg(rtl ? "rtl" : "normal")))
+                    << mode << rtl << (mode <= 2 ? 24 : mode == 3 ? 16 : mode == 6 ? 6 : 4)
+                    << (mode <= 2 ? 8 : 4);
+            }
+        }
+    }
+
+    void iconItemsHaveRealWhitespaceBetweenThem()
+    {
+        QFETCH(int, mode);
+        QFETCH(bool, rtl);
+        QFETCH(int, horizontalGap);
+        QFETCH(int, verticalGap);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path()));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        // Fit two natural-width List columns under both native and Fusion
+        // fonts; per-item horizontal scrolling otherwise shows just one.
+        win->resize(mode == 4 ? 1200 : 1100, 720);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 36);
+        QTRY_VERIFY(win->findChild<QWidget *>(QStringLiteral("fileListPage"))->isVisible());
+        view->setViewMode(Settings::ViewMode(mode));
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        list->setLayoutDirection(rtl ? Qt::RightToLeft : Qt::LeftToRight);
+        list->doItemsLayout();
+        list->selectAll();
+        const QString output = qEnvironmentVariable("EXPLORER_ITEM_SPACING_AUDIT");
+        if (!output.isEmpty()) {
+            const auto ready = [&] {
+                const QIcon icon = qvariant_cast<QIcon>(model->model()->index(0, 0).data(Qt::DecorationRole));
+                const QSize size = icon.actualSize(QSize(256, 256));
+                return size.width() > size.height() && size.width() >= qMin(160, list->iconSize().width());
+            };
+            QTRY_VERIFY(ready());
+            QVERIFY(QDir().mkpath(output));
+            QVERIFY(win->grab().save(output + QLatin1Char('/') + QLatin1String(QTest::currentDataTag()) + QStringLiteral(".png")));
+        }
+        const ItemGaps gaps = visibleItemGaps(list);
+        QVERIFY(list->viewport()->rect().contains(gaps.horizontalPoint));
+        QVERIFY(list->viewport()->rect().contains(gaps.verticalPoint));
+        QVERIFY2(gaps.horizontal >= horizontalGap,
+                 qPrintable(QStringLiteral("Only %1 px between neighboring item boxes; need %2").arg(gaps.horizontal).arg(horizontalGap)));
+        QVERIFY2(gaps.vertical >= verticalGap,
+                 qPrintable(QStringLiteral("Only %1 px between rows; need %2").arg(gaps.vertical).arg(verticalGap)));
+        const QImage selected = list->viewport()->grab().toImage();
+        for (QPoint point : {gaps.horizontalPoint, gaps.verticalPoint}) {
+            QVERIFY2(!list->indexAt(point).isValid(), "The visible gap must be blank space, not another item's hit target");
+            const qreal scale = selected.devicePixelRatio();
+            QCOMPARE(selected.pixelColor(qRound(point.x() * scale), qRound(point.y() * scale)),
+                     list->viewport()->palette().color(QPalette::Base));
+            QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+            QTRY_VERIFY(list->selectionModel()->selectedIndexes().isEmpty());
+            list->selectAll();
+        }
+        // Real whitespace must also be usable to begin a rubber-band gesture.
+        list->clearSelection();
+        const QRect right = list->visualRect(gaps.rightItem);
+        const QPoint target(right.center().x(), gaps.horizontalPoint.y() + 4);
+        QTest::mousePress(list->viewport(), Qt::LeftButton, Qt::NoModifier, gaps.horizontalPoint);
+        QTest::mouseMove(list->viewport(), target, 20);
+        QTest::mouseRelease(list->viewport(), Qt::LeftButton, Qt::NoModifier, target);
+        QTRY_VERIFY(list->selectionModel()->isSelected(gaps.rightItem));
+        QCOMPARE(list->selectionModel()->selectedIndexes().size(), 1);
+    }
+
+    void compactIconBandSkipsTheGapNeighbor_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<bool>("rtl");
+        QTest::addColumn<bool>("control");
+        for (int mode : {3, 4})
+            for (bool rtl : {false, true})
+                for (bool control : {false, true})
+                    QTest::newRow(qPrintable(QStringLiteral("%1-%2-%3").arg(mode).arg(rtl).arg(control))) << mode << rtl << control;
+    }
+
+    void compactIconBandSkipsTheGapNeighbor()
+    {
+        QFETCH(int, mode);
+        QFETCH(bool, rtl);
+        QFETCH(bool, control);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path(), 160));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        win->resize(1100, 720);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 160);
+        QTRY_VERIFY(win->findChild<QWidget *>(QStringLiteral("fileListPage"))->isVisible());
+        view->setViewMode(Settings::ViewMode(mode));
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        list->setLayoutDirection(rtl ? Qt::RightToLeft : Qt::LeftToRight);
+        list->doItemsLayout();
+        // Exercise candidate lookup after vertical (Small) or horizontal
+        // (List) scrolling, with a retained selection outside the viewport.
+        const QModelIndex last = list->model()->index(159, 0);
+        list->scrollTo(last, QAbstractItemView::EnsureVisible);
+        QTRY_VERIFY(list->viewport()->rect().contains(list->visualRect(last).center()));
+        const ItemGaps gaps = visibleItemGaps(list);
+        const QPoint start = gaps.verticalPoint;
+        const QPoint finish = start + QPoint(4, 10);
+        QVERIFY(!list->indexAt(start).isValid());
+        const QModelIndex target = list->indexAt(finish);
+        QVERIFY(target.isValid());
+        const QModelIndex retained = list->model()->index(0, 0);
+        QVERIFY(retained != target);
+        list->selectionModel()->select(retained, QItemSelectionModel::ClearAndSelect);
+        const auto modifiers = control ? Qt::ControlModifier : Qt::NoModifier;
+        const auto send = [&](QEvent::Type type, QPoint point, Qt::MouseButton button, Qt::MouseButtons buttons) {
+            QMouseEvent event(type, point, list->viewport()->mapToGlobal(point), button, buttons, modifiers);
+            QApplication::sendEvent(list->viewport(), &event);
+        };
+        send(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+        send(QEvent::MouseMove, finish, Qt::NoButton, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, finish, Qt::LeftButton, Qt::NoButton);
+        QVERIFY(list->selectionModel()->isSelected(target));
+        QCOMPARE(list->selectionModel()->isSelected(retained), control);
+        QCOMPARE(list->selectionModel()->selectedIndexes().size(), control ? 2 : 1);
+    }
+
+    void virtualTilesAndSmallIconsKeepRealGaps_data()
+    {
+        QTest::addColumn<bool>("computer");
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<int>("horizontalGap");
+        QTest::addColumn<int>("verticalGap");
+        QTest::newRow("libraries-tiles") << false << 6 << 6 << 4;
+        QTest::newRow("computer-tiles") << true << 6 << 4 << 8;
+        QTest::newRow("computer-small") << true << 3 << 16 << 4;
+    }
+
+    void virtualTilesAndSmallIconsKeepRealGaps()
+    {
+        QFETCH(bool, computer);
+        QFETCH(int, mode);
+        QFETCH(int, horizontalGap);
+        QFETCH(int, verticalGap);
+        class SpacingDrives : public TestComputerModel {
+        public:
+            using TestComputerModel::TestComputerModel;
+            int rowCount(const QModelIndex &parent = {}) const override { return parent.isValid() ? 0 : 8; }
+            QVariant data(const QModelIndex &index, int role) const override
+            {
+                if (role == RemovableRole) return false;
+                if (role == UrlRole) return QUrl::fromLocalFile(QStringLiteral("/media/spacing-%1").arg(index.row()));
+                if (role == Qt::DisplayRole && index.column() == Name)
+                    return QStringLiteral("A test drive with a descriptive label %1").arg(index.row());
+                if (role == Qt::DecorationRole && index.column() == Name)
+                    return QIcon::fromTheme(QStringLiteral("drive-harddisk"));
+                return TestComputerModel::data(index, role);
+            }
+        };
+        KFilePlacesModel places;
+        SpacingDrives model(&places);
+        std::unique_ptr<QWidget> page;
+        if (computer) {
+            auto *view = new ComputerView(&model);
+            view->setViewMode(Settings::ViewMode(mode));
+            page.reset(view);
+        } else {
+            page.reset(new LibrariesView);
+        }
+        page->resize(700, 600);
+        page->show();
+        auto *list = page->findChild<QListView *>(computer ? QStringLiteral("fixedDriveList") : QStringLiteral("libraryList"));
+        QVERIFY(list);
+        QTRY_VERIFY(list->isVisible());
+        QTRY_VERIFY(list->viewport()->height() >= list->sizeHint().height());
+        list->doItemsLayout();
+        const ItemGaps gaps = visibleItemGaps(list);
+        QVERIFY(list->viewport()->rect().contains(gaps.horizontalPoint));
+        QVERIFY(list->viewport()->rect().contains(gaps.verticalPoint));
+        QVERIFY2(gaps.horizontal >= horizontalGap, qPrintable(QString::number(gaps.horizontal)));
+        QVERIFY2(gaps.vertical >= verticalGap, qPrintable(QString::number(gaps.vertical)));
+        QVERIFY(!list->indexAt(gaps.horizontalPoint).isValid());
+        QVERIFY(!list->indexAt(gaps.verticalPoint).isValid());
+    }
+
+    void iconViewsLeaveSpaceAboveTheFirstRow_data()
+    {
+        QTest::addColumn<int>("mode");
+        for (int mode : {0, 1, 2, 3, 4, 6, 7})
+            QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+
+    void iconViewsLeaveSpaceAboveTheFirstRow()
+    {
+        QFETCH(int, mode);
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 4);
+        view->setViewMode(Settings::ViewMode(mode));
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        QVERIFY(list);
+        list->doItemsLayout();
+        const QRect first = list->visualRect(model->model()->index(0, 0));
+        const int top = list->viewport()->mapTo(view, first.topLeft()).y();
+        QVERIFY2(top >= 8, qPrintable(QStringLiteral("First item starts only %1 px below the content edge").arg(top)));
+        view->setViewMode(Settings::ViewMode::Details);
+        auto *tree = qobject_cast<QTreeView *>(view->currentView());
+        QCOMPARE(tree->header()->mapTo(view, QPoint()).y(), 0);
+    }
+
+    void iconViewsKeepCellsDisjoint_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::addColumn<QString>("scenario");
+        const QStringList names {QStringLiteral("extra-large"), QStringLiteral("large"),
+            QStringLiteral("medium"), QStringLiteral("small"), QStringLiteral("list"),
+            QStringLiteral("details"), QStringLiteral("tiles"), QStringLiteral("content")};
+        for (int mode : {0, 1, 2, 3, 4, 6, 7}) {
+            for (const QString &scenario : {QStringLiteral("normal"), QStringLiteral("narrow"),
+                 QStringLiteral("preview"), QStringLiteral("large-font"), QStringLiteral("rtl")})
+                QTest::newRow(qPrintable(names.at(mode) + QLatin1Char('-') + scenario)) << mode << scenario;
+        }
+    }
+
+    void iconViewsKeepCellsDisjoint()
+    {
+        QFETCH(int, mode);
+        QFETCH(QString, scenario);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path()));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        win->resize(scenario == QLatin1String("narrow") ? 560 : 1100, 620);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        auto *list = view->findChild<QListView *>();
+        if (scenario == QLatin1String("preview"))
+            win->findChild<QToolButton *>(QStringLiteral("previewPaneButton"))->click();
+        if (scenario == QLatin1String("large-font")) {
+            QFont font = list->font();
+            font.setPointSize(14);
+            list->setFont(font);
+        }
+        if (scenario == QLatin1String("rtl")) list->setLayoutDirection(Qt::RightToLeft);
+        QTRY_COMPARE(model->rowCount(), 36);
+        QTRY_VERIFY(win->findChild<QWidget *>(QStringLiteral("fileListPage"))->isVisible());
+        view->setViewMode(Settings::ViewMode(mode));
+        list->doItemsLayout();
+        const QModelIndex first = model->model()->index(0, 0);
+        list->selectionModel()->setCurrentIndex(first, QItemSelectionModel::ClearAndSelect);
+        const QString capture = qEnvironmentVariable("EXPLORER_ICON_AUDIT");
+        if (!capture.isEmpty()) {
+            const auto thumbnailReady = [&] {
+                const QIcon icon = qvariant_cast<QIcon>(first.data(Qt::DecorationRole));
+                const QSize actual = icon.actualSize(QSize(256, 256));
+                // Wait for this mode's preview, not an earlier 16 px thumbnail.
+                return actual.width() > actual.height()
+                    && actual.width() >= qMin(160, list->iconSize().width());
+            };
+            QTRY_VERIFY(thumbnailReady());
+            QVERIFY(QDir().mkpath(capture));
+            QVERIFY(win->grab().save(capture + QLatin1Char('/') + QLatin1String(QTest::currentDataTag()) + QStringLiteral(".png")));
+        }
+        qInfo() << "icon audit" << QTest::currentDataTag() << "viewport" << list->viewport()->size()
+                << "grid" << list->gridSize() << "first" << list->visualRect(first);
+        QList<QRect> rectangles;
+        for (int row = 0; row < model->rowCount(); ++row) {
+            const QModelIndex index = model->model()->index(row, 0);
+            const QRect rect = list->visualRect(index);
+            QVERIFY(!rect.isEmpty());
+            if (list->gridSize().isValid()) {
+                QVERIFY2(rect.width() <= list->gridSize().width(), "An item is wider than its grid cell");
+                QVERIFY2(rect.height() <= list->gridSize().height(), "An item is taller than its grid cell");
+            }
+            for (const QRect &earlier : rectangles)
+                QVERIFY2(!earlier.intersects(rect), "Neighbouring item hit/selection rectangles overlap");
+            rectangles.append(rect);
+            const QRect visible = rect.intersected(list->viewport()->rect());
+            if (!visible.isEmpty()) QCOMPARE(list->indexAt(visible.center()), index);
+        }
+        if (Settings::ViewMode(mode) == Settings::ViewMode::Content) {
+            QVERIFY2(!list->horizontalScrollBar()->isVisible(), "Content rows must fit the actual viewport, including its scrollbar");
+            QCOMPARE(list->gridSize().width(), list->viewport()->width());
+            win->resize(740, 520);
+            QTRY_COMPARE(list->gridSize().width(), list->viewport()->width());
+        }
+        if (Settings::ViewMode(mode) == Settings::ViewMode::Tiles)
+            QVERIFY2(rectangles.first().height() >= 3 * list->fontMetrics().height() + 6,
+                     "Tiles need enough height for all three metadata lines");
+        const QModelIndex last = model->model()->index(model->rowCount() - 1, 0);
+        list->scrollTo(last, QAbstractItemView::EnsureVisible);
+        QTRY_VERIFY(list->viewport()->rect().intersects(list->visualRect(last)));
+        const QPoint target = list->viewport()->rect().intersected(list->visualRect(last)).center();
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, target);
+        const auto selected = model->itemsForIndexes(view->selectedIndexes());
+        QCOMPARE(selected.size(), 1);
+        QCOMPARE(selected.first().url(), model->itemForIndex(last).url());
+    }
+
+    void iconContentTracksScrollbarsWhenTheFolderGrows()
+    {
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_VERIFY(win->findChild<QWidget *>(QStringLiteral("fileListPage"))->isVisible());
+        view->setViewMode(Settings::ViewMode::Content);
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        QVERIFY(list);
+        QTRY_COMPARE(list->gridSize().width(), list->viewport()->width());
+        QVERIFY(writeIconFixture(fixture.path()));
+        QTRY_COMPARE(model->rowCount(), 36);
+        QTRY_VERIFY(list->verticalScrollBar()->isVisible());
+        QTRY_COMPARE(list->gridSize().width(), list->viewport()->width());
+        QVERIFY(!list->horizontalScrollBar()->isVisible());
+        for (const QString &name : QDir(fixture.path()).entryList(QDir::Files))
+            QVERIFY(QFile::remove(fixture.path() + QLatin1Char('/') + name));
+        // Exercise the viewport change, not KIO's coalesced external-delete
+        // notification timing on the isolated session bus.
+        model->refresh();
+        QTRY_COMPARE(model->rowCount(), 0);
+        QTRY_VERIFY(!list->verticalScrollBar()->isVisible());
+        QTRY_COMPARE(list->gridSize().width(), list->viewport()->width());
+    }
+
+    void iconThumbnailShapeDoesNotShrinkCaptionSpace_data()
+    {
+        QTest::addColumn<int>("mode");
+        for (int mode : {0, 1, 2}) QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+
+    void iconThumbnailShapeDoesNotShrinkCaptionSpace()
+    {
+        QFETCH(int, mode);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path(), 1));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 1);
+        view->setViewMode(Settings::ViewMode(mode));
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        const QModelIndex index = model->model()->index(0, 0);
+        QPixmap square(256, 256);
+        square.fill(Qt::blue);
+        QVERIFY(model->model()->setData(index, QIcon(square), Qt::DecorationRole));
+        list->doItemsLayout();
+        const QRect squareRect = list->visualRect(index);
+        QPixmap wide(256, 64);
+        wide.fill(Qt::blue);
+        QVERIFY(model->model()->setData(index, QIcon(wide), Qt::DecorationRole));
+        list->doItemsLayout();
+        QCOMPARE(list->visualRect(index).size(), squareRect.size());
+        const QSize item = list->visualRect(index).size();
+        QVERIFY(item.width() >= list->iconSize().width());
+        QVERIFY(item.height() >= list->iconSize().height() + 2 * list->fontMetrics().height());
+        QVERIFY(item.width() < list->gridSize().width());
+        QVERIFY(item.height() < list->gridSize().height());
+    }
+
+    void iconCaptionsUseBothLinesForUnbrokenFilenames()
+    {
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path(), 2));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 2);
+        view->setViewMode(Settings::ViewMode::LargeIcons);
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        QModelIndex index;
+        for (int row = 0; row < 2; ++row) {
+            const QModelIndex candidate = model->model()->index(row, 0);
+            if (candidate.data().toString().startsWith(QStringLiteral("Screenshot_"))) index = candidate;
+        }
+        QVERIFY(index.isValid());
+        QPixmap icon(96, 96);
+        icon.fill(Qt::blue);
+        QVERIFY(model->model()->setData(index, QIcon(icon), Qt::DecorationRole));
+        QStyleOptionViewItem option;
+        option.initFrom(list);
+        option.widget = list;
+        option.font = list->font();
+        option.fontMetrics = list->fontMetrics();
+        option.rect = QRect(QPoint(), list->gridSize());
+        option.decorationSize = list->iconSize();
+        option.decorationPosition = QStyleOptionViewItem::Top;
+        option.displayAlignment = Qt::AlignCenter;
+        option.features = QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration
+            | QStyleOptionViewItem::WrapText;
+        option.textElideMode = Qt::ElideRight;
+        option.state = QStyle::State_Enabled;
+        QImage image(list->gridSize(), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        list->itemDelegate()->paint(&painter, option, index);
+        painter.end();
+        int firstInk = image.height(), lastInk = -1;
+        for (int y = list->iconSize().height() + 4; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                if (pixel.red() < 100 && pixel.green() < 100 && pixel.blue() < 100) {
+                    firstInk = qMin(firstInk, y);
+                    lastInk = qMax(lastInk, y);
+                }
+            }
+        }
+        QVERIFY2(lastInk - firstInk > list->fontMetrics().height(),
+                 "A long underscore-separated filename must use both caption lines, not one truncated line");
+    }
+
+    void iconRenameEditorStaysWithTheCaption_data()
+    {
+        QTest::addColumn<int>("mode");
+        for (int mode : {0, 1, 2, 3, 4, 6, 7})
+            QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+
+    void iconRenameEditorStaysWithTheCaption()
+    {
+        QFETCH(int, mode);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path(), 1));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 1);
+        view->setViewMode(Settings::ViewMode(mode));
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        const QModelIndex index = model->model()->index(0, 0);
+        const QUrl url = model->itemForIndex(index).url();
+        const QString name = QFileInfo(url.toLocalFile()).fileName();
+        QPixmap wide(256, 64);
+        wide.fill(Qt::blue);
+        QVERIFY(model->model()->setData(index, QIcon(wide), Qt::DecorationRole));
+        list->doItemsLayout();
+        view->renameItem(url);
+        QTRY_VERIFY(list->findChild<QLineEdit *>());
+        auto *editor = list->findChild<QLineEdit *>();
+        QTRY_VERIFY(editor->isVisible());
+        QCOMPARE(editor->text(), name);
+        QTRY_COMPARE(editor->selectedText(), name.left(name.lastIndexOf(QLatin1Char('.'))));
+        const QRect cell = list->visualRect(index);
+        const QRect edit = editor->geometry();
+        QVERIFY(cell.contains(edit));
+        QVERIFY(edit.height() >= list->fontMetrics().height());
+        if (mode <= 2)
+            QVERIFY2(edit.top() >= cell.top() + list->iconSize().height(), "Rename must stay below the reserved thumbnail box");
+        else if (mode == 6 || mode == 7)
+            QVERIFY2(edit.left() >= cell.left() + list->iconSize().width() + 8, "Rename must stay beside the icon, not over it");
+        if (mode == 7)
+            QVERIFY(edit.right() < cell.center().x() + 32); // Leave date/size metadata clear.
+        QSignalSpy renamed(view, &FileView::renameRequested);
+        QTest::keyClick(editor, Qt::Key_Escape);
+        QCOMPARE(renamed.count(), 0);
+        QVERIFY(QFile::exists(url.toLocalFile()));
+    }
+
+    void iconSelectionDoesNotPaintOverCheckboxes_data()
+    {
+        QTest::addColumn<int>("mode");
+        for (int mode = 0; mode <= 7; ++mode)
+            QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+
+    void iconSelectionDoesNotPaintOverCheckboxes()
+    {
+        QFETCH(int, mode);
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 4);
+        view->setViewMode(Settings::ViewMode(mode));
+        view->setCheckBoxesVisible(true);
+        QAbstractItemView *items = view->currentView();
+        const QModelIndex index = items->model()->index(0, 0);
+        items->selectionModel()->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect);
+        QStyleOptionViewItem option;
+        option.initFrom(items);
+        option.widget = items;
+        option.font = items->font();
+        option.fontMetrics = items->fontMetrics();
+        option.rect = items->visualRect(index);
+        option.rect.moveTopLeft(QPoint());
+        option.decorationSize = items->iconSize();
+        option.decorationPosition = mode <= 2 ? QStyleOptionViewItem::Top : QStyleOptionViewItem::Left;
+        option.displayAlignment = mode <= 2 ? Qt::AlignCenter : Qt::AlignLeft | Qt::AlignVCenter;
+        option.features = QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration;
+        if (mode <= 2) option.features |= QStyleOptionViewItem::WrapText;
+        option.showDecorationSelected = true;
+        option.state = QStyle::State_Enabled | QStyle::State_Selected;
+        QImage actual(option.rect.size(), QImage::Format_ARGB32_Premultiplied);
+        actual.fill(Qt::white);
+        QPainter painter(&actual);
+        items->itemDelegate()->paint(&painter, option, index);
+        painter.end();
+        const QRect boxRect(2, mode <= 2 || mode == 6 ? 2 : option.rect.center().y() - 8, 16, 16);
+        QImage indicator(16, 16, QImage::Format_ARGB32_Premultiplied);
+        indicator.fill(Qt::white);
+        QStyleOptionButton box;
+        box.rect = indicator.rect();
+        box.state = QStyle::State_Enabled | QStyle::State_On;
+        QPainter indicatorPainter(&indicator);
+        items->style()->drawPrimitive(QStyle::PE_IndicatorCheckBox, &box, &indicatorPainter, items);
+        indicatorPainter.end();
+        QImage unchecked(16, 16, QImage::Format_ARGB32_Premultiplied);
+        unchecked.fill(Qt::white);
+        box.state = QStyle::State_Enabled | QStyle::State_Off;
+        QPainter uncheckedPainter(&unchecked);
+        items->style()->drawPrimitive(QStyle::PE_IndicatorCheckBox, &box, &uncheckedPainter, items);
+        uncheckedPainter.end();
+        const QString output = qEnvironmentVariable("EXPLORER_ICON_AUDIT");
+        if (!output.isEmpty()) {
+            QVERIFY(QDir().mkpath(output));
+            QVERIFY(actual.save(output + QStringLiteral("/checkbox-item-%1.png").arg(mode)));
+            QVERIFY(indicator.save(output + QStringLiteral("/checkbox-native.png")));
+        }
+        int tickPixels = 0;
+        for (int y = 3; y < 13; ++y) {
+            for (int x = 3; x < 13; ++x) {
+                const QColor expected = indicator.pixelColor(x, y);
+                const QColor off = unchecked.pixelColor(x, y);
+                if (qAbs(expected.red() - off.red()) < 50 && qAbs(expected.green() - off.green()) < 50
+                    && qAbs(expected.blue() - off.blue()) < 50)
+                    continue;
+                ++tickPixels;
+                const QColor pixel = actual.pixelColor(boxRect.left() + x, boxRect.top() + y);
+                QVERIFY2(qAbs(pixel.red() - expected.red()) < 30
+                         && qAbs(pixel.green() - expected.green()) < 30
+                         && qAbs(pixel.blue() - expected.blue()) < 30,
+                         "The selected item background painted over its checkbox tick");
+            }
+        }
+        QVERIFY(tickPixels > 3);
+        const QPoint hit = items->visualRect(index).topLeft() + boxRect.center();
+        QTest::mouseClick(items->viewport(), Qt::LeftButton, Qt::NoModifier, hit);
+        QVERIFY(!items->selectionModel()->isSelected(index));
+        QTest::mouseClick(items->viewport(), Qt::LeftButton, Qt::NoModifier, hit);
+        QVERIFY(items->selectionModel()->isSelected(index));
+    }
+
+    void virtualIconViewsKeepTheirSpacing_data()
+    {
+        QTest::addColumn<bool>("computer");
+        QTest::addColumn<int>("mode");
+        for (bool computer : {false, true}) {
+            for (int mode : {0, 1, 2, 3, 4, 6, 7}) {
+                const QString name = QStringLiteral("%1-%2").arg(computer ? "computer" : "libraries").arg(mode);
+                QTest::newRow(qPrintable(name)) << computer << mode;
+            }
+        }
+    }
+
+    void virtualIconViewsKeepTheirSpacing()
+    {
+        QFETCH(bool, computer);
+        QFETCH(int, mode);
+        class AuditDrives : public TestComputerModel {
+        public:
+            using TestComputerModel::TestComputerModel;
+            int rowCount(const QModelIndex &parent = {}) const override { return parent.isValid() ? 0 : 4; }
+            QVariant data(const QModelIndex &index, int role) const override
+            {
+                if (role == RemovableRole) return index.row() == 3;
+                if (role == Qt::DecorationRole && index.column() == Name)
+                    return QIcon::fromTheme(QStringLiteral("drive-harddisk"));
+                if (role == Qt::DisplayRole && index.column() == Name)
+                    return QStringLiteral("Local test volume %1 with a long descriptive label").arg(index.row());
+                if (role == SizeKnownRole) return true;
+                if (role == TotalSizeRole) return QVariant::fromValue(qulonglong(100) * 1024 * 1024 * 1024);
+                if (role == AvailableSizeRole) return QVariant::fromValue(qulonglong(64) * 1024 * 1024 * 1024);
+                if (role == UrlRole)
+                    return QUrl::fromLocalFile(QStringLiteral("/media/icon-audit-%1").arg(index.row()));
+                return TestComputerModel::data(index, role);
+            }
+        };
+        KFilePlacesModel places;
+        AuditDrives model(&places);
+        std::unique_ptr<QWidget> page;
+        if (computer) {
+            auto *view = new ComputerView(&model);
+            view->setViewMode(Settings::ViewMode(mode));
+            page.reset(view);
+        } else {
+            auto *view = new LibrariesView;
+            view->setViewMode(Settings::ViewMode(mode));
+            page.reset(view);
+        }
+        page->show();
+        for (int width : {700, 360, 356}) {
+            page->resize(width, 500);
+            QCoreApplication::processEvents();
+            int checked = 0;
+            for (QListView *list : page->findChildren<QListView *>()) {
+                if (!list->isVisible() || !list->model()->rowCount()) continue;
+                ++checked;
+                if (mode == 3) {
+                    QCOMPARE(list->viewMode(), QListView::ListMode);
+                    QCOMPARE(list->flow(), QListView::LeftToRight);
+                }
+                list->doItemsLayout();
+                const QModelIndex first = list->model()->index(0, 0);
+                const QRect rect = list->visualRect(first);
+                QVERIFY(list->viewport()->mapTo(page.get(), rect.topLeft()).y() >= 8);
+                QCOMPARE(list->indexAt(rect.center()), first);
+                for (int row = 0; row < list->model()->rowCount(); ++row) {
+                    const QModelIndex index = list->model()->index(row, 0);
+                    // The outer scroll area applies section height changes on
+                    // its queued layout pass after a width change.
+                    if (computer) {
+                        QTRY_VERIFY2(list->viewport()->rect().contains(list->visualRect(index)),
+                            qPrintable(QStringLiteral("window=%1 viewport=%2x%3 cell=%4,%5 %6x%7 grid=%8x%9")
+                                .arg(width).arg(list->viewport()->width()).arg(list->viewport()->height())
+                                .arg(list->visualRect(index).x()).arg(list->visualRect(index).y())
+                                .arg(list->visualRect(index).width()).arg(list->visualRect(index).height())
+                                .arg(list->gridSize().width()).arg(list->gridSize().height())));
+                    }
+                    const QRect cell = list->visualRect(index);
+                    if (list->gridSize().isValid()) {
+                        QVERIFY(cell.width() <= list->gridSize().width());
+                        QVERIFY(cell.height() <= list->gridSize().height());
+                    }
+                    for (int other = row + 1; other < list->model()->rowCount(); ++other)
+                        QVERIFY(!cell.intersects(list->visualRect(list->model()->index(other, 0))));
+                }
+                list->selectionModel()->setCurrentIndex(first, QItemSelectionModel::ClearAndSelect);
+            }
+            QVERIFY(checked > 0);
+            const QString output = qEnvironmentVariable("EXPLORER_ICON_AUDIT");
+            if (!output.isEmpty()) {
+                QVERIFY(QDir().mkpath(output));
+                QVERIFY(page->grab().save(output + QStringLiteral("/%1-%2-%3.png")
+                    .arg(computer ? "computer" : "libraries").arg(mode).arg(width)));
+            }
+        }
+    }
+
+    void iconDelegatesKeepPaintingInsideTheirCell_data()
+    {
+        QTest::addColumn<int>("mode");
+        for (int mode : {0, 1, 2, 3, 4, 6, 7})
+            QTest::newRow(qPrintable(QString::number(mode))) << mode;
+    }
+
+    void iconDelegatesKeepPaintingInsideTheirCell()
+    {
+        QFETCH(int, mode);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        QVERIFY(writeIconFixture(fixture.path(), 1));
+        auto win = window(QUrl::fromLocalFile(fixture.path()));
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        QTRY_COMPARE(model->rowCount(), 1);
+        view->setViewMode(Settings::ViewMode(mode));
+        auto *list = qobject_cast<QListView *>(view->currentView());
+        QVERIFY(list);
+        list->doItemsLayout();
+        QStyleOptionViewItem option;
+        option.initFrom(list);
+        option.widget = list;
+        option.font = list->font();
+        option.fontMetrics = list->fontMetrics();
+        option.decorationSize = list->iconSize();
+        option.decorationPosition = list->viewMode() == QListView::IconMode
+            ? QStyleOptionViewItem::Top : QStyleOptionViewItem::Left;
+        option.displayAlignment = list->viewMode() == QListView::IconMode ? Qt::AlignCenter : Qt::AlignLeft;
+        option.features = QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration;
+        if (list->wordWrap()) option.features |= QStyleOptionViewItem::WrapText;
+        option.textElideMode = Qt::ElideRight;
+        option.viewItemPosition = QStyleOptionViewItem::OnlyOne;
+        option.state = QStyle::State_Enabled | QStyle::State_Selected | QStyle::State_HasFocus;
+        const QModelIndex index = model->model()->index(0, 0);
+        const int width = mode <= 2 ? list->gridSize().width() : 120;
+        const int height = list->visualRect(index).height();
+        option.rect = QRect(24, 24, width, height);
+        QImage image(width + 48, height + 48, QImage::Format_ARGB32_Premultiplied);
+        const QColor untouched(251, 17, 221);
+        image.fill(untouched);
+        QPainter painter(&image);
+        list->itemDelegate()->paint(&painter, option, index);
+        painter.end();
+        int outside = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                if (!option.rect.contains(x, y) && image.pixelColor(x, y) != untouched) ++outside;
+        QCOMPARE(outside, 0);
+    }
+
     void fileViewsPreserveSelectionAndRenameBaseName()
     {
         auto win = window(m_folder);
@@ -1445,6 +2509,340 @@ private Q_SLOTS:
         QTest::keyClick(edit, Qt::Key_Escape);
         QCOMPARE(renamed.count(), 0);
         QVERIFY(QFile::exists(m_notes.toLocalFile()));
+    }
+
+    void detailsRubberBandSelectsOnlyIntersectedRows_data()
+    {
+        QTest::addColumn<int>("fromRow");
+        QTest::addColumn<int>("toRow");
+        QTest::addColumn<Qt::KeyboardModifiers>("modifiers");
+        QTest::addColumn<QString>("layout");
+        const auto none = Qt::KeyboardModifiers(Qt::NoModifier);
+        QTest::newRow("down") << 10 << 12 << none << QStringLiteral("normal");
+        QTest::newRow("up") << 12 << 10 << none << QStringLiteral("normal");
+        QTest::newRow("one-row") << 10 << 10 << none << QStringLiteral("normal");
+        QTest::newRow("ctrl-adds") << 10 << 12 << Qt::KeyboardModifiers(Qt::ControlModifier)
+                                  << QStringLiteral("normal");
+        QTest::newRow("shift-adds") << 10 << 12 << Qt::KeyboardModifiers(Qt::ShiftModifier)
+                                   << QStringLiteral("normal");
+        QTest::newRow("gutter-only") << 10 << 12 << none << QStringLiteral("gutter");
+        QTest::newRow("moved-columns") << 10 << 12 << none << QStringLiteral("moved");
+        QTest::newRow("hidden-column") << 10 << 12 << none << QStringLiteral("hidden");
+        QTest::newRow("scrolled") << 10 << 12 << none << QStringLiteral("scrolled");
+        QTest::newRow("grouped") << 10 << 12 << none << QStringLiteral("grouped");
+        QTest::newRow("rtl") << 10 << 12 << none << QStringLiteral("rtl");
+        QTest::newRow("past-viewport-bottom") << 10 << 13 << none << QStringLiteral("outside");
+    }
+
+    void detailsRubberBandSelectsOnlyIntersectedRows()
+    {
+        QFETCH(int, fromRow);
+        QFETCH(int, toRow);
+        QFETCH(Qt::KeyboardModifiers, modifiers);
+        QFETCH(QString, layout);
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        for (int row = 0; row < 200; ++row) {
+            QFile file(fixture.filePath(QStringLiteral("item-%1.txt").arg(row, 3, 10, QLatin1Char('0'))));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        DirectoryModel model;
+        FileView view(&model);
+        view.setViewMode(Settings::ViewMode::Details);
+        view.setCheckBoxesVisible(false);
+        if (layout == QLatin1String("rtl"))
+            view.setLayoutDirection(Qt::RightToLeft);
+        view.resize(1000, 450);
+        view.show();
+        model.setUrl(QUrl::fromLocalFile(fixture.path()));
+        QTRY_COMPARE(model.rowCount(), 200);
+        auto *tree = qobject_cast<QTreeView *>(view.currentView());
+        QVERIFY(tree);
+        QModelIndex parent;
+        if (layout == QLatin1String("grouped")) {
+            view.setGroupColumn(DirectoryModel::Type);
+            QTRY_COMPARE(tree->model()->rowCount(), 1);
+            parent = tree->model()->index(0, 0);
+            QTRY_VERIFY(tree->isExpanded(parent));
+        }
+        auto *header = tree->header();
+        for (int column = 0; column < header->count(); ++column)
+            tree->setColumnWidth(column, 100);
+        if (layout == QLatin1String("moved"))
+            header->moveSection(0, header->count() - 1);
+        if (layout == QLatin1String("hidden"))
+            tree->setColumnHidden(header->logicalIndex(header->count() - 1), true);
+        tree->doItemsLayout();
+        const auto index = [&](int row) { return tree->model()->index(row, 0, parent); };
+        if (layout == QLatin1String("scrolled"))
+            tree->scrollTo(index(8), QAbstractItemView::PositionAtTop);
+        if (layout == QLatin1String("outside")) {
+            const int rowHeight = tree->visualRect(index(0)).height();
+            QVERIFY(rowHeight > 0);
+            view.resize(1000, header->height() + 14 * rowHeight);
+            QTRY_COMPARE(tree->viewport()->height(), 14 * rowHeight);
+        }
+        const bool rtl = tree->isRightToLeft();
+        const int edge = rtl ? tree->viewport()->width() - header->length() : header->length();
+        const int gutterX = edge + (rtl ? -20 : 20);
+        const int itemX = edge + (rtl ? 10 : -10);
+        const QPoint origin(gutterX, tree->visualRect(index(fromRow)).center().y());
+        QPoint end(itemX, tree->visualRect(index(toRow)).center().y());
+        if (layout == QLatin1String("outside"))
+            end.setY(tree->viewport()->height() + 30);
+        if (layout == QLatin1String("gutter"))
+            end.setX(gutterX + (rtl ? 10 : -10));
+        QVERIFY(tree->viewport()->rect().contains(origin));
+        QVERIFY(!tree->indexAt(origin).isValid());
+        tree->selectionModel()->select(index(2), QItemSelectionModel::ClearAndSelect
+                                                | QItemSelectionModel::Rows);
+        QTest::mousePress(tree->viewport(), Qt::LeftButton, modifiers, origin);
+        const auto move = [&](const QPoint &point) {
+            QMouseEvent event(QEvent::MouseMove, point, tree->viewport()->mapToGlobal(point),
+                              Qt::NoButton, Qt::LeftButton, modifiers);
+            QApplication::sendEvent(tree->viewport(), &event);
+        };
+        const auto selectedRows = [&] {
+            QSet<int> rows;
+            for (const QModelIndex &selected : tree->selectionModel()->selectedRows()) {
+                if (selected.parent() != parent)
+                    rows.insert(-1); // A group heading must not become selected.
+                else
+                    rows.insert(selected.row());
+            }
+            return rows;
+        };
+        QSet<int> initial;
+        if (modifiers != Qt::NoModifier)
+            initial.insert(2);
+        QSet<int> expected = initial;
+        if (layout != QLatin1String("gutter"))
+            for (int row = qMin(fromRow, toRow); row <= qMax(fromRow, toRow); ++row)
+                expected.insert(row);
+        move(end);
+        QCOMPARE(selectedRows(), expected);
+
+        // Moving back must remove rows no longer inside the band, while
+        // keeping any selection present before a Ctrl/Shift drag.
+        if (layout != QLatin1String("gutter")) {
+            move(QPoint(itemX, origin.y()));
+            QSet<int> single = initial;
+            single.insert(fromRow);
+            QCOMPARE(selectedRows(), single);
+        }
+        const QPoint gutter(gutterX + (rtl ? 10 : -10), end.y());
+        move(gutter);
+        QCOMPARE(selectedRows(), initial);
+        QTest::mouseRelease(tree->viewport(), Qt::LeftButton, modifiers, gutter);
+        QCOMPARE(selectedRows(), initial);
+    }
+
+    void detailsSelectionCanStartInLeftGutter_data()
+    {
+        QTest::addColumn<Qt::KeyboardModifiers>("modifiers");
+        QTest::addColumn<bool>("reverse");
+        QTest::addColumn<bool>("gutterOnly");
+        const auto none = Qt::KeyboardModifiers(Qt::NoModifier);
+        QTest::newRow("down") << none << false << false;
+        QTest::newRow("up") << none << true << false;
+        QTest::newRow("ctrl-adds") << Qt::KeyboardModifiers(Qt::ControlModifier) << false << false;
+        QTest::newRow("shift-adds") << Qt::KeyboardModifiers(Qt::ShiftModifier) << false << false;
+        QTest::newRow("gutter-only") << none << false << true;
+    }
+
+    void detailsSelectionCanStartInLeftGutter()
+    {
+        QFETCH(Qt::KeyboardModifiers, modifiers);
+        QFETCH(bool, reverse);
+        QFETCH(bool, gutterOnly);
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        auto *page = win->findChild<QWidget *>(QStringLiteral("fileListPage"));
+        QVERIFY(model && view && page);
+        QTRY_COMPARE(model->rowCount(), 4);
+        view->setViewMode(Settings::ViewMode::Details);
+        auto *tree = qobject_cast<QTreeView *>(view->currentView());
+        QVERIFY(tree);
+        QTRY_VERIFY(page->isVisible());
+        tree->doItemsLayout();
+        QSignalSpy activated(view, &FileView::activated);
+        auto *viewport = tree->viewport();
+        const int fromRow = reverse ? 2 : 1;
+        const int toRow = reverse ? 1 : 2;
+        const int fromY = tree->visualRect(tree->model()->index(fromRow, 0)).center().y();
+        const int toY = tree->visualRect(tree->model()->index(toRow, 0)).center().y();
+        const auto selectedRows = [&] {
+            QSet<int> rows;
+            for (const QModelIndex &index : tree->selectionModel()->selectedRows())
+                rows.insert(index.row());
+            return rows;
+        };
+        // Exercise both the pre-existing strip and the few extra pixels.
+        // Window-level input tests real hit-testing and the implicit mouse
+        // grab, including moves/releases over the view rather than the page.
+        for (int gutterX : {6, 10}) {
+            tree->selectionModel()->select(tree->model()->index(3, 0),
+                QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+            const QPoint start = page->mapTo(win.get(),
+                QPoint(gutterX, viewport->mapTo(page, QPoint(0, fromY)).y()));
+            const QPoint end = gutterOnly
+                ? page->mapTo(win.get(), QPoint(gutterX, viewport->mapTo(page, QPoint(0, toY)).y()))
+                : viewport->mapTo(win.get(), QPoint(40, toY));
+            QCOMPARE(win->childAt(start), page);
+            QTest::mousePress(win->windowHandle(), Qt::LeftButton, modifiers, start);
+            QTest::mouseMove(win->windowHandle(), end);
+            QTest::mouseRelease(win->windowHandle(), Qt::LeftButton, modifiers, end);
+            QSet<int> expected;
+            if (!gutterOnly)
+                expected = {1, 2};
+            if (modifiers != Qt::NoModifier)
+                expected.insert(3);
+            QCOMPARE(selectedRows(), expected);
+            QVERIFY(tree->hasFocus());
+            QCOMPARE(activated.count(), 0);
+            // A released gutter drag must not keep changing the selection.
+            const QPoint elsewhere = viewport->mapTo(win.get(),
+                tree->visualRect(tree->model()->index(0, 0)).center());
+            QTest::mouseMove(win->windowHandle(), elsewhere);
+            QCOMPARE(selectedRows(), expected);
+        }
+    }
+
+    void detailsRubberBandIsPaintedInLeftGutter_data()
+    {
+        QTest::addColumn<int>("endX");
+        QTest::newRow("vertical") << 5;
+        QTest::newRow("diagonal") << 10;
+    }
+
+    void detailsRubberBandIsPaintedInLeftGutter()
+    {
+        QFETCH(int, endX);
+        auto win = window(m_folder);
+        auto *model = win->findChild<DirectoryModel *>();
+        auto *view = win->findChild<FileView *>();
+        auto *page = win->findChild<QWidget *>(QStringLiteral("fileListPage"));
+        QVERIFY(model && view && page);
+        QTRY_COMPARE(model->rowCount(), 4);
+        view->setViewMode(Settings::ViewMode::Details);
+        auto *tree = qobject_cast<QTreeView *>(view->currentView());
+        QVERIFY(tree);
+        QTRY_VERIFY(page->isVisible());
+        tree->doItemsLayout();
+        QWidget *viewport = tree->viewport();
+        const QPoint viewportOrigin = viewport->mapTo(page, QPoint());
+        const int fromY = tree->visualRect(tree->model()->index(0, 0)).center().y();
+        const int toY = tree->visualRect(tree->model()->index(2, 0)).center().y();
+        const QPoint start = page->mapTo(win.get(), QPoint(5, viewportOrigin.y() + fromY));
+        const QPoint gutterEnd = page->mapTo(win.get(), QPoint(endX, viewportOrigin.y() + toY));
+        const QPoint itemEnd = viewport->mapTo(win.get(), QPoint(40, toY));
+        const QRect gutter(3, viewportOrigin.y() + fromY, viewportOrigin.x() - 3, toY - fromY + 1);
+        QVERIFY(gutter.width() > 5);
+        const auto pixels = [&] { return page->grab(gutter).toImage(); };
+        const QImage blank = pixels();
+        QCOMPARE(win->childAt(start), page);
+        QTest::mousePress(win->windowHandle(), Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(win->windowHandle(), gutterEnd);
+        const QImage gutterBand = pixels();
+        const int gutterSelection = tree->selectionModel()->selectedRows().size();
+        QTest::mouseMove(win->windowHandle(), itemEnd);
+        const QImage crossingBand = pixels();
+        const int crossingSelection = tree->selectionModel()->selectedRows().size();
+        QTest::mouseRelease(win->windowHandle(), Qt::LeftButton, Qt::NoModifier, itemEnd);
+        const QImage released = pixels();
+
+        // Check rendered pixels, not merely QRubberBand::isVisible(): a
+        // visible widget outside its parent's clip is still invisible to us.
+        QVERIFY2(gutterBand != blank, "The band must render before the pointer enters any item");
+        QCOMPARE(gutterSelection, 0);
+        QVERIFY2(crossingBand != blank, "The band must retain its gutter portion over items");
+        QCOMPARE(crossingSelection, 3);
+        QCOMPARE(released, blank);
+
+        // An overlay hosted outside the Details viewport must not remain
+        // painted over another view mode when Details is hidden mid-gesture.
+        QTest::mousePress(win->windowHandle(), Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(win->windowHandle(), gutterEnd);
+        view->setViewMode(Settings::ViewMode::SmallIcons);
+        QTest::mouseRelease(win->windowHandle(), Qt::LeftButton, Qt::NoModifier, gutterEnd);
+        QCOMPARE(pixels(), blank);
+    }
+
+    void detailsSelectionHasNoInternalColumnBorders_data()
+    {
+        QTest::addColumn<QString>("layout");
+        QTest::newRow("win7-order") << QStringLiteral("default");
+        QTest::newRow("name-last") << QStringLiteral("name-last");
+        QTest::newRow("size-hidden") << QStringLiteral("size-hidden");
+        QTest::newRow("logical-order") << QStringLiteral("logical-order");
+        QTest::newRow("rtl") << QStringLiteral("rtl");
+    }
+
+    void detailsSelectionHasNoInternalColumnBorders()
+    {
+        QFETCH(QString, layout);
+        DirectoryModel model;
+        FileView view(&model);
+        view.setViewMode(Settings::ViewMode::Details);
+        view.setCheckBoxesVisible(false);
+        if (layout == QLatin1String("rtl"))
+            view.setLayoutDirection(Qt::RightToLeft);
+        view.resize(1000, 250);
+        view.show();
+        view.activateWindow();
+        model.setUrl(m_folder);
+        QTRY_COMPARE(model.rowCount(), 4);
+        auto *tree = qobject_cast<QTreeView *>(view.currentView());
+        QVERIFY(tree);
+        auto *header = tree->header();
+        for (int column = 0; column < header->count(); ++column)
+            tree->setColumnWidth(column, 220);
+        if (layout == QLatin1String("name-last"))
+            header->moveSection(header->visualIndex(0), header->count() - 1);
+        if (layout == QLatin1String("size-hidden"))
+            tree->hideColumn(model.viewColumnFor(DirectoryModel::Size));
+        if (layout == QLatin1String("logical-order"))
+            for (int column = 0; column < header->count(); ++column)
+                header->moveSection(header->visualIndex(column), column);
+        tree->doItemsLayout();
+        const QModelIndex first = tree->model()->index(0, 0);
+        QVERIFY(model.itemForIndex(first).isDir()); // No Size text near the seam.
+        tree->selectionModel()->select(first, QItemSelectionModel::ClearAndSelect
+                                             | QItemSelectionModel::Rows);
+        tree->setFocus();
+        QTest::mouseMove(view.windowHandle(), QPoint(view.width() - 2, view.height() - 2));
+        // A cell's intentional keyboard focus frame is not a selection seam.
+        // Rubber-band selection, as reported, has no current cell.
+        tree->selectionModel()->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
+        const QImage image = tree->viewport()->grab().toImage();
+        const qreal dpr = image.devicePixelRatio();
+        const QRect row = tree->visualRect(first);
+        const auto color = [&](int x, int y) { return image.pixelColor(qRound(x * dpr), qRound(y * dpr)); };
+        const QString capture = qEnvironmentVariable("EXPLORER_ROW_CAPTURE_DIR");
+        if (!capture.isEmpty()) {
+            QDir().mkpath(capture);
+            image.save(capture + QLatin1Char('/') + layout + QStringLiteral(".png"));
+        }
+        int visible = 0;
+        for (int visual = 0; visual < header->count(); ++visual) {
+            const int column = header->logicalIndex(visual);
+            if (tree->isColumnHidden(column))
+                continue;
+            if (visible++ == 0)
+                continue;
+            const int edge = tree->isRightToLeft()
+                ? tree->columnViewportPosition(column) + tree->columnWidth(column)
+                : tree->columnViewportPosition(column);
+            // Stay clear of text: RTL metadata can reach the cell edge.
+            for (int y : {row.top() + 2, row.bottom() - 2}) {
+                const QColor reference = color(edge - 8, y);
+                for (int x = edge - 2; x <= edge + 1; ++x)
+                    QVERIFY2(color(x, y) == reference,
+                        qPrintable(QStringLiteral("Internal selection border at x=%1 y=%2, column %3")
+                            .arg(x).arg(y).arg(column)));
+            }
+        }
     }
 
     void folderFirstAndNaturalNameSortingWorkInBothDirections()
@@ -1636,6 +3034,8 @@ private Q_SLOTS:
         ComputerView view(&model);
         view.resize(700, 420);
         view.show();
+        view.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&view));
         auto *fixed = view.findChild<QToolButton *>(QStringLiteral("fixedDriveHeading"));
         auto *removable = view.findChild<QToolButton *>(QStringLiteral("removableDriveHeading"));
         auto *fixedList = view.findChild<QListView *>(QStringLiteral("fixedDriveList"));

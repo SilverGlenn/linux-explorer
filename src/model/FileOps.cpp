@@ -1,4 +1,5 @@
 #include "FileOps.h"
+#include "PortalExport.h"
 #include "AccessDialogs.h"
 #include "FileProgressDialog.h"
 #include "PropertiesDialog.h"
@@ -167,6 +168,7 @@ void putOnClipboard(const QList<KFileItem> &items, bool cut)
     auto *mimeData = new QMimeData;
     KUrlMimeData::setUrls(urls, mostLocalUrls, mimeData);
     KIO::setClipboardDataCut(mimeData, cut);
+    PortalExport::offer(mimeData);
     QApplication::clipboard()->setMimeData(mimeData);
 
     // Directly as well as through the clipboard's own signal, so our own cut or

@@ -92,6 +92,30 @@ Selection persists when changing views. List fills downward and then into
 columns; Small icons puts icon and text side by side rather than underneath.
 Large icons have much less vertical padding than the upstream implementation.
 
+Linux layout guardrails: the seven non-Details file modes have an 8 logical-pixel
+inset at the top, right and bottom; the existing left gutter is unchanged.
+Grid pitch is distinct from the item rectangle: the three larger icon modes
+leave 24 px horizontally and 8 px vertically between item boxes; Small icons
+leaves 16/4 px and ordinary Tiles 6/4 px. The Large-icons horizontal separation
+is based on the approximately 104 px highlight boxes on 128 px centers in
+`21-view-cycle-3.png`; the other gaps are compact Linux layout choices, not
+claims of exact Windows measurements. List uses natural-width items with 4 px
+separation, and Libraries retains its adaptive column/64 px row pitch with
+6/4 px gaps. Blank gaps stay white when all items are selected, clear selection
+when clicked, and can begin rubber-band selection without catching a neighbour.
+Small-icons cells bound both painting and hit testing, so long filenames cannot
+overlap neighbouring columns. The three larger icon modes reserve a stable icon
+box and two caption lines, including filenames without spaces. Tiles grow with
+the font, and Content tracks the actual viewport width when scrollbars change.
+Checkbox overlays are painted last, and inline rename stays over the caption
+rather than the thumbnail or metadata. Computer's Small icons also uses
+side-by-side icon/text cells; Libraries retains its own heading spacing.
+
+`ExplorerUiTest` audits all seven modes at normal, narrow and preview-pane widths,
+with larger fonts and RTL layout, plus thumbnail changes, scrolling, checkbox
+pixels and rename geometry. Set `EXPLORER_ICON_AUDIT` to an output directory for
+native-theme fixture captures; no user files are needed.
+
 Details column order: Name, Date modified, Type, Size. Folders sort before files.
 Folder sizes are blank. Headers can be resized/reordered. Tiles use a 48 px icon
 with name/type/size to its right. Content uses a 32 px icon, a slightly larger
@@ -310,7 +334,8 @@ Open and Open in new window. Send to precedes Cut/Copy; Create shortcut,
 Delete, and Rename form the next group; Properties is last. Copy as path is
 present in the Shift menu. File application choices use an Open with submenu.
 
-The Linux menu retains these command groups. Desktop service extensions stay
+The Linux menu retains these command groups and always shows Copy as path
+directly below Copy for files and folders. Desktop service extensions stay
 inside More options, rather than appending application commands, tagging
 controls, or widget rows to the main menu. Unsupported shell commands are not
 displayed as placeholders. Context captions omit shortcut text; the original

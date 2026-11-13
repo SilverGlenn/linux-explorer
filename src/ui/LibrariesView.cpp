@@ -39,7 +39,8 @@ public:
 
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
-        if (tiles) return QSize(tileWidth, kTileHeight);
+        // Keep the adaptive grid pitch, but not a solid wall of hit/highlight boxes.
+        if (tiles) return QSize(qMax(1, tileWidth - 6), kTileHeight - 4);
         if (content) return QSize(rowWidth, 50);
         return QStyledItemDelegate::sizeHint(option, index);
     }

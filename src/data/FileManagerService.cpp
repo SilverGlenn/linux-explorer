@@ -9,6 +9,8 @@
 #include <QDBusReply>
 #include <QDir>
 #include <QFile>
+#include <QDBusAbstractAdaptor>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -102,14 +104,43 @@ QList<QUrl> toUrls(const QStringList &uriList, bool trusted)
 
 } // namespace
 
+// Keep instance control separate from the standard FileManager1 interface.
+class BrowserControlAdaptor : public QDBusAbstractAdaptor {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "io.github.LinuxExplorer.Win7")
+public:
+    explicit BrowserControlAdaptor(FileManagerService *service)
+        : QDBusAbstractAdaptor(service), m_service(service) {}
+
+public Q_SLOTS:
+    // Claims the desktop-wide name, which only the launcher may ask for: any
+    // other peer could otherwise make this process take the name over. Qt
+    // keeps the call's context on the service, not on its adaptors.
+    bool RegisterFileManager() { return m_service->registerSharedServiceForCaller(); }
+
+private:
+    FileManagerService *m_service;
+};
+
 FileManagerService::FileManagerService(QObject *parent)
     : QObject(parent)
 {
+    new BrowserControlAdaptor(this);
 }
 
 void FileManagerService::setTrustedExecutable(const QString &path)
 {
     g_trustedExecutable = path;
+}
+
+bool FileManagerService::registerSharedServiceForCaller()
+{
+    if (!callerIsTrusted()) {
+        sendErrorReply(QDBusError::AccessDenied,
+                       QStringLiteral("Only Explorer itself may register the file manager"));
+        return false;
+    }
+    return registerSharedService();
 }
 
 bool FileManagerService::callerIsTrusted() const
@@ -145,30 +176,52 @@ bool FileManagerService::claim(bool registerSharedService)
     if (!gotAppName)
         return false;
 
-    // Scriptable slots only, so nothing but the three specified methods is
-    // reachable. ExportAllSlots would put QObject's deleteLater() on the bus
-    // as well.
-    bus.registerObject(kObjectPath, this, QDBusConnection::ExportScriptableSlots);
+    // Scriptable slots only, so nothing but the three specified methods (and
+    // the control adaptor) is reachable. ExportAllSlots would put QObject's
+    // deleteLater() on the bus as well.
+    bus.registerObject(kObjectPath, this,
+                       QDBusConnection::ExportScriptableSlots | QDBusConnection::ExportAdaptors);
 
-    if (!registerSharedService)
-        return true;
+    if (registerSharedService)
+        this->registerSharedService();
+
+    return true;
+}
+
+bool FileManagerService::registerSharedService()
+{
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected() || !bus.interface())
+        return false;
 
     // Replacement allowed, so another file manager can take it over without a
     // restart, and failure here is ordinary
-    const auto shared = busInterface->registerService(
+    const auto shared = bus.interface()->registerService(
         kSharedService, QDBusConnectionInterface::DontQueueService,
         QDBusConnectionInterface::AllowReplacement);
     m_ownsSharedName = shared.isValid()
         && shared.value() == QDBusConnectionInterface::ServiceRegistered;
 
-    return true;
+    return m_ownsSharedName;
 }
 
-bool FileManagerService::forward(const QStringList &uris, bool reveal)
+bool FileManagerService::forward(const QStringList &uris, bool reveal,
+                                 bool registerSharedService)
 {
     QDBusConnection bus = QDBusConnection::sessionBus();
     if (!bus.isConnected())
         return false;
+
+    if (registerSharedService) {
+        auto call = QDBusMessage::createMethodCall(kAppService, kObjectPath,
+            kAppService, QStringLiteral("RegisterFileManager"));
+        if (bus.call(call).type() == QDBusMessage::ErrorMessage)
+            return false;
+        // An activation launch carries no paths: the desktop's pending
+        // ShowItems call supplies them after the shared name is acquired.
+        if (uris.isEmpty())
+            return true;
+    }
 
     const QString method = reveal ? QStringLiteral("ShowItems")
                                   : QStringLiteral("ShowFolders");
@@ -227,3 +280,5 @@ void FileManagerService::ShowItemProperties(const QStringList &uriList,
     // No parent, this process possibly having no window open
     FileOps::showProperties(items, nullptr);
 }
+
+#include "FileManagerService.moc"

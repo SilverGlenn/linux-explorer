@@ -191,6 +191,12 @@ private:
     void startSearch();
 
     void setViewMode(Settings::ViewMode mode);
+    Settings::FolderViewState captureFolderViewState() const;
+    void queueSaveFolderViewState();
+    void saveFolderViewState();
+    void restoreFolderViewState(const QUrl &url);
+    void setPreviewPaneVisible(bool visible);
+    void applyPreviewWidth();
 
     // Scrolling up steps towards the larger icons
     void zoomViewMode(int angleDelta);
@@ -230,6 +236,7 @@ private:
     // The margin cannot go on the view itself, a stylesheet on a scroll area
     // pulling the whole view into the stylesheet engine
     QWidget *m_listPage = nullptr;
+    QPointer<QWidget> m_gutterDragViewport;
 
     // In the window rather than the Computer page, so it spans the navigation
     // pane too, and what it carries is decided in one place
@@ -260,6 +267,14 @@ private:
     FileView       *m_fileView = nullptr;
     DetailsPane    *m_details = nullptr;
     PreviewPane    *m_previewPane = nullptr;
+    // Navigation updates its URL before locationChanged; saves belong to the
+    // displayed location, never to the destination already in history.
+    QUrl m_viewStateUrl;
+    Settings::FolderViewState m_defaultFolderViewState;
+    QTimer *m_folderStateTimer = nullptr;
+    bool m_restoringFolderState = false;
+    bool m_folderStateDirty = false;
+    int m_previewWidth = 250;
     QLineEdit      *m_searchBox = nullptr;
     QPointer<HelpDialog> m_helpWindow;
 

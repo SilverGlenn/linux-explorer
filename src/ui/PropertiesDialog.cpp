@@ -193,10 +193,9 @@ PropertiesDialog::PropertiesDialog(const KFileItemList &items, QWidget *parent, 
     setObjectName(QStringLiteral("propertiesDialog"));
     setWindowTitle(tr("%1 Properties").arg(m_data.displayName));
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
-    // Windows 7's property sheet requests MS Shell Dlg, mapped to Microsoft
-    // Sans Serif, at 8pt (-11 logical pixels at 96 DPI). Explorer itself uses
-    // Segoe UI 9pt. Keep a compact fallback where the legacy font is absent.
-    setFont(Aero::classicDialogFont());
+    // Use the shell's readable, scalable font rather than the tiny legacy
+    // MS Shell Dlg face, which renders poorly on Linux at fractional scales.
+    setFont(Aero::shellFont());
     QPalette sheetPalette = palette();
     sheetPalette.setColor(QPalette::Window, QColor(QStringLiteral("#f0f0f0")));
     sheetPalette.setColor(QPalette::WindowText, Qt::black);
@@ -271,7 +270,9 @@ PropertiesDialog::PropertiesDialog(const KFileItemList &items, QWidget *parent, 
     if (m_readOnly)
         connect(m_readOnly, &QCheckBox::toggled, this, &PropertiesDialog::updateDirtyState);
 
-    Aero::applyClassicDialogFont(this);
+    // Desktop class fonts can survive reparenting, so pin every control too.
+    for (QWidget *control : findChildren<QWidget *>())
+        if (control->window() == this) control->setFont(font());
     const int height = m_data.kind == PropertiesData::Kind::File ? 477 : 449;
     setMinimumSize(qMax(361, minimumSizeHint().width()),
                    qMax(height, minimumSizeHint().height()));

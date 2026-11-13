@@ -2,10 +2,16 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QTextStream>
 #include <QStringList>
 #include <QUrl>
 #include <utility>
+#include <vector>
+#include <cerrno>
+#include <cstring>
+#include <unistd.h>
 #include "FileManagerService.h"
 #include "MainWindow.h"
 #include "ApplicationAppearance.h"
@@ -40,23 +46,8 @@ static QList<QUrl> urlsFrom(const QStringList &arguments)
     return urls;
 }
 
-int main(int argc, char *argv[]) {
-    QApplication app(argc, argv);
-    app.setOrganizationName("linux-explorer-win7");
-    app.setApplicationName("explorer-win7");
-    app.setApplicationVersion(QStringLiteral("1.2-win7.1"));
-
-    // A decoration theme's exception list matches on the window class, which on
-    // Wayland is the app id and is read from this as each window is created.
-    // The browser windows claim the plain name for themselves, so everything
-    // else lands here, dialogs raised by KIO and the desktop included, and an
-    // exception written to strip a browser window's caption leaves them alone
-    app.setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
-    // No display name is set, Qt appending one to every title where Explorer's
-    // is just the folder name
-    app.setWindowIcon(Aero::themeIcon({"system-file-manager", "folder"}));
-
-    QCommandLineParser parser;
+static void configureParser(QCommandLineParser &parser)
+{
     parser.setApplicationDescription(
         QStringLiteral("The Windows 7 Explorer, on Linux."));
     parser.addHelpOption();
@@ -78,11 +69,77 @@ int main(int argc, char *argv[]) {
         QStringLiteral("url"),
         QStringLiteral("Folders to open, or files to reveal with --select."),
         QStringLiteral("[url...]"));
+}
+
+static QStringList encodedUris(const QList<QUrl> &urls)
+{
+    QStringList uris;
+    uris.reserve(urls.size());
+    for (const QUrl &url : urls)
+        uris.append(url.toString(QUrl::FullyEncoded));
+    return uris;
+}
+
+static int forwardBeforeGui(int argc, char *argv[])
+{
+    // Keep argv intact: Qt may remove its own options from the supplied array.
+    std::vector<char *> originalArgs(argv, argv + argc);
+    originalArgs.push_back(nullptr);
+    QCoreApplication app(argc, argv);
+    QCommandLineParser parser;
+    configureParser(parser);
+    if (parser.parse(app.arguments()) && !parser.isSet("help")
+        && !parser.isSet("help-all") && !parser.isSet("version")
+        && !parser.isSet("map-google-drive-mount")) {
+        auto *bus = QDBusConnection::sessionBus().interface();
+        if (bus && bus->isServiceRegistered(QStringLiteral("io.github.LinuxExplorer.Win7")).value()
+            && FileManagerService::forward(encodedUris(urlsFrom(parser.positionalArguments())),
+                parser.isSet("select"), parser.isSet("register-file-manager")))
+            return 0;
+    }
+
+    // A GUI is needed. Re-exec rather than replacing a live QCoreApplication
+    // with QApplication, which leaves Qt's process-wide services initialized
+    // for the wrong application type. No GUI/theme was loaded in this pass.
+    qputenv("EXPLORER_GUI_PROCESS", "1");
+    execv("/proc/self/exe", originalArgs.data());
+    QTextStream(stderr) << "Could not start Explorer: " << std::strerror(errno) << '\n';
+    return 1;
+}
+
+int main(int argc, char *argv[]) {
+    const bool guiProcess = qgetenv("EXPLORER_GUI_PROCESS") == "1";
+    qunsetenv("EXPLORER_GUI_PROCESS");
+    if (!guiProcess)
+        return forwardBeforeGui(argc, argv);
+
+    QApplication app(argc, argv);
+    app.setOrganizationName("linux-explorer-win7");
+    app.setApplicationName("explorer-win7");
+    app.setApplicationVersion(QStringLiteral("1.2-win7.1"));
+
+    // A decoration theme's exception list matches on the window class, which on
+    // Wayland is the app id and is read from this as each window is created.
+    // The browser windows claim the plain name for themselves, so everything
+    // else lands here, dialogs raised by KIO and the desktop included, and an
+    // exception written to strip a browser window's caption leaves them alone
+    app.setDesktopFileName(QStringLiteral("linux-explorer-win7-dialog"));
+    // No display name is set, Qt appending one to every title where Explorer's
+    // is just the folder name
+    app.setWindowIcon(Aero::themeIcon({"system-file-manager", "folder"}));
+
+    QCommandLineParser parser;
+    configureParser(parser);
     parser.process(app);
 
-    const bool reveal = parser.isSet(selectOption);
+    const bool reveal = parser.isSet("select");
+    const bool registerFileManager = parser.isSet("register-file-manager");
+    // D-Bus activation carries its locations in the pending method call, not
+    // argv. Wait for that call instead of creating an empty Libraries window.
+    const bool busActivation = registerFileManager
+        && qEnvironmentVariable("DBUS_STARTER_BUS_TYPE") == QLatin1String("session");
     QList<QUrl> urls = urlsFrom(parser.positionalArguments());
-    if (parser.isSet(mountOption)) {
+    if (parser.isSet("map-google-drive-mount")) {
         if (reveal || !parser.positionalArguments().isEmpty()) {
             QTextStream(stderr) << "--map-google-drive-mount cannot be combined with a selection or path.\n";
             return 2;
@@ -102,16 +159,13 @@ int main(int argc, char *argv[]) {
     // FullyEncoded, since the receiving end re-parses these in StrictMode: a
     // plain toString() leaves spaces and other reserved characters literal,
     // which StrictMode then rejects, silently dropping the location
-    QStringList uris;
-    uris.reserve(urls.size());
-    for (const QUrl &url : urls)
-        uris.append(url.toString(QUrl::FullyEncoded));
+    const QStringList uris = encodedUris(urls);
 
     // One Explorer per session, so a second launch hands its arguments to the
     // one holding the bus name and gets out of the way
     auto *service = new FileManagerService(&app);
-    if (!service->claim(parser.isSet(registerOption))) {
-        if (FileManagerService::forward(uris, reveal))
+    if (!service->claim(registerFileManager)) {
+        if (FileManagerService::forward(uris, reveal, registerFileManager))
             return 0;
         // The running instance did not answer, so open a window here
     }
@@ -119,14 +173,16 @@ int main(int argc, char *argv[]) {
     Explorer::configureApplicationAppearance(&app);
 
     const QString startupId = FileManagerService::startupId();
-    if (reveal)
-        service->ShowItems(uris, startupId);
-    else
-        service->ShowFolders(uris, startupId);
+    if (!busActivation || !uris.isEmpty()) {
+        if (reveal)
+            service->ShowItems(uris, startupId);
+        else
+            service->ShowFolders(uris, startupId);
+    }
 
     // A reveal naming only files that no longer exist can get here with no
     // window, which would be a process the user cannot see or quit
-    if (MainWindow::openWindowCount() == 0)
+    if (!busActivation && MainWindow::openWindowCount() == 0)
         MainWindow::openWindow(Locations::libraries(), {}, startupId);
 
     // Ordinary Explorer startup only: chooser/portal observers remain passive.

@@ -203,9 +203,12 @@ BrowserNavigation::BrowserNavigation(KFilePlacesModel *places, ComputerModel *co
     auto *refreshButton = new QToolButton;
     refreshButton->setIcon(Aero::themeIcon({"view-refresh", "reload"}));
     refreshButton->setStyleSheet(
-        QStringLiteral("QToolButton { border: none;"
+        QStringLiteral("QToolButton { border: 1px solid transparent;"
                        " border-left: 1px solid rgba(121, 121, 121, 173);"
-                       " background: transparent; border-image: none; }"));
+                       " background: transparent; border-image: none; }"
+                       "QToolButton:pressed { border: 1px inset rgba(90, 110, 130, 160);"
+                       " background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+                       " stop:0 rgba(95, 125, 155, 65), stop:1 rgba(220, 235, 248, 90)); }"));
     refreshButton->setToolTip(tr("Refresh (F5)"));
     refreshButton->setAccessibleName(tr("Refresh"));
     refreshButton->setFixedWidth(24);

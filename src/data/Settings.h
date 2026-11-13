@@ -1,14 +1,16 @@
 #pragma once
 
 #include <QByteArray>
+#include <QList>
+#include <QtGlobal>
 #include <QString>
 #include <QStringList>
 #include <optional>
 
 class QUrl;
 
-// Everything the window remembers between runs, written on close rather than
-// on every change
+// Window defaults and per-folder layouts. Continuous layout changes are
+// coalesced by the window, with pending changes flushed on navigation/close.
 namespace Settings {
 
 // In View menu order
@@ -50,6 +52,22 @@ void setDefaultViewMode(ViewMode mode);
 ViewMode viewModeFor(const QUrl &url);
 void setViewModeFor(const QUrl &url, ViewMode mode);
 
+struct FolderViewState {
+    ViewMode mode = ViewMode::Details;
+    QByteArray header;
+    QList<int> visibleColumns;
+    int sortColumn = 0;
+    Qt::SortOrder sortOrder = Qt::AscendingOrder;
+    int groupColumn = -1;
+    bool previewVisible = false;
+    int previewWidth = 250;
+    bool navigationVisible = true;
+    bool detailsVisible = true;
+};
+
+std::optional<FolderViewState> folderViewStateFor(const QUrl &url);
+void setFolderViewStateFor(const QUrl &url, const FolderViewState &state);
+
 // Typed into the address bar, most recent first, and what F4 drops under it
 QStringList recentPaths();
 void addRecentPath(const QString &path);
@@ -86,7 +104,7 @@ void setSearchSubfolders(bool recursive);
 bool notifyUnmountedDrives();
 void setNotifyUnmountedDrives(bool notify);
 
-// Folder Options, reset folders
+// Folder Options, reset folders (including the per-folder pane/column layouts).
 void clearRememberedViewModes();
 
 // Stable navigation group IDs, independent of translated headings.
@@ -99,5 +117,19 @@ void setFavoritesOrder(const QStringList &urls);
 // Computer needs the difference, its own fallback being Tiles, and the mode
 // alone cannot say whether the default applied
 bool hasViewModeFor(const QUrl &url);
+
+// The file picker's last folder and arrangement, shared by every application
+// and by both chooser backends, so it lives in its own file rather than in
+// whichever process happened to show the dialog
+QUrl chooserFolder();
+void setChooserFolder(const QUrl &folder);
+// Source column and order, the column -1 until one is chosen (the dialog
+// then sorts by Date modified, newest first)
+int chooserSortColumn();
+Qt::SortOrder chooserSortOrder();
+void setChooserSort(int sourceColumn, Qt::SortOrder order);
+ViewMode chooserViewMode();
+void setChooserViewMode(ViewMode mode);
+void clearChooserMemory();
 
 } // namespace Settings

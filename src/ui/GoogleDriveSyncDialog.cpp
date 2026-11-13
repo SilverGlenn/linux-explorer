@@ -642,14 +642,19 @@ void GoogleDriveSyncDialog::updateSelectionActions()
     const bool paused = state == QLatin1String("paused");
     const bool reviewRequired = state == QLatin1String("needs-review");
     const bool canResume = selected.value(QStringLiteral("can_resume")).toBool();
-    m_pauseResume->setText(reviewRequired ? tr("Review…") : paused ? tr("Resume") : tr("Pause"));
-    m_pauseResume->setAccessibleName(reviewRequired
-        ? tr("Review file removals before resuming synchronization")
+    const bool retryInitial = selected.value(QStringLiteral("can_retry_initial")).toBool()
+        && (paused || reviewRequired);
+    m_pauseResume->setText(retryInitial ? tr("Resume initial copy")
+        : reviewRequired ? tr("Review…") : paused ? tr("Resume") : tr("Pause"));
+    m_pauseResume->setAccessibleName(retryInitial
+        ? tr("Verify downloaded files and resume the initial cloud copy")
+        : reviewRequired ? tr("Review file removals before resuming synchronization")
         : paused ? tr("Resume the selected folder synchronization")
                  : tr("Pause the selected folder synchronization"));
     m_pauseResume->setEnabled(hasPair && !busy
-                              && ((paused && canResume) || (reviewRequired && canResume)
+                              && (retryInitial || (paused && canResume) || (reviewRequired && canResume)
                                   || state == QLatin1String("idle")
+                                  || state == QLatin1String("initializing")
                                   || state == QLatin1String("syncing")));
     m_syncNow->setText(state == QLatin1String("error") ? tr("Try again") : tr("Sync now"));
     m_syncNow->setAccessibleName(state == QLatin1String("error")
@@ -673,7 +678,16 @@ void GoogleDriveSyncDialog::pauseOrResumeSelected()
     const QString id = pair.value(QStringLiteral("id")).toString();
     if (id.isEmpty() || m_controller->isBusy() || m_pairActionPending)
         return;
-    if (pair.value(QStringLiteral("state")).toString() == QLatin1String("needs-review")) {
+    const QString state = pair.value(QStringLiteral("state")).toString();
+    if (pair.value(QStringLiteral("can_retry_initial")).toBool()
+        && (state == QLatin1String("paused") || state == QLatin1String("needs-review"))) {
+        m_pairActionPending = true;
+        setStatus(tr("Verifying the downloaded files before continuing the initial cloud copy…"));
+        updateControls();
+        m_controller->resumePair(id);
+        return;
+    }
+    if (state == QLatin1String("needs-review")) {
         if (!pair.value(QStringLiteral("can_resume")).toBool())
             return;
         m_pendingReviewPairId = id;

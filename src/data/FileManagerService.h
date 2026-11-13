@@ -23,8 +23,14 @@ public:
 
     bool ownsSharedName() const { return m_ownsSharedName; }
 
+    // May be requested by a later, explicitly opted-in launch too.
+    bool registerSharedService();
+    // The bus entry point for that, refused unless the caller is Explorer
+    bool registerSharedServiceForCaller();
+
     // Hands the locations to the Explorer already running
-    static bool forward(const QStringList &uris, bool reveal);
+    static bool forward(const QStringList &uris, bool reveal,
+                        bool registerSharedService = false);
 
     // The activation token this process was launched with, so a window opened
     // for another application may take the focus

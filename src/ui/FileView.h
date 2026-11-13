@@ -42,6 +42,10 @@ public:
     // Focusing this container directly would do nothing, it having no policy
     void focusView();
 
+    // Include Explorer's outer gutter in the Details selection overlay.
+    // The container must be an ancestor; null restores viewport-only drawing.
+    void setSelectionBandContainer(QWidget *container);
+
     // Shared by both views, so a caller can connect to it once
     QItemSelectionModel *selectionModel() const;
     QModelIndexList selectedIndexes() const;
@@ -76,6 +80,7 @@ public:
 
     QByteArray headerState() const;
     void setHeaderState(const QByteArray &state);
+    void restoreLayout(const Settings::FolderViewState &state);
 
     // Drawn over an empty listing, and an empty string hides it
     void setStatusMessage(const QString &message);
@@ -112,6 +117,7 @@ Q_SIGNALS:
     void viewModeChanged(Settings::ViewMode mode);
 
     void groupColumnChanged(int sourceColumn);
+    void layoutChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -133,6 +139,7 @@ private:
     // Shared, so the two views cannot answer different gestures
     void bindActivation(QAbstractItemView *view);
     void applyMode();
+    void updateIconGrid();
     void rebuildPreviews();
     void configureColumns();
     void showHeaderMenu(const QPoint &pos);

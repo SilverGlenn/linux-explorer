@@ -235,6 +235,39 @@ private Q_SLOTS:
         QVERIFY(returnedToBlank == normal);
     }
 
+    void rowSelectionEdgesFollowVisibleColumnOrder()
+    {
+        QTreeView tree;
+        QStandardItemModel model(1, 4);
+        model.setHorizontalHeaderLabels({QStringLiteral("Name"), QStringLiteral("Size"),
+                                        QStringLiteral("Date modified"), QStringLiteral("Type")});
+        tree.setModel(&model);
+        Aero::configureListTree(&tree);
+        QHeaderView *header = tree.header();
+        header->moveSection(header->visualIndex(1), 3);
+
+        const auto position = [&](int column) {
+            QStyleOptionViewItem option;
+            option.widget = &tree;
+            option.viewItemPosition = QStyleOptionViewItem::OnlyOne;
+            Aero::correctRowSelectionPosition(option, model.index(0, column));
+            return option.viewItemPosition;
+        };
+        // Type is last in the model, but Size is the actual right edge.
+        QCOMPARE(position(0), QStyleOptionViewItem::Beginning);
+        QCOMPARE(position(2), QStyleOptionViewItem::Middle);
+        QCOMPARE(position(3), QStyleOptionViewItem::Middle);
+        QCOMPARE(position(1), QStyleOptionViewItem::End);
+        tree.hideColumn(1);
+        QCOMPARE(position(3), QStyleOptionViewItem::End);
+        tree.hideColumn(0);
+        QCOMPARE(position(2), QStyleOptionViewItem::Beginning);
+        tree.hideColumn(3);
+        QCOMPARE(position(2), QStyleOptionViewItem::OnlyOne);
+        tree.setLayoutDirection(Qt::RightToLeft);
+        QCOMPARE(position(2), QStyleOptionViewItem::OnlyOne);
+    }
+
     void sharedHeaderRetainsNativeStatefulPaintingAndResizing()
     {
         QTreeView tree;

@@ -49,6 +49,7 @@
 
 #include <AeroQt/insetwindow.h>
 
+#include <QAbstractItemView>
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -83,8 +84,8 @@
 
 namespace {
 
-// The gap Win7 leaves between the navigation pane and the file list
-constexpr int kListLeftMargin = 8;
+// A small gutter beside the file list, wide enough to start a selection drag.
+constexpr int kListLeftMargin = 12;
 
 // Long enough that ordinary local folders never show the placeholder at all
 constexpr int kLoadingPlaceholderDelay = 400;
@@ -364,6 +365,12 @@ MainWindow::MainWindow(const QUrl &startUrl, QWidget *parent)
     // the dialog
     m_fileView->setSingleClickToOpen(Settings::singleClickToOpen());
 
+    m_defaultFolderViewState = captureFolderViewState();
+    m_folderStateTimer = new QTimer(this);
+    m_folderStateTimer->setSingleShot(true);
+    m_folderStateTimer->setInterval(120);
+    connect(m_folderStateTimer, &QTimer::timeout, this, &MainWindow::saveFolderViewState);
+
     // Not a navigation, opening a window not counting as one
     m_navigation->initialize(startUrl);
 }
@@ -382,19 +389,21 @@ void MainWindow::setVisible(bool visible)
     const QString dialogs = QGuiApplication::desktopFileName();
     QGuiApplication::setDesktopFileName(QStringLiteral("linux-explorer-win7"));
     QMainWindow::setVisible(true);
+    applyPreviewWidth();
     QGuiApplication::setDesktopFileName(dialogs);
 }
 
 MainWindow::~MainWindow()
 {
+    saveFolderViewState();
     g_windows.removeOne(this);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    saveFolderViewState();
     Settings::setWindowGeometry(saveGeometry());
     Settings::setSplitterState(m_splitter->saveState());
-    Settings::setHeaderState(m_fileView->headerState());
     QMainWindow::closeEvent(event);
 }
 
@@ -539,13 +548,8 @@ void MainWindow::buildActions()
     m_actHelp->setIcon(Aero::helpIcon());
     m_actHelp->setToolTip(tr("Get help (F1)"));
 
-    m_actPreviewPane = windowAction(tr("Preview pane"), [this](bool on) {
-        m_actPreviewPane->setToolTip(on ? tr("Hide the preview pane (Alt+P)")
-                                      : tr("Show the preview pane (Alt+P)"));
-        m_previewPane->setVisible(on);
-        if (on)
-            m_previewPane->setItems(selectedItems());
-    }, QKeySequence(Qt::ALT | Qt::Key_P));
+    m_actPreviewPane = windowAction(tr("Preview pane"), &MainWindow::setPreviewPaneVisible,
+                                   QKeySequence(Qt::ALT | Qt::Key_P));
     m_actPreviewPane->setCheckable(true);
     m_actPreviewPane->setIcon(Aero::previewPaneIcon());
     m_actPreviewPane->setToolTip(tr("Show the preview pane (Alt+P)"));
@@ -935,13 +939,19 @@ QWidget *MainWindow::buildCommandBar()
     auto *navPaneAction = layout->addAction(tr("Navigation pane"));
     navPaneAction->setCheckable(true);
     navPaneAction->setChecked(true);
-    connect(navPaneAction, &QAction::toggled, this,
-            [this](bool on) { m_places->setVisible(on); });
+    connect(navPaneAction, &QAction::toggled, this, [this](bool on) {
+        const bool changed = m_places->isHidden() == on;
+        m_places->setVisible(on);
+        if (changed) queueSaveFolderViewState();
+    });
     auto *detailsPaneAction = layout->addAction(tr("Details pane"));
     detailsPaneAction->setCheckable(true);
     detailsPaneAction->setChecked(true);
-    connect(detailsPaneAction, &QAction::toggled, this,
-            [this](bool on) { m_details->setVisible(on); });
+    connect(detailsPaneAction, &QAction::toggled, this, [this](bool on) {
+        const bool changed = m_details->isHidden() == on;
+        m_details->setVisible(on);
+        if (changed) queueSaveFolderViewState();
+    });
     connect(layout, &QMenu::aboutToShow, this,
             [this, menuBarAction, navPaneAction, detailsPaneAction] {
         menuBarAction->setChecked(menuBar()->isVisible());
@@ -1011,8 +1021,11 @@ QWidget *MainWindow::buildCommandBar()
     helpButton->setObjectName(QStringLiteral("helpButton"));
     helpButton->setFixedSize(24, 24);
     helpButton->setCursor(Qt::ArrowCursor);
-    helpButton->setStyleSheet("QToolButton { border: none; background: transparent; }");
-    helpButton->setObjectName(QStringLiteral("helpButton"));
+    helpButton->setStyleSheet(QStringLiteral(
+        "QToolButton { border: 1px solid transparent; background: transparent; }"
+        "QToolButton:pressed { border: 1px inset rgba(90, 110, 130, 160);"
+        " background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+        " stop:0 rgba(95, 125, 155, 65), stop:1 rgba(220, 235, 248, 90)); }"));
     helpButton->setDefaultAction(m_actHelp);
     helpButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     helpButton->setAccessibleName(tr("Help"));
@@ -1378,12 +1391,15 @@ QWidget *MainWindow::buildBody()
             [this](Settings::ViewMode mode) {
         for (QAction *action : m_viewModeGroup->actions())
             action->setChecked(action->data().toInt() == int(mode));
+        queueSaveFolderViewState();
     });
+    connect(m_fileView, &FileView::layoutChanged, this, &MainWindow::queueSaveFolderViewState);
     connect(m_fileView, &FileView::groupColumnChanged, this, [this](int column) {
         // Also fires when picking an icon mode dropped the grouping, hence the
         // menu following the view rather than the other way round
         for (QAction *action : m_groupGroup->actions())
             action->setChecked(action->data().toInt() == column);
+        queueSaveFolderViewState();
     });
     connect(&FileOps::GLOBAL_RENAME_CONTEXT, &FileOps::GlobalRenameContext::finishRename,
             this, [this](const QUrl &newUrl) {
@@ -1400,6 +1416,7 @@ QWidget *MainWindow::buildBody()
             [this](Settings::ViewMode mode) {
         for (QAction *action : m_viewModeGroup->actions())
             action->setChecked(action->data().toInt() == int(mode));
+        queueSaveFolderViewState();
     });
 
     m_listPage = new QWidget;
@@ -1419,6 +1436,7 @@ QWidget *MainWindow::buildBody()
     m_libraryHeader->hide();
     listLayout->addWidget(m_libraryHeader);
     listLayout->addWidget(m_fileView, 1);
+    m_fileView->setSelectionBandContainer(m_listPage);
 
     m_loadingPage = new QWidget;
     m_loadingPage->setObjectName(QStringLiteral("loadingPage"));
@@ -1444,8 +1462,10 @@ QWidget *MainWindow::buildBody()
         updateActionStates();
         rebuildContextualCommands();
     });
-    connect(m_librariesView, &LibrariesView::viewModeChanged, this,
-            [this] { updateActionStates(); });
+    connect(m_librariesView, &LibrariesView::viewModeChanged, this, [this] {
+        updateActionStates();
+        queueSaveFolderViewState();
+    });
     m_splitter->addWidget(m_stack);
 
     // In the splitter rather than floating over the list, so its edge resizes
@@ -1461,12 +1481,48 @@ QWidget *MainWindow::buildBody()
     m_splitter->setStretchFactor(1, 1);
     m_splitter->setStretchFactor(2, 0);
     m_splitter->setSizes({158, 750, 250});
+    connect(m_splitter, &QSplitter::splitterMoved, this, [this] {
+        if (!m_previewPane->isHidden())
+            m_previewWidth = m_previewPane->width();
+        queueSaveFolderViewState();
+    });
 
     return m_splitter;
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // The left gutter belongs to the page, not the item view. Keep its
+    // implicit mouse grab, but route selection gestures into the viewport
+    // with their original (initially negative) x coordinate.
+    if (watched == m_listPage && (event->type() == QEvent::MouseButtonPress
+        || event->type() == QEvent::MouseMove || event->type() == QEvent::MouseButtonRelease)) {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (event->type() == QEvent::MouseButtonPress && mouse->button() == Qt::LeftButton
+            && m_fileView->viewMode() == Settings::ViewMode::Details) {
+            QAbstractItemView *view = m_fileView->currentView();
+            QWidget *viewport = view->viewport();
+            const QPoint pos = viewport->mapFrom(m_listPage, mouse->position().toPoint());
+            if (pos.x() < 0 && pos.y() >= 0 && pos.y() < viewport->height()) {
+                m_gutterDragViewport = viewport;
+                view->setFocus(Qt::MouseFocusReason);
+            }
+        }
+        if (m_gutterDragViewport && (event->type() == QEvent::MouseMove
+                                    || mouse->button() == Qt::LeftButton)) {
+            QWidget *viewport = m_gutterDragViewport;
+            const QPoint pos = viewport->mapFrom(m_listPage, mouse->position().toPoint());
+            QMouseEvent forwarded(event->type(), pos, mouse->globalPosition(),
+                                  mouse->button(), mouse->buttons(), mouse->modifiers(),
+                                  mouse->pointingDevice());
+            if (event->type() == QEvent::MouseButtonRelease)
+                m_gutterDragViewport.clear();
+            QApplication::sendEvent(viewport, &forwarded);
+            event->accept();
+            return true;
+        }
+    }
+
     // Every window installs this filter on the application, so without the
     // check on which is active the first one opened answers for all of them
     if (event->type() == QEvent::MouseButtonPress && isActiveWindow()) {
@@ -1555,6 +1611,8 @@ QUrl MainWindow::operationFolder() const
 
 void MainWindow::showLocation(const QUrl &url)
 {
+    saveFolderViewState();
+    m_restoringFolderState = true;
     invalidateSelection();
 
     if (Locations::isLibraries(url)) {
@@ -1562,8 +1620,6 @@ void MainWindow::showLocation(const QUrl &url)
         m_loadingTimer->stop();
         m_navigation->stopPathProgress();
         m_stack->setCurrentWidget(m_librariesView);
-        m_librariesView->setViewMode(Settings::hasViewModeFor(url)
-            ? Settings::viewModeFor(url) : Settings::ViewMode::Tiles);
     } else if (Locations::isComputer(url)) {
         // Never handed to KIO, there being no worker, and this page is built
         // in process and always ready so a pending placeholder is cancelled
@@ -1571,13 +1627,6 @@ void MainWindow::showLocation(const QUrl &url)
         m_loadingTimer->stop();
         m_navigation->stopPathProgress();
         m_stack->setCurrentWidget(m_computerView);
-
-        // Win7 opens this page in tiles, so it falls back to its own mode
-        // rather than the global default
-        Settings::ViewMode mode = Settings::ViewMode::Tiles;
-        if (Settings::hasViewModeFor(url))
-            mode = Settings::viewModeFor(url);
-        m_computerView->setViewMode(mode);
     } else {
         m_stack->setCurrentWidget(m_listPage);
         if (!m_model->url().matches(url, QUrl::StripTrailingSlash))
@@ -1585,12 +1634,9 @@ void MainWindow::showLocation(const QUrl &url)
         const auto library = Libraries::forUrl(url);
         m_libraryHeader->setVisible(library.url.isValid());
         m_libraryHeading->setText(tr("%1 library").arg(library.name));
-
-        // Not through the path a user takes, which would write this folder's
-        // mode back out as the default for every folder
-        m_fileView->setViewMode(Settings::viewModeFor(url));
     }
 
+    restoreFolderViewState(url);
     m_places->setCurrentUrl(url);
 
     m_fileView->setDestination(operationFolder());
@@ -1738,12 +1784,15 @@ void MainWindow::showOptionsDialog()
         Settings::clearRememberedViewModes();
         Settings::setDefaultViewMode(mode);
         Settings::setViewModeFor(currentUrl(), mode);
+        queueSaveFolderViewState();
     });
 
-    connect(&dialog, &OptionsDialog::resetAllFolders, this, [this] {
+    connect(&dialog, &OptionsDialog::resetAllFolders, this, [] {
         Settings::clearRememberedViewModes();
-        for (MainWindow *window : std::as_const(g_windows))
-            window->setViewMode(Settings::defaultViewMode());
+        for (MainWindow *window : std::as_const(g_windows)) {
+            window->restoreFolderViewState(window->currentUrl());
+            window->updateActionStates();
+        }
     });
 
     dialog.exec();
@@ -1796,6 +1845,100 @@ void MainWindow::showGoogleDriveSyncDialog()
 {
     GoogleDriveSyncDialog dialog(this);
     dialog.exec();
+}
+
+Settings::FolderViewState MainWindow::captureFolderViewState() const
+{
+    Settings::FolderViewState state;
+    state.mode = Locations::isComputer(m_viewStateUrl) ? m_computerView->viewMode()
+        : Locations::isLibraries(m_viewStateUrl) ? m_librariesView->viewMode() : m_fileView->viewMode();
+    state.header = m_fileView->headerState();
+    state.visibleColumns = m_model->visibleColumns();
+    state.sortColumn = m_model->sortColumn();
+    state.sortOrder = m_model->sortOrder();
+    state.groupColumn = m_fileView->groupColumn();
+    state.previewVisible = m_actPreviewPane->isChecked();
+    state.previewWidth = state.previewVisible && m_previewPane->isVisible()
+        ? m_previewPane->width() : m_previewWidth;
+    // isVisible() would turn every pane off when closing a hidden window.
+    state.navigationVisible = !m_places->isHidden();
+    state.detailsVisible = !m_details->isHidden();
+    return state;
+}
+
+void MainWindow::queueSaveFolderViewState()
+{
+    if (m_restoringFolderState || m_viewStateUrl.isEmpty() || !m_folderStateTimer)
+        return;
+    m_folderStateDirty = true;
+    m_folderStateTimer->start();
+}
+
+void MainWindow::saveFolderViewState()
+{
+    if (m_folderStateTimer) m_folderStateTimer->stop();
+    if (m_restoringFolderState || !m_folderStateDirty || m_viewStateUrl.isEmpty())
+        return;
+    Settings::setFolderViewStateFor(m_viewStateUrl, captureFolderViewState());
+    m_folderStateDirty = false;
+}
+
+void MainWindow::restoreFolderViewState(const QUrl &url)
+{
+    m_restoringFolderState = true;
+    m_folderStateDirty = false;
+    if (m_folderStateTimer) m_folderStateTimer->stop();
+    m_viewStateUrl = url;
+    const auto saved = Settings::folderViewStateFor(url);
+    Settings::FolderViewState state = saved.value_or(m_defaultFolderViewState);
+    const bool virtualPage = Locations::isComputer(url) || Locations::isLibraries(url);
+    state.mode = virtualPage && !Settings::hasViewModeFor(url)
+        ? Settings::ViewMode::Tiles : Settings::viewModeFor(url);
+    if (Locations::isComputer(url))
+        m_computerView->setViewMode(state.mode);
+    else if (Locations::isLibraries(url))
+        m_librariesView->setViewMode(state.mode);
+    else
+        m_fileView->restoreLayout(state);
+    m_places->setVisible(state.navigationVisible);
+    m_details->setVisible(state.detailsVisible);
+    m_previewWidth = state.previewWidth;
+    setPreviewPaneVisible(state.previewVisible);
+    m_previewPane->setItems({});
+    m_restoringFolderState = false;
+    // Freeze even an untouched inherited mode: another folder's later choice
+    // must not change a directory the user already visited.
+    if (!saved)
+        Settings::setFolderViewStateFor(url, captureFolderViewState());
+}
+
+void MainWindow::setPreviewPaneVisible(bool visible)
+{
+    if (!m_restoringFolderState && !visible && !m_previewPane->isHidden())
+        m_previewWidth = m_previewPane->width();
+    m_actPreviewPane->setChecked(visible);
+    m_actPreviewPane->setToolTip(visible ? tr("Hide the preview pane (Alt+P)")
+                                       : tr("Show the preview pane (Alt+P)"));
+    m_previewPane->setVisible(visible);
+    if (visible) {
+        applyPreviewWidth();
+        m_previewPane->setItems(selectedItems());
+    }
+    queueSaveFolderViewState();
+}
+
+void MainWindow::applyPreviewWidth()
+{
+    if (!m_previewPane || !m_previewPane->isVisible())
+        return;
+    QList<int> sizes = m_splitter->sizes();
+    if (sizes.size() != 3)
+        return;
+    const int available = sizes.at(1) + sizes.at(2);
+    const int width = qMin(m_previewWidth, qMax(120, available - 100));
+    sizes[1] = qMax(100, available - width);
+    sizes[2] = width;
+    m_splitter->setSizes(sizes);
 }
 
 void MainWindow::setViewMode(Settings::ViewMode mode)
@@ -2243,8 +2386,7 @@ void MainWindow::buildItemContextMenu(QMenu &menu,
     menu.addSeparator();
     contextAction(menu, m_actCut);
     contextAction(menu, m_actCopy);
-    if (QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier))
-        contextAction(menu, m_actCopyPath);
+    contextAction(menu, m_actCopyPath);
 
     menu.addSeparator();
     contextAction(menu, m_actCreateLink);

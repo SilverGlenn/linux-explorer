@@ -20,6 +20,11 @@ Drive sign-in requires a maintainer-configured application client. See
   and Videos folders, plus Computer and Network destinations.
 - Windows 7-style breadcrumb navigation, search, command bar, classic menus,
   eight view modes, details pane, and persistent navigation groups.
+- Per-folder layout memory: view/icon size, sort and grouping, Details column
+  visibility/order/width, preview pane visibility/width, and navigation/details
+  pane visibility. Choices survive navigation and reopening; settings stay in
+  the application configuration, never in sidecar files inside your folders.
+  **Folder and search options → View → Reset Folders** clears this memory.
 - Real file operations through KIO, including copy, move, rename, trash,
   conflict handling, and undo. Natural sorting keeps folders first.
 - A compact Properties dialog for local files, folders, and drives, with
@@ -107,18 +112,20 @@ cmake --install build
 
 The fork installs alongside existing file managers. Installation keeps the
 desktop's default file manager, directory association, and shortcuts intact.
+Updates preserve an existing KDE launch shortcut stored in Explorer's launcher.
 Its browser application ID is `linux-explorer-win7`; dialog and picker IDs are
 `linux-explorer-win7-dialog` and `linux-explorer-win7-chooser-dialog`.
 
 To deliberately let this instance answer desktop **Open Containing Folder**
-requests, close any existing fork instance and launch:
+requests, launch:
 
 ```bash
 explorer-win7 --register-file-manager
 ```
 
 This requests the session's `org.freedesktop.FileManager1` name if available.
-Another file manager already holding the name keeps it.
+An existing Explorer instance handles the registration and subsequent reveal
+requests. Another file manager already holding the name keeps it.
 
 ### Open/Save chooser
 

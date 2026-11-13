@@ -7,6 +7,7 @@ logged.  The streamed read-only mount and its configuration remain independent.
 """
 
 import argparse
+from collections import deque
 import contextlib
 import datetime
 import fcntl
@@ -83,8 +84,10 @@ LIMIT = 64 * 1024
 STATE_LIMIT = 2 * 1024 * 1024
 INVENTORY_LIMIT = 16 * 1024 * 1024
 MAX_ITEMS = 20000
+FOLDER_BATCH_SIZE = 20
 MAX_PAIRS = 8
 INTERVAL = 120
+TRANSFER_TIMEOUT = 12 * 60 * 60
 MIN_VERSION = (1, 71, 0)
 REMOTE = MOUNT.REMOTE
 FOLDER = "application/vnd.google-apps.folder"
@@ -175,6 +178,8 @@ def public_pair(pair, account=None):
     # the ordinary resume RPC still rejects that state.
     result["can_resume"] = (pair["initialized"] and pair["state"] in ("idle", "paused", "error", "needs-review")
                             and (account is None or pair["account"] == account))
+    result["can_retry_initial"] = (not pair["initialized"] and pair["state"] in ("paused", "needs-review")
+                                   and (account is None or pair["account"] == account))
     return result
 
 
@@ -413,8 +418,16 @@ class Rclone:
                     or remote["type"] != "drive" or remote["scope"] != scope
                     or remote["client_id"] != client_id or remote["client_secret"] != client_secret):
                 raise ValueError()
+            stored_token = json.loads(remote["token"])
+            # Modern rclone writes OAuth lifetime metadata after refreshing a
+            # token. The absolute expiry remains authoritative for this client;
+            # normalize only this known field, not arbitrary credential fields.
+            if isinstance(stored_token, dict) and "expires_in" in stored_token:
+                lifetime = stored_token.pop("expires_in")
+                if type(lifetime) is not int or not 0 <= lifetime <= 86400:
+                    raise ValueError()
             envelope = {"version": 1, "client_id": client_id, "client_secret": client_secret,
-                        "config_password": password, "token": json.loads(remote["token"])}
+                        "config_password": password, "token": stored_token}
             token = MOUNT.app_credentials(io.BytesIO(json.dumps(envelope).encode("utf-8")))["token"]
         except (KeyError, TypeError, ValueError, Error):
             raise Error("The encrypted configuration does not match this application and permission.") from None
@@ -628,20 +641,36 @@ class DriveAPI:
         raise Error("The folder ancestry exceeds the safety limit.")
 
     def children(self, folder_id):
-        validate_id(folder_id)
-        result, page = [], None
+        return self.children_batch([folder_id])[folder_id]
+
+    def children_batch(self, folder_ids):
+        # Query only parents already discovered beneath the selected folder.
+        # Bounded OR queries avoid one network round trip per small directory
+        # without broadening the inventory to unrelated folders in My Drive.
+        folder_ids = [validate_id(folder_id) for folder_id in folder_ids]
+        if not 1 <= len(folder_ids) <= FOLDER_BATCH_SIZE or len(set(folder_ids)) != len(folder_ids):
+            raise Error("The Drive folder listing batch is invalid.")
+        scope = " or ".join("'" + folder_id + "' in parents" for folder_id in folder_ids)
+        result, page, count = {folder_id: [] for folder_id in folder_ids}, None, 0
         while True:
             self.check_cancel()
-            parameters = {"q": "'" + folder_id + "' in parents and trashed=false", "fields": "nextPageToken,incompleteSearch,files(" + FILE_FIELDS + ")",
+            parameters = {"q": "(" + scope + ") and trashed=false", "fields": "nextPageToken,incompleteSearch,files(" + FILE_FIELDS + ")",
                           "pageSize": "1000", "spaces": "drive", "corpora": "user", "supportsAllDrives": "true"}
             if page:
                 parameters["pageToken"] = page
             document = self.get("files", parameters)
+            self.check_cancel()
             if document.get("incompleteSearch") or not isinstance(document.get("files"), list):
                 raise Error("Drive returned an incomplete folder listing.")
-            result.extend(document["files"])
-            if len(result) > MAX_ITEMS:
+            count += len(document["files"])
+            if count > MAX_ITEMS:
                 raise Error("The selected folder exceeds the 20,000 item safety limit.")
+            for item in document["files"]:
+                parents = item.get("parents") if isinstance(item, dict) else None
+                if (not isinstance(parents, list) or len(parents) != 1
+                        or not isinstance(parents[0], str) or parents[0] not in result):
+                    raise Error("The Drive folder listing contains an unsupported item.")
+                result[parents[0]].append(item)
             page = document.get("nextPageToken")
             if not page:
                 return result
@@ -656,63 +685,69 @@ class DriveAPI:
 
     def _inventory(self, folder_id, backup_name=None, sentinel=None):
         root, ancestry = self.folder(folder_id)
-        queue, files, count, total, seen = [(folder_id, "")], {}, 0, 0, set()
+        queue, files, count, total, seen = deque([(folder_id, "")]), {}, 0, 0, set()
+        directories = set()
         while queue:
             self.check_cancel()
-            if len(seen) > 2000:
-                raise Error("The folder tree is too large to inspect safely. Select a smaller folder.")
-            parent, prefix = queue.pop()
-            if parent in seen:
-                raise Error("The Drive folder tree contains a repeated folder.")
-            seen.add(parent)
-            names = set()
-            for item in self.children(parent):
-                self.check_cancel()
-                count += 1
-                if count > MAX_ITEMS:
-                    raise Error("The selected folder exceeds the 20,000 item safety limit.")
-                name = validate_name(item.get("name"))
-                if name in names:
-                    raise Error("Duplicate Drive names must be resolved before synchronization.")
-                names.add(name)
-                validate_id(item.get("id"))
-                if item.get("driveId") or item.get("trashed") or item.get("parents") != [parent]:
-                    raise Error("The Drive folder listing contains an unsupported item.")
-                mime = item.get("mimeType", "")
-                if not prefix and backup_name and name == backup_name:
-                    if mime != FOLDER:
-                        raise Error("The remote backup location was replaced.")
-                    continue
-                if name.startswith(".explorer-sync-") and not (not prefix and name == sentinel):
-                    raise Error("The selected folder contains reserved sync metadata names.")
-                relative = prefix + name
-                if mime == FOLDER:
-                    if not item.get("capabilities", {}).get("canListChildren"):
-                        raise Error("A Drive subfolder cannot be fully listed.")
-                    queue.append((item["id"], relative + "/"))
-                else:
-                    if not isinstance(mime, str) or mime.startswith("application/vnd.google-apps."):
-                        raise Error("Google-native documents and shortcuts are not supported in two-way folders yet.")
-                    if not item.get("capabilities", {}).get("canDownload") or not item.get("capabilities", {}).get("canEdit"):
-                        raise Error("Every synchronized file must allow downloads and edits.")
-                    try:
-                        size = int(item["size"])
-                        if size < 0 or size > (1 << 63):
-                            raise ValueError()
-                    except (KeyError, TypeError, ValueError):
-                        raise Error("Drive returned an invalid file size.") from None
-                    digest = item.get("md5Checksum")
-                    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{32}", digest):
-                        raise Error("A Drive file has no usable content checksum.")
-                    files[relative] = {"id": item["id"], "size": size, "hash": digest}
-                    total += size
+            batch = [queue.popleft() for _ in range(min(FOLDER_BATCH_SIZE, len(queue)))]
+            for parent, _prefix in batch:
+                if len(seen) > 2000:
+                    raise Error("The folder tree is too large to inspect safely. Select a smaller folder.")
+                if parent in seen:
+                    raise Error("The Drive folder tree contains a repeated folder.")
+                seen.add(parent)
+            children = self.children_batch([parent for parent, _prefix in batch])
+            for parent, prefix in batch:
+                names = set()
+                for item in children[parent]:
+                    self.check_cancel()
+                    count += 1
+                    if count > MAX_ITEMS:
+                        raise Error("The selected folder exceeds the 20,000 item safety limit.")
+                    name = validate_name(item.get("name"))
+                    if name in names:
+                        raise Error("Duplicate Drive names must be resolved before synchronization.")
+                    names.add(name)
+                    validate_id(item.get("id"))
+                    if item.get("driveId") or item.get("trashed") or item.get("parents") != [parent]:
+                        raise Error("The Drive folder listing contains an unsupported item.")
+                    mime = item.get("mimeType", "")
+                    if not prefix and backup_name and name == backup_name:
+                        if mime != FOLDER:
+                            raise Error("The remote backup location was replaced.")
+                        continue
+                    if name.startswith(".explorer-sync-") and not (not prefix and name == sentinel):
+                        raise Error("The selected folder contains reserved sync metadata names.")
+                    relative = prefix + name
+                    if mime == FOLDER:
+                        if not item.get("capabilities", {}).get("canListChildren"):
+                            raise Error("A Drive subfolder cannot be fully listed.")
+                        directories.add(relative)
+                        queue.append((item["id"], relative + "/"))
+                    else:
+                        if not isinstance(mime, str) or mime.startswith("application/vnd.google-apps."):
+                            raise Error("Google-native documents and shortcuts are not supported in two-way folders yet.")
+                        if not item.get("capabilities", {}).get("canDownload") or not item.get("capabilities", {}).get("canEdit"):
+                            raise Error("Every synchronized file must allow downloads and edits.")
+                        try:
+                            size = int(item["size"])
+                            if size < 0 or size > (1 << 63):
+                                raise ValueError()
+                        except (KeyError, TypeError, ValueError):
+                            raise Error("Drive returned an invalid file size.") from None
+                        digest = item.get("md5Checksum")
+                        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{32}", digest):
+                            raise Error("A Drive file has no usable content checksum.")
+                        files[relative] = {"id": item["id"], "size": size, "hash": digest}
+                        total += size
         fingerprint = hashlib.sha256(json.dumps({"folder": root["id"], "name": root["name"], "files": files,
                                                  "folders": sorted(seen), "items": count, "bytes": total},
                                                 sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-        return {"folder": root, "ancestry": ancestry, "files": files, "file_count": len(files), "bytes": total, "fingerprint": fingerprint}
+        return {"folder": root, "ancestry": ancestry, "files": files, "directories": directories,
+                "file_count": len(files), "bytes": total, "fingerprint": fingerprint}
 
 
-def local_inventory(path, sentinel=None, hash_files=False, cancel=None, deadline=None, check=None):
+def local_inventory(path, sentinel=None, hash_files=False, cancel=None, deadline=None, check=None, directories=None):
     files, count = {}, 0
     root_device = path.stat().st_dev
     queue = [(path, "")]
@@ -741,6 +776,8 @@ def local_inventory(path, sentinel=None, hash_files=False, cancel=None, deadline
                     or (info.st_mode & 0o020 and not MOUNT.private_primary_group(info.st_gid))):
                 raise Error("A local sync entry has unsafe ownership, permissions, or filesystem.")
             if stat.S_ISDIR(info.st_mode):
+                if directories is not None:
+                    directories.add(prefix + name)
                 queue.append((Path(entry.path), prefix + name + "/"))
             elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
                 if name.startswith(".explorer-sync-") and not (not prefix and name == sentinel):
@@ -801,14 +838,15 @@ class Worker:
         raise Error("The selected sync pair no longer exists.")
 
     def check_remote_overlap(self, inventory, except_id=None):
+        message = "Remote sync folders must not overlap one another. Remove the other sync entry first; its files will be kept."
         for pair in self.state["pairs"]:
             if pair["id"] == except_id:
                 continue
             if pair["remote_folder_id"] in inventory["ancestry"]:
-                raise Error("Remote sync folders must not overlap one another.")
+                raise Error(message)
             _other, ancestors = self.api.folder(pair["remote_folder_id"])
             if inventory["folder"]["id"] in ancestors:
-                raise Error("Remote sync folders must not overlap one another.")
+                raise Error(message)
 
     def trusted_manifest(self, pair):
         manifest_path = self.paths.directory / "pairs" / pair["id"] / "manifest.json"
@@ -891,6 +929,14 @@ class Worker:
                 path, info = self.paths.local(request.get("local_path"), self.state["pairs"], empty=True)
             key = (folder_id, str(path))
             if action == "preview":
+                # A known parent/child pair must be removed before this folder
+                # can be added. Report that before scanning its entire tree.
+                with self.mutex:
+                    has_pairs = bool(self.state["pairs"])
+                if has_pairs:
+                    folder, ancestry = self.api.folder(folder_id)
+                    with self.mutex:
+                        self.check_remote_overlap({"folder": folder, "ancestry": ancestry})
                 inventory = self.api.inventory(folder_id)
                 with self.mutex:
                     self.check_remote_overlap(inventory)
@@ -954,21 +1000,25 @@ class Worker:
                 if pair["account"] != self.account:
                     raise Error("This sync pair belongs to another Drive account.")
                 if not pair["initialized"]:
-                    raise Error("An interrupted initial download must be reviewed and removed before creating a new pair.")
-                if pair["state"] == "needs-review":
+                    if action != "resume" or pair["state"] not in ("paused", "needs-review"):
+                        raise Error("Choose Resume initial copy to verify and continue an interrupted download.")
+                elif pair["state"] == "needs-review":
                     raise Error("Review this pair's current changes before resuming synchronization.")
                 if self.active == pair["id"]:
                     return self.response(message="This folder is already synchronizing.")
-                pair["state"], pair["error"] = "idle", ""
+                pair["state"], pair["error"] = ("idle" if pair["initialized"] else "initializing"), ""
                 self.next_run[pair["id"]] = 0
                 self.wakeup.set()
             self.paths.save(self.state)
         return self.response(message="The sync pair was updated. Local and cloud files were retained.")
 
     def run_pair(self, pair):
-        path, _info = self.paths.local(pair["local_path"], self.state["pairs"], empty=not pair["initialized"], existing_pair=pair)
+        path, _info = self.paths.local(pair["local_path"], self.state["pairs"], existing_pair=pair)
         pair_dir = self.paths.directory / "pairs" / pair["id"]
         self.paths.helper.safe_directory(pair_dir, create=True)
+        if not pair["initialized"] and any(candidate.exists() or candidate.is_symlink()
+                                           for candidate in (pair_dir / "bisync", pair_dir / "manifest.json")):
+            raise Error("The initial baseline was already started. Existing files and synchronization history were retained; review this pair before recreating it.")
         sentinel = ".explorer-sync-access-" + pair["id"]
         backup = ".explorer-sync-backups-" + pair["id"]
         inventory = self.api.inventory(pair["remote_folder_id"], backup if pair["initialized"] else None,
@@ -1016,9 +1066,20 @@ class Worker:
             if incoming + margin > shutil.disk_usage(path).free or margin > shutil.disk_usage(pair_dir).free:
                 raise Error("There is insufficient free disk space for incoming files and retained backups. Free space before resuming this pair.")
         else:
-            if inventory["bytes"] + 64 * 1024 * 1024 > shutil.disk_usage(path).free:
-                raise Error("The local disk has insufficient space for the initial cloud download.")
-            self.engine.run(["copy", REMOTE, str(path), "--ignore-existing", "--create-empty-src-dirs"] + root_flags)
+            # A resumed initial copy may reuse only content that still matches
+            # the original reviewed cloud snapshot. Never guess about edits,
+            # extra files or an already-started synchronization baseline.
+            partial_directories = set()
+            partial = local_inventory(path, hash_files=True, cancel=self.engine.cancel, directories=partial_directories)
+            if (not partial_directories.issubset(inventory["directories"])
+                    or any(name not in inventory["files"] or value["hash"] != inventory["files"][name]["hash"]
+                           or value["size"] != inventory["files"][name]["size"] for name, value in partial.items())):
+                raise Error("The partial download contains changed or unexpected local files. Existing files were kept; review them before continuing.")
+            incoming = sum(value["size"] for name, value in inventory["files"].items() if name not in partial)
+            if incoming + 64 * 1024 * 1024 > shutil.disk_usage(path).free:
+                raise Error("The local disk has insufficient space for the remaining cloud download.")
+            self.engine.run(["copy", REMOTE, str(path), "--ignore-existing", "--create-empty-src-dirs"] + root_flags,
+                            timeout=TRANSFER_TIMEOUT)
             local = local_inventory(path, hash_files=True, cancel=self.engine.cancel)
             if set(local) != set(inventory["files"]) or any(local[name]["hash"] != value["hash"] for name, value in inventory["files"].items()):
                 raise Error("The initial download changed during preparation. Existing files were retained; review and recreate the pair.")
@@ -1048,7 +1109,7 @@ class Worker:
             with self.mutex:
                 pair["deletion_review"] = None
                 self.paths.save(self.state)
-        self.engine.run(arguments)
+        self.engine.run(arguments, timeout=TRANSFER_TIMEOUT)
         final_remote = self.api.inventory(pair["remote_folder_id"], backup, sentinel)
         final_local = local_inventory(path, sentinel=sentinel, cancel=self.engine.cancel)
         self.paths.atomic_json(manifest_path, {"local": final_local, "remote": final_remote["files"]})

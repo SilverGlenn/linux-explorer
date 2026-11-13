@@ -120,7 +120,7 @@ private Q_SLOTS:
         QCOMPARE(permissions(path), original);
     }
 
-    void propertySheetUsesTheLegacyDialogFontAcrossEveryTab()
+    void propertySheetUsesTheShellFontAcrossEveryTab()
     {
         QTemporaryDir directory;
         const QString path = directory.filePath(QStringLiteral("Readme.txt"));
@@ -132,7 +132,7 @@ private Q_SLOTS:
         dialog.show();
         QTest::qWait(30);
         const bool referenceFontAvailable = QFontDatabase::families().contains(
-            QStringLiteral("Microsoft Sans Serif"), Qt::CaseInsensitive);
+            QStringLiteral("Segoe UI"), Qt::CaseInsensitive);
         auto *tabs = dialog.findChild<QTabWidget *>(QStringLiteral("propertiesTabs"));
         QVERIFY(tabs);
         for (int index = 0; index < tabs->count(); ++index) {
@@ -141,11 +141,11 @@ private Q_SLOTS:
             for (QWidget *control : dialog.findChildren<QWidget *>()) {
                 if (!control->isVisible()) continue;
                 const QFont font = control->font();
-                QCOMPARE(font.pointSizeF(), 8.0);
+                QCOMPARE(font.pointSizeF(), 9.0);
                 QCOMPARE(font.weight(), QFont::Normal);
                 QVERIFY(!font.italic());
                 if (referenceFontAvailable)
-                    QCOMPARE(QFontInfo(font).family(), QStringLiteral("Microsoft Sans Serif"));
+                    QCOMPARE(QFontInfo(font).family(), QStringLiteral("Segoe UI"));
             }
         }
         QCOMPARE(parent.font(), explorerFont);

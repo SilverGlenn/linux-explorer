@@ -79,6 +79,7 @@ private:
     void createNewFolder();
     void showContextMenu(const QPoint &globalPos, bool onItem);
     bool inputGuardActive() const;
+    void rememberState(bool accepted);
 
     ChooserOptions m_options;
     QList<QUrl> m_selectedUrls;

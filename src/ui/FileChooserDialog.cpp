@@ -35,6 +35,7 @@
 #include <QCompleter>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QStandardPaths>
 #include <QFileInfo>
 #include <QGridLayout>
 #include <QGuiApplication>
@@ -140,6 +141,20 @@ bool localFileUrl(const QUrl &url)
 // a Save there without the user noticing where it lands, so such requests start
 // at home instead. Decided here, not per protocol, so the portal, the private
 // service and the presenter child all share it; open-file picks are unaffected.
+QUrl rememberedStart()
+{
+    const QUrl remembered = Settings::chooserFolder();
+    // A Drive folder is not stat'ed here; navigation reports it if it is gone
+    if (localFileUrl(remembered)
+        && (Locations::isGoogleDriveMount(remembered)
+            || readableDirectory(QFileInfo(remembered.toLocalFile()))))
+        return remembered;
+    const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (!downloads.isEmpty() && readableDirectory(QFileInfo(downloads)))
+        return QUrl::fromLocalFile(downloads);
+    return QUrl::fromLocalFile(QDir::homePath());
+}
+
 bool sensitiveStart(const QUrl &url)
 {
     if (!localFileUrl(url))
@@ -307,6 +322,16 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
             action->setChecked(action->data().toInt() == static_cast<int>(mode));
     });
     commandBar->row()->addWidget(viewButton);
+    const Settings::ViewMode rememberedMode = Settings::chooserViewMode();
+    if (rememberedMode != Settings::ViewMode::Details)
+        for (auto *action : modes->actions())
+            if (action->data().toInt() == static_cast<int>(rememberedMode)) {
+                action->trigger();
+                break;
+            }
+    const int rememberedColumn = Settings::chooserSortColumn();
+    m_files->sortBy(rememberedColumn >= 0 ? rememberedColumn : int(DirectoryModel::ModifiedTime),
+                    rememberedColumn >= 0 ? Settings::chooserSortOrder() : Qt::DescendingOrder);
     m_previewAction = new QAction(Aero::previewPaneIcon(), tr("Preview pane"), this);
     m_previewAction->setObjectName(QStringLiteral("chooserPreviewAction"));
     m_previewAction->setCheckable(true);
@@ -597,8 +622,9 @@ FileChooserDialog::FileChooserDialog(const ChooserOptions &options, QWidget *par
         || hasControl(extension))
         m_optionsSupported = false;
     choose->setEnabled(m_optionsSupported);
-    QUrl start = options.startingLocation.isEmpty()
-        ? QUrl::fromLocalFile(QDir::homePath()) : options.startingLocation;
+    // The application's own folder wins; otherwise where the last pick was
+    // made, from any application, and before any pick, Downloads
+    QUrl start = options.startingLocation.isEmpty() ? rememberedStart() : options.startingLocation;
     if ((options.mode != ChooserMode::OpenFile || options.directory) && sensitiveStart(start))
         start = QUrl::fromLocalFile(QDir::homePath());
     if (!m_navigation->initialize(start)) {
@@ -1116,10 +1142,21 @@ void FileChooserDialog::dismissOverwrite()
 
 void FileChooserDialog::reject() { done(QDialog::Rejected); }
 
+void FileChooserDialog::rememberState(bool accepted)
+{
+    if (m_model->sortColumn() >= 0)
+        Settings::setChooserSort(m_model->sortColumn(), m_model->sortOrder());
+    Settings::setChooserViewMode(m_files->viewMode());
+    // Only a pick moves the starting folder; browsing and cancelling do not
+    if (accepted && localFileUrl(currentUrl()))
+        Settings::setChooserFolder(currentUrl());
+}
+
 void FileChooserDialog::done(int result)
 {
     if (result == QDialog::Accepted && !m_validated) { accept(); return; }
     m_validated = false;
+    rememberState(result == QDialog::Accepted);
     dismissOverwrite();
     m_preview->setItems({});
     if (result != QDialog::Accepted) m_selectedUrls.clear();

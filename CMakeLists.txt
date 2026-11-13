@@ -173,7 +173,7 @@ install(PROGRAMS scripts/google-drive-sync.py
         DESTINATION bin RENAME explorer-win7-google-drive-sync)
 configure_file(scripts/google-drive-sync.py
     ${CMAKE_CURRENT_BINARY_DIR}/explorer-win7-google-drive-sync COPYONLY)
-install(FILES linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
+install(FILES linux-explorer-win7-dialog.desktop
         linux-explorer-win7-chooser-dialog.desktop
         DESTINATION share/applications)
 configure_file(cmake/InstallDesktopEntries.cmake.in
@@ -198,6 +198,15 @@ if(BUILD_TESTING)
     include(tests/list-tests.cmake)
     include(tests/navigation-tests.cmake)
     include(tests/browser-navigation-tests.cmake)
+    add_executable(file_manager_service_tests tests/FileManagerServiceTest.cpp)
+    target_link_libraries(file_manager_service_tests PRIVATE explorer_ui Qt6::Test)
+    target_compile_definitions(file_manager_service_tests PRIVATE
+        EXPLORER_BINARY="$<TARGET_FILE:explorer>")
+    add_dependencies(file_manager_service_tests explorer)
+    add_test(NAME file_manager_service_tests COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-ui-tests.sh $<TARGET_FILE:file_manager_service_tests>)
+    set_tests_properties(file_manager_service_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=Fusion" TIMEOUT 60)
     include(tests/google-drive-tests.cmake)
     include(tests/file-chooser-tests.cmake)
     include(tests/chooser-service-tests.cmake)

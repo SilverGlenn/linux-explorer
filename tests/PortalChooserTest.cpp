@@ -213,6 +213,7 @@ private Q_SLOTS:
     }
     void init()
     {
+        Settings::clearChooserMemory();
         m_suffix = QString::number(++m_serial);
         m_bus = QDBusConnection::connectToBus(QDBusConnection::SessionBus, QStringLiteral("portal-service-") + m_suffix);
         m_frontend = QDBusConnection::connectToBus(QDBusConnection::SessionBus, QStringLiteral("portal-frontend-") + m_suffix);
@@ -1110,7 +1111,8 @@ private Q_SLOTS:
         const Pending empty = begin("SaveFile", {{"current_folder", QByteArray(1, '\0')}, {"current_file", QByteArray(1, '\0')}, {"current_name", ""}});
         QTRY_VERIFY(m_service->dialogForRequest(empty.path));
         QVERIFY(!empty.watcher->isFinished());
-        QCOMPARE(m_service->dialogForRequest(empty.path)->currentUrl(), QUrl::fromLocalFile(QDir::homePath()));
+        // No folder of its own, so the request starts where the last pick was made
+        QCOMPARE(m_service->dialogForRequest(empty.path)->currentUrl(), QUrl::fromLocalFile(dir.filePath("existing-folder")));
         close(empty);
         const Pending retainedName = begin("SaveFile", {{"current_file", pathBytes(file)}, {"current_name", ""}});
         QTRY_VERIFY(m_service->dialogForRequest(retainedName.path));

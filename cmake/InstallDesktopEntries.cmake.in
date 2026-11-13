@@ -1,5 +1,24 @@
 # Resolve Exec at install time, including --prefix and DESTDIR packaging.
 # GDesktopAppInfo rejects bare commands missing from the desktop session PATH.
+set(applications "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications")
+# KDE can store a user's launch binding in the desktop entry itself. Read it
+# before replacing the launcher, without assigning a shortcut on fresh installs.
+set(browser_shortcut "")
+if(EXISTS "${applications}/linux-explorer-win7.desktop")
+    file(STRINGS "${applications}/linux-explorer-win7.desktop" browser_lines)
+    set(in_desktop_entry FALSE)
+    foreach(line IN LISTS browser_lines)
+        if(line STREQUAL "[Desktop Entry]")
+            set(in_desktop_entry TRUE)
+        elseif(line MATCHES "^\\[")
+            set(in_desktop_entry FALSE)
+        elseif(in_desktop_entry AND line MATCHES "^X-KDE-Shortcuts=")
+            set(browser_shortcut "${line}\n")
+            break()
+        endif()
+    endforeach()
+endif()
+file(MAKE_DIRECTORY "${applications}")
 set(executable "${CMAKE_INSTALL_PREFIX}/bin/explorer-win7")
 string(REPLACE "\\" "\\\\" executable "${executable}")
 string(REPLACE "\"" "\\\"" executable "${executable}")
@@ -9,5 +28,11 @@ foreach(desktop linux-explorer-win7.desktop linux-explorer-win7-dialog.desktop
     file(READ "@CMAKE_CURRENT_SOURCE_DIR@/${desktop}" content)
     string(REPLACE "Exec=explorer-win7"
         "Exec=\"${executable}\"" content "${content}")
-    file(WRITE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/share/applications/${desktop}" "${content}")
+    if(desktop STREQUAL "linux-explorer-win7.desktop")
+        string(REPLACE "[Desktop Entry]\n" "[Desktop Entry]\n${browser_shortcut}"
+            content "${content}")
+        list(APPEND CMAKE_INSTALL_MANIFEST_FILES
+            "${CMAKE_INSTALL_PREFIX}/share/applications/${desktop}")
+    endif()
+    file(WRITE "${applications}/${desktop}" "${content}")
 endforeach()
